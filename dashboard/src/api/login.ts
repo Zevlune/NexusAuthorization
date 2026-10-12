@@ -1,0 +1,46 @@
+import request from './request';
+
+export interface UserInfo {
+  sub: string;
+  name?: string;
+  email?: string;
+}
+
+export interface LoginResponse {
+  isAuthenticated: boolean;
+  user: UserInfo;
+}
+
+export interface ConfigResponse {
+  authority: string;
+  clientId: string;
+}
+
+export interface LogoutResponse {
+  logoutUrl: string;
+}
+
+export const getConfig = (): Promise<ConfigResponse> => {
+  return request.get<ConfigResponse>('/auth/config');
+};
+
+export const startLogin = (): Promise<{ authorizeUrl: string }> => {
+  return request.get<{ authorizeUrl: string }>('/auth/login');
+};
+
+export const getCurrentUser = (): Promise<LoginResponse> => {
+  return request.get<LoginResponse>('/auth/me');
+};
+
+export const logout = (): Promise<LogoutResponse> => {
+  return request.post<LogoutResponse>('/auth/logout');
+};
+
+export const checkAuth = async (): Promise<boolean> => {
+  try {
+    const result = await getCurrentUser();
+    return result.isAuthenticated;
+  } catch {
+    return false;
+  }
+};

@@ -1,0 +1,509 @@
+.layout-container {
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  color: var(--app-text);
+  background: var(--app-page);
+
+  .layout-body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .layout-header {
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    height: 60px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--app-border);
+    background: var(--app-surface);
+  }
+
+  .layout-header-left,
+  .layout-header-right {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .layout-header-left {
+    flex: 1;
+
+    .logo-wrap {
+      flex-shrink: 0;
+    }
+  }
+
+  .layout-header-right {
+    align-items: center;
+    gap: 8px;
+    margin-left: 16px;
+
+    .t-popup__reference {
+      display: flex;
+      align-items: center;
+    }
+  }
+
+  .layout-header-edit {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+
+    .t-space {
+      align-items: center;
+      gap: 8px !important;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .t-space-item {
+      display: flex;
+      align-items: center;
+    }
+
+    .t-input__wrap {
+      border-radius: 6px;
+      background: var(--app-surface-subtle);
+    }
+
+    .t-input {
+      border-color: transparent;
+      background: transparent;
+    }
+
+    .layout-current-service-resource {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      max-width: 220px;
+      gap: 6px;
+      color: var(--app-text-secondary);
+      white-space: nowrap;
+    }
+
+    .layout-current-service-resource-label {
+      flex: 0 0 auto;
+      font-size: 12px;
+    }
+
+    .layout-current-service-resource-value {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--app-text);
+      font-size: 13px;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .layout-service-resource-switch.t-button {
+      flex-shrink: 0;
+      padding: 0 6px;
+      color: var(--app-accent);
+      white-space: nowrap;
+
+      &:hover {
+        color: var(--app-accent);
+        background: var(--app-accent-soft);
+      }
+    }
+
+    .layout-header-tool-button.t-button {
+      width: 32px;
+      min-width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      color: var(--app-text-secondary);
+      background: transparent;
+
+      .t-icon {
+        display: block;
+        width: 18px;
+        height: 18px;
+        flex: 0 0 18px;
+        color: currentColor;
+      }
+
+      .t-icon path {
+        stroke: currentColor;
+      }
+
+      &:hover,
+      &:focus-visible {
+        color: var(--app-accent);
+        background: var(--app-accent-soft);
+      }
+    }
+
+    .t-button {
+      color: var(--app-text-secondary);
+
+      &:hover {
+        color: var(--app-accent);
+        background: var(--app-accent-soft);
+      }
+    }
+  }
+
+  .layout-sider {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 240px;
+    height: auto;
+    overflow: hidden;
+    border-right: 1px solid var(--app-border);
+    background: var(--app-sidebar);
+    transition: width 180ms ease;
+
+    &.is-collapsed {
+      width: 64px;
+    }
+  }
+
+  .layout-sider-menu {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+
+    &:hover {
+      scrollbar-color: var(--td-scrollbar-color) transparent;
+    }
+
+    .t-default-menu {
+      width: 100%;
+      max-width: 100%;
+      background: transparent;
+    }
+
+    .t-default-menu .t-menu__item,
+    .t-default-menu .t-submenu__title {
+      position: relative;
+      min-height: 40px;
+      margin: 2px 0;
+      overflow: hidden;
+      border-radius: 6px;
+      color: var(--app-text-secondary);
+      transition: background-color 140ms ease, color 140ms ease;
+    }
+
+    .t-default-menu .t-menu__item:hover:not(.t-is-disabled),
+    .t-default-menu .t-submenu__title:hover:not(.t-is-disabled) {
+      color: var(--app-text);
+      background: var(--app-nav-hover);
+    }
+
+    .t-default-menu .t-menu__item.t-is-active,
+    .t-default-menu .t-submenu__title.t-is-active {
+      color: var(--app-nav-selected-text);
+      background: var(--app-nav-selected-bg);
+      font-weight: 600;
+    }
+
+    .t-default-menu .t-menu__item.t-is-active::before,
+    .t-default-menu .t-submenu__title.t-is-active::before {
+      position: absolute;
+      top: 8px;
+      bottom: 8px;
+      left: 0;
+      content: '';
+      width: 3px;
+      border-radius: 0 3px 3px 0;
+      background: var(--app-accent);
+    }
+
+    .t-default-menu .t-menu__item .t-icon,
+    .t-default-menu .t-submenu__title .t-icon,
+    .t-default-menu .t-menu__item.t-is-active .t-icon,
+    .t-default-menu .t-submenu__title.t-is-active .t-icon {
+      color: currentColor;
+    }
+  }
+
+  .layout-sider-trigger-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    height: 44px;
+    border: 0;
+    border-top: 1px solid var(--app-border);
+    color: var(--app-text-muted);
+    background: var(--app-sidebar);
+    cursor: pointer;
+    transition: background-color 140ms ease, color 140ms ease;
+
+    &:hover {
+      color: var(--app-text);
+      background: var(--app-surface-subtle);
+    }
+  }
+
+  .layout-main {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--app-page);
+  }
+
+  .layout-content {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--app-page);
+  }
+
+  .layout-content-tabs {
+    flex-shrink: 0;
+    min-height: 44px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--app-border);
+    background: var(--app-surface);
+
+    .t-tabs {
+      width: 100%;
+      background: transparent;
+    }
+
+    .t-tabs__header {
+      margin: 0;
+      background: transparent;
+    }
+
+    .t-tabs__nav-wrap {
+      padding: 0;
+      color: var(--app-text-secondary);
+      background: transparent;
+    }
+
+    .t-tabs__nav-item {
+      height: 44px;
+      padding: 0 14px;
+      border-radius: 4px 4px 0 0;
+      color: var(--app-text-secondary);
+      transition: background-color 140ms ease, color 140ms ease;
+    }
+
+    .t-tabs__nav-item:not(.t-is-disabled):not(.t-is-active):hover {
+      color: var(--app-text);
+      background: var(--app-nav-hover);
+    }
+
+    .t-tabs__nav-item:not(.t-is-disabled):not(.t-is-active):hover .t-tabs__nav-item-wrapper {
+      background: transparent;
+    }
+
+    .t-tabs__nav-item.t-is-active {
+      color: var(--app-tab-selected-text);
+      background: var(--app-nav-hover);
+      font-weight: 600;
+      text-shadow: none;
+    }
+
+    .t-tabs__nav-item.t-is-active .t-tabs__nav-item-wrapper {
+      background: transparent;
+    }
+
+    .t-tabs__nav-item-wrapper {
+      padding: 0 2px;
+      border-radius: 4px 4px 0 0;
+
+      > .t-ripple {
+        display: none;
+      }
+    }
+
+    .t-tabs__nav-item .remove-btn,
+    .t-tabs__nav-item .t-icon-close {
+      color: var(--app-text-muted);
+    }
+
+    .t-tabs__nav-item .remove-btn:hover,
+    .t-tabs__nav-item .t-icon-close:hover {
+      color: var(--app-text);
+    }
+
+    .t-tabs__bar {
+      height: 2px;
+      border-radius: 2px 2px 0 0;
+      background: var(--app-accent);
+    }
+
+    .t-tabs__operations,
+    .t-tabs__btn {
+      color: var(--app-text-secondary);
+      background: var(--app-surface);
+    }
+
+    .t-tabs__content {
+      display: none;
+    }
+  }
+
+  .layout-content-inner {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--app-page);
+  }
+
+  .layout-main-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    overflow-x: hidden;
+    padding: 20px;
+    background: var(--app-page);
+    scrollbar-gutter: stable;
+
+    > div {
+      min-height: 100%;
+      background: transparent;
+    }
+
+    .page-filter-bar {
+      margin: 0 0 16px;
+      padding: 14px 16px;
+      border: 1px solid var(--app-border);
+      border-radius: 8px;
+      background: var(--app-surface);
+
+      .t-form {
+        row-gap: 8px;
+      }
+
+      .t-form__item {
+        margin-bottom: 0;
+      }
+    }
+
+    .page-table-section {
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .page-table-section > div:last-child {
+      margin-top: 14px !important;
+    }
+  }
+}
+
+.layout-avatar {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--app-border);
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.layout-avatar-trigger.t-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+@media (max-width: 900px) {
+  .layout-container {
+    .layout-sider {
+      width: 192px;
+    }
+
+    .layout-header-edit .t-input {
+      width: 160px !important;
+    }
+
+    .layout-header-edit .layout-current-service-resource {
+      max-width: 160px;
+    }
+  }
+}
+
+@media (max-width: 640px) {
+  .layout-container {
+    .layout-header {
+      height: 56px;
+      padding: 0 12px;
+    }
+
+    .layout-header-edit .t-input__wrap {
+      display: none;
+    }
+
+    .layout-header-edit .layout-current-service-resource {
+      display: none;
+    }
+
+    .layout-header-edit .layout-current-service-resource-label {
+      display: none;
+    }
+
+    .layout-header-right {
+      margin-left: 8px;
+    }
+
+    .layout-sider,
+    .layout-sider.is-collapsed {
+      width: 56px;
+    }
+
+    .layout-sider-trigger-bottom {
+      display: none;
+    }
+
+    .layout-header-edit [aria-label='进入全屏'],
+    .layout-header-edit [aria-label='退出全屏'] { display: none; }
+
+    .layout-content-tabs {
+      padding: 0 8px;
+
+      .t-tabs__nav-item {
+        padding: 0 10px;
+      }
+    }
+
+    .layout-main-content {
+      padding: 12px;
+
+      .page-filter-bar {
+        padding: 12px;
+
+        .t-form__item {
+          width: 100%;
+        }
+
+        .t-input,
+        .t-select {
+          width: 100% !important;
+        }
+      }
+    }
+  }
+
+  .layout-sider-brand {
+    min-height: 56px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+}

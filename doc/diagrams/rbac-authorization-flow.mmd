@@ -1,0 +1,21 @@
+flowchart LR
+    A["业务请求<br/>subject + domain + method + path"] --> B["认证中间件<br/>确认用户身份"]
+    B --> C["Runtime Snapshot<br/>按 method + path 查 API"]
+    C --> D["接口权限策略<br/>取关联权限 + matchMode"]
+    D --> E["查询用户角色<br/>subject + domain"]
+    E --> F["汇总角色权限编码"]
+    F --> G{"满足策略？<br/>all / any"}
+    G -->|"允许"| H["进入业务 Handler"]
+    G -->|"拒绝"| I["返回 403"]
+    C -->|"API 或策略不存在"| I
+    E -->|"无角色"| I
+
+    class A client
+    class B gateway
+    class C,D,E,F core
+    class H client
+    class I failure
+    classDef client fill:#e9f6f1,stroke:#2f6f5e,color:#173f35,stroke-width:1.5px
+    classDef gateway fill:#eaf2ff,stroke:#3567a7,color:#1d3b66,stroke-width:1.5px
+    classDef core fill:#edf1f5,stroke:#596773,color:#303b44,stroke-width:1.5px
+    classDef failure fill:#fff0f0,stroke:#b84b4b,color:#6f2020,stroke-width:1.5px

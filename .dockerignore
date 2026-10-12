@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.idea
+.vscode
+dashboard
+**/node_modules
+**/dist
+*.log
+coverage.*
+README.md
+doc
+ui
+release

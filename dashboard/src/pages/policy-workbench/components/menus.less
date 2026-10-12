@@ -1,0 +1,42 @@
+.resource-menus, .resource-menus-drawer {
+  --td-bg-color-container: var(--app-surface);
+  --td-bg-color-container-hover: var(--app-surface-subtle);
+  --td-bg-color-component: var(--app-surface-muted);
+  --td-bg-color-component-hover: var(--app-surface-subtle);
+  --td-text-color-primary: var(--app-text);
+  --td-text-color-secondary: var(--app-text-secondary);
+  --td-text-color-placeholder: var(--app-text-muted);
+  --td-component-stroke: var(--app-border);
+  --td-component-border: var(--app-border-strong);
+  --td-brand-color: var(--app-accent);
+  --td-brand-color-hover: var(--app-accent-hover);
+  --td-brand-color-light: var(--app-accent-soft);
+  --td-error-color: var(--app-danger);
+}
+
+.resource-menus-panel { margin-top: 16px; overflow: hidden; border: 1px solid var(--app-border); border-radius: 8px; background: var(--app-surface); }
+.resource-menus-toolbar { display: flex; align-items: center; gap: 16px; padding: 16px; border-bottom: 1px solid var(--app-border); }
+.resource-menus-toolbar .t-input { max-width: 360px; }
+.resource-menus-tree-actions { display: flex; align-items: center; gap: 2px; }
+.resource-menus-count { margin-left: auto; color: var(--app-text-muted); font-size: 12px; }
+.resource-menus-table-wrap { overflow-x: auto; }
+.resource-menus-table { min-width: 920px; color: var(--app-text); font-size: 13px; }
+.resource-menus-table code { color: var(--app-text-secondary); font-size: 12px; }
+.resource-menus-form { color: var(--app-text); }
+.resource-menus-help { color: var(--app-text-muted); font-size: 12px; line-height: 18px; }
+.resource-menus-form .t-radio-group { display: flex; width: 100%; }
+.resource-menus-form .t-radio-button { flex: 1; }
+.resource-menus-switch-field { display: flex !important; align-items: center; justify-content: space-between; }
+.resource-menus-form-error { margin: 0; }
+.resource-menus-drawer-footer { display: flex; justify-content: space-between; gap: 12px; width: 100%; }
+.resource-menus-delete-dialog { color: var(--app-text); line-height: 22px; }
+.resource-menus-delete-dialog .t-alert { margin-top: 12px; }
+
+@media (max-width: 640px) {
+  .resource-menus-drawer { width: 100vw !important; max-width: 100vw; }
+  .resource-menus-toolbar { align-items: stretch; flex-direction: column; gap: 10px; }
+  .resource-menus-toolbar .t-input { max-width: none; }
+  .resource-menus-count { margin-left: 0; }
+  .resource-menus-drawer-footer { gap: 8px; }
+  .resource-menus-drawer-footer .t-button { flex: 1; }
+}

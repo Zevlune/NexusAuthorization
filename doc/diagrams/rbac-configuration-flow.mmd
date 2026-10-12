@@ -1,0 +1,20 @@
+flowchart LR
+    A["选择<br/>服务资源"] --> B["导入 Swagger<br/>API 资源"]
+    B --> C["新建<br/>权限编码"]
+    C --> D["绑定权限编码<br/>与多个 API"]
+    D --> E["新建角色<br/>分配权限编码"]
+    E --> F["用户列表<br/>绑定角色"]
+    F --> G["校验草稿"]
+    G -->|"通过"| H["发布版本"]
+    G -->|"错误"| C
+    H --> I[("RDS 关系数据<br/>+ 不可变快照")]
+    I -. "加载" .-> J["内存 Runtime<br/>Snapshot"]
+
+    class A client
+    class B,C,D,E,F gateway
+    class G,H,J core
+    class I storage
+    classDef client fill:#e9f6f1,stroke:#2f6f5e,color:#173f35,stroke-width:1.5px
+    classDef gateway fill:#eaf2ff,stroke:#3567a7,color:#1d3b66,stroke-width:1.5px
+    classDef core fill:#edf1f5,stroke:#596773,color:#303b44,stroke-width:1.5px
+    classDef storage fill:#fff4d6,stroke:#8a6a1d,color:#4d3b0e,stroke-width:1.5px

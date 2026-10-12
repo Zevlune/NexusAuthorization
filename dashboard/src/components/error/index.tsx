@@ -1,0 +1,8 @@
+import { Button, Empty } from 'tdesign-react';
+import { useNavigate } from 'react-router-dom';
+
+const ErrorPage = () => {
+  const navigate = useNavigate();
+  return <Empty type="fail" title="404" description="对不起，你访问的页面不存在。" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', height: '100%' }} action={<Button theme="primary" onClick={() => navigate('/')}>首页</Button>} />;
+};
+export default ErrorPage;
