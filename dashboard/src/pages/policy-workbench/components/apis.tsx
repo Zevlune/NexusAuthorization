@@ -1,4 +1,4 @@
-import { useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import {
   Button,
   Card,
@@ -9,6 +9,7 @@ import {
   Form,
   Input,
   MessagePlugin,
+  Radio,
   Select,
   Space,
   Switch,
@@ -18,8 +19,8 @@ import {
   Textarea,
 } from 'tdesign-react';
 import type { TableProps } from 'tdesign-react/es/table/interface';
-import { AddIcon, DeleteIcon, EditIcon, UploadIcon, SearchIcon, RefreshIcon } from 'tdesign-icons-react';
-import { useLocation } from 'react-router-dom';
+import { AddIcon, CloseCircleIcon, DeleteIcon, EditIcon, FileIcon, UploadIcon, SearchIcon, RefreshIcon } from 'tdesign-icons-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { deleteEndpoint, importSwagger, saveEndpoint, type Endpoint } from '../../../api/rbac-v1';
 import { Empty, fail, Guard, Page, type State } from '../shared';
 import './apis.less';
@@ -40,6 +41,28 @@ type EndpointTableRow = Endpoint & Record<string, unknown>;
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE'];
 const PAGE_SIZE = 25;
+const MAX_SWAGGER_DOCUMENT_BYTES = 8 * 1024 * 1024;
+const SWAGGER_FILE_PATTERN = /\.(json|ya?ml)$/i;
+
+type ImportMode = 'url' | 'file';
+
+// 轻量格式嗅探：真正的结构校验仍由后端完成，这里只拦截明显不匹配的文件。
+const looksLikeOpenAPIDocument = (text: string): boolean => {
+  const value = text.trim();
+  if (!value) return false;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown> | null;
+    if (parsed && typeof parsed === 'object') {
+      return Boolean(parsed.openapi || parsed.swagger) && Boolean(parsed.paths);
+    }
+  } catch {
+    // 非 JSON，继续按 YAML 嗅探。
+  }
+  // YAML 兼容引号包裹的 key，例如 "openapi": 或 openapi:
+  const hasVersion = /["']?\b(openapi|swagger)\b["']?\s*:/.test(value);
+  const hasPaths = /["']?\bpaths\b["']?\s*:/.test(value);
+  return hasVersion && hasPaths;
+};
 
 const methodTheme = (method: string): 'primary' | 'success' | 'warning' | 'danger' | 'default' => (
   { GET: 'primary', POST: 'success', PUT: 'warning', PATCH: 'warning', DELETE: 'danger' }[method] || 'default'
@@ -74,7 +97,7 @@ const Field = ({ label, required, error, children }: { label: string; required?:
   </Form.FormItem>
 );
 
-export default function APIs({ state }: { state: State }) {
+export default function APIs({ state, openAPI = false }: { state: State; openAPI?: boolean }) {
   const activeServices = useMemo(() => state.services.filter((service) => service.isActive), [state.services]);
   const [search, setSearch] = useState('');
   const [draftSearch, setDraftSearch] = useState('');
@@ -90,11 +113,18 @@ export default function APIs({ state }: { state: State }) {
   const [saving, setSaving] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importService, setImportService] = useState('');
+  const [importMode, setImportMode] = useState<ImportMode>('url');
   const [swaggerURL, setSwaggerURL] = useState('');
+  const [swaggerDocument, setSwaggerDocument] = useState('');
+  const [swaggerFileName, setSwaggerFileName] = useState('');
   const [importError, setImportError] = useState('');
   const [importing, setImporting] = useState(false);
+  const [importFailed, setImportFailed] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const fileReadSeq = useRef(0);
   const location = useLocation();
+  const navigate = useNavigate();
 
   const queryService = useMemo(() => new URLSearchParams(location.search).get('service')?.trim() || '', [location.search]);
   const effectiveServiceFilter = serviceFilterSearch === location.search
@@ -117,7 +147,7 @@ export default function APIs({ state }: { state: State }) {
   const endpointColumns: TableProps<EndpointTableRow>['columns'] = [
     {
       colKey: 'endpoint',
-      title: '摘要 / 路径',
+      title: openAPI ? '接口名称 / 路径' : '摘要 / 路径',
       minWidth: 260,
       cell: ({ row }) => <div className="resource-apis-endpoint-cell"><strong>{row.summary || row.endpoint_key || '-'}</strong><code>{row.path_template || '-'}</code></div>,
     },
@@ -232,8 +262,12 @@ export default function APIs({ state }: { state: State }) {
 
   const openImport = () => {
     setImportService('');
+    setImportMode('url');
     setSwaggerURL('');
+    setSwaggerDocument('');
+    setSwaggerFileName('');
     setImportError('');
+    setImportFailed(false);
     setImportResult(null);
     setImportOpen(true);
   };
@@ -242,25 +276,83 @@ export default function APIs({ state }: { state: State }) {
     if (!importing) setImportOpen(false);
   };
 
+  const resetSelectedFile = () => {
+    setSwaggerDocument('');
+    setSwaggerFileName('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const clearImportFile = () => {
+    if (importing || importResult) return;
+    resetSelectedFile();
+    setImportError('');
+    setImportFailed(false);
+  };
+
+  const selectImportFile = async (file: File | null | undefined) => {
+    if (!file) return;
+    const seq = fileReadSeq.current + 1;
+    fileReadSeq.current = seq;
+    const reject = (message: string) => {
+      if (fileReadSeq.current !== seq) return;
+      resetSelectedFile();
+      setImportError(message);
+      setImportFailed(false);
+    };
+    if (!SWAGGER_FILE_PATTERN.test(file.name)) {
+      reject('仅支持 JSON 或 YAML 格式的 OpenAPI 文档');
+      return;
+    }
+    if (file.size > MAX_SWAGGER_DOCUMENT_BYTES) {
+      reject('文档超过 8MB 上限');
+      return;
+    }
+    try {
+      const text = await file.text();
+      if (fileReadSeq.current !== seq) return;
+      if (!looksLikeOpenAPIDocument(text)) {
+        reject('文件内容不是有效的 OpenAPI/Swagger 文档');
+        return;
+      }
+      setSwaggerDocument(text);
+      setSwaggerFileName(file.name);
+      setImportError('');
+      setImportFailed(false);
+    } catch {
+      reject('读取文件失败，请重试');
+    }
+  };
+
   const submitImport = async () => {
     if (importing || importResult) return;
-    const url = swaggerURL.trim();
     setImportError('');
+    setImportFailed(false);
     if (!importService) {
       setImportError('请选择目标服务');
       return;
     }
-    if (!/^https?:\/\/[^\s]+$/i.test(url)) {
-      setImportError('请输入有效的 http(s) 地址');
+    const url = swaggerURL.trim();
+    if (importMode === 'url') {
+      if (!/^https?:\/\/[^\s]+$/i.test(url)) {
+        setImportError('请输入有效的 http(s) 地址');
+        return;
+      }
+    } else if (!swaggerDocument.trim()) {
+      setImportError('请选择要导入的 OpenAPI 文档');
       return;
     }
     setImporting(true);
     try {
-      const result = await importSwagger(state.appKey, importService, url);
+      const result = await importSwagger(
+        state.appKey,
+        importService,
+        importMode === 'url' ? { swagger_url: url } : { swagger_document: swaggerDocument },
+      );
       setImportResult(result);
       await state.reload();
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : '导入 Swagger 失败');
+      setImportError(error instanceof Error ? error.message : '导入 OpenAPI 文档失败');
+      setImportFailed(true);
     } finally {
       setImporting(false);
     }
@@ -270,7 +362,11 @@ export default function APIs({ state }: { state: State }) {
     if (importing) return;
     setImportResult(null);
     setSwaggerURL('');
+    setSwaggerDocument('');
+    setSwaggerFileName('');
     setImportError('');
+    setImportFailed(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const setFilterService = (value: unknown) => {
@@ -283,11 +379,12 @@ export default function APIs({ state }: { state: State }) {
     <Guard state={state}>
       <div className="resource-apis">
         <Page
-          title="API 接口"
+          title={openAPI ? '开放 API 权限' : 'API 接口'}
           actions={(
             <Space>
-              <Button variant="outline" icon={<UploadIcon />} disabled={!activeServices.length} onClick={openImport}>导入 Swagger</Button>
-              <Button theme="primary" icon={<AddIcon />} disabled={!activeServices.length} onClick={openCreate}>新增 API</Button>
+              {openAPI && <Button variant="outline" onClick={() => navigate('/api-permission-groups')}>维护 API 权限组</Button>}
+              <Button variant="outline" icon={<UploadIcon />} disabled={!activeServices.length} onClick={openImport}>{openAPI ? '导入 OpenAPI' : '导入 Swagger'}</Button>
+              <Button theme="primary" icon={<AddIcon />} disabled={!activeServices.length} onClick={openCreate}>{openAPI ? '新增开放 API' : '新增 API'}</Button>
             </Space>
           )}
         >
@@ -331,7 +428,7 @@ export default function APIs({ state }: { state: State }) {
         <Drawer
           className="resource-apis resource-apis-drawer"
           visible={Boolean(edit)}
-          header={edit?.id ? '编辑 API 接口' : '新增 API 接口'}
+          header={openAPI ? (edit?.id ? '编辑开放 API' : '新增开放 API') : (edit?.id ? '编辑 API 接口' : '新增 API 接口')}
           size="560px"
           footer={edit ? <Footer cancel={closeEdit} submit={() => void submitEdit()} loading={saving} submitText="保存" /> : null}
           onClose={closeEdit}
@@ -341,7 +438,9 @@ export default function APIs({ state }: { state: State }) {
           {edit ? <Form className="resource-apis-form" labelAlign="top">
             {editError ? <Alert className="resource-apis-form-error" theme="error" message={editError} /> : null}
             <Field label="接口标识" required error={errors.endpoint_key}><Input disabled={saving} value={edit.endpoint_key} placeholder="例如 orders.list" maxlength={200} onChange={(value) => updateDraft(setEdit, { endpoint_key: value })} /></Field>
-            <Field label="摘要"><Textarea disabled={saving} value={edit.summary} placeholder="用于列表展示和权限说明" maxlength={300} onChange={(value) => updateDraft(setEdit, { summary: value })} /></Field>
+            {openAPI
+              ? <Field label="接口名称"><Input disabled={saving} value={edit.summary} placeholder="用于列表展示和权限说明，缺省时回退接口标识" maxlength={300} onChange={(value) => updateDraft(setEdit, { summary: value })} /></Field>
+              : <Field label="摘要"><Textarea disabled={saving} value={edit.summary} placeholder="用于列表展示和权限说明" maxlength={300} onChange={(value) => updateDraft(setEdit, { summary: value })} /></Field>}
             <Field label="目标服务" required error={errors.service_resource}><Select disabled={saving || Boolean(edit.id)} value={edit.service_resource} placeholder="请选择服务" options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={(value) => updateDraft(setEdit, { service_resource: String(value || '') })} /></Field>
             <div className="resource-apis-form-grid">
               <Field label="HTTP 方法" required error={errors.method}><Select disabled={saving} value={edit.method} options={METHODS.map((method) => ({ label: method, value: method }))} onChange={(value) => updateDraft(setEdit, { method: String(value) })} /></Field>
@@ -355,17 +454,42 @@ export default function APIs({ state }: { state: State }) {
         <Drawer
           className="resource-apis resource-apis-drawer"
           visible={importOpen}
-          header="导入 Swagger"
+          header={openAPI ? '导入 OpenAPI' : '导入 Swagger'}
           size="560px"
-          footer={<Footer cancel={closeImport} submit={() => void (importResult ? resetImport() : submitImport())} loading={importing} submitText={importResult ? '再导入' : '开始导入'} />}
+          footer={<Footer cancel={closeImport} submit={() => void (importResult ? resetImport() : submitImport())} loading={importing} submitText={importResult ? '再导入' : importFailed ? '重试导入' : '开始导入'} />}
           onClose={closeImport}
           onCancel={closeImport}
           destroyOnClose
         >
           <Form className="resource-apis-form" labelAlign="top">
-            <Field label="目标服务" required error={importError && !importService ? importError : undefined}><Select disabled={importing || Boolean(importResult)} value={importService} placeholder="请选择已关联且启用的服务" options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={(value) => { setImportService(String(value || '')); setImportError(''); }} /></Field>
-            <Field label="Swagger URL" required error={importError && importService ? importError : undefined}><Input disabled={importing || Boolean(importResult)} value={swaggerURL} placeholder="https://example.com/openapi.json" onChange={(value) => { setSwaggerURL(value); setImportError(''); }} /></Field>
-            <p className="resource-apis-import-note">导入到共享服务目录，不会自动授予应用或角色权限。</p>
+            <Field label="目标服务" required error={importError && !importService ? importError : undefined}><Select disabled={importing || Boolean(importResult)} value={importService} placeholder="请选择已关联且启用的服务" options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={(value) => { setImportService(String(value || '')); setImportError(''); setImportFailed(false); }} /></Field>
+            <Form.FormItem label="导入方式">
+              <Radio.Group variant="outline" value={importMode} disabled={importing || Boolean(importResult)} onChange={(value) => { setImportMode(value as ImportMode); setImportError(''); setImportFailed(false); }}>
+                <Radio.Button value="url">URL 地址</Radio.Button>
+                <Radio.Button value="file">本地文件</Radio.Button>
+              </Radio.Group>
+            </Form.FormItem>
+            {importMode === 'url' ? (
+              <Field label="Swagger URL" required error={importError && importService ? importError : undefined}><Input disabled={importing || Boolean(importResult)} value={swaggerURL} placeholder="https://example.com/openapi.json" onChange={(value) => { setSwaggerURL(value); setImportError(''); setImportFailed(false); }} /></Field>
+            ) : (
+              <Field label="OpenAPI 文档" required error={importError && importService ? importError : undefined}>
+                <div className="resource-apis-file-picker">
+                  <input
+                    ref={fileInputRef}
+                    className="resource-apis-file-input"
+                    type="file"
+                    accept=".json,.yaml,.yml,application/json,application/x-yaml,text/yaml"
+                    disabled={importing || Boolean(importResult)}
+                    onChange={(event) => { void selectImportFile(event.target.files?.[0]); }}
+                  />
+                  <Button variant="outline" icon={<FileIcon />} disabled={importing || Boolean(importResult)} onClick={() => fileInputRef.current?.click()}>选择文件</Button>
+                  <span className={`resource-apis-file-name${swaggerFileName ? '' : ' is-placeholder'}`}>{swaggerFileName || '支持 JSON / YAML，最大 8MB'}</span>
+                  {swaggerFileName && !importing && !importResult ? <Button variant="text" icon={<CloseCircleIcon />} onClick={clearImportFile} aria-label="移除已选文件" /> : null}
+                </div>
+              </Field>
+            )}
+            <p className="resource-apis-import-note">导入到共享服务目录，不会自动授予应用、角色或 Token 权限。</p>
+            {importError && importFailed ? <Alert className="resource-apis-form-error" theme="error" message={importError} /> : null}
             {importResult ? <Descriptions
               className="resource-apis-import-result"
               title="导入完成"

@@ -1,0 +1,27 @@
+.token-editor-heading { margin-bottom: 22px; h2 { margin: 0 0 8px; font-size: 24px; color: var(--app-text); } p { margin: 0; color: var(--app-text-muted); } }
+.token-editor-card { margin-bottom: 20px; }
+.token-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 28px; .t-form__controls-content { display: block; } .t-input__wrap, .t-select__wrap { width: 100%; min-width: 0; } }
+.token-editor-fixed-type { padding: 4px 0; }
+.token-editor-control { width: 100%; min-width: 0; }
+.token-editor-expiry { width: 100%; }
+.token-editor-empty { text-align: center; padding-bottom: 16px; }
+.token-editor-note { margin: 0 0 20px; color: var(--app-text-muted); line-height: 1.7; }
+.token-legacy-notice { margin-bottom: 18px; }
+.token-policy-templates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.token-policy-template { display: flex; gap: 16px; align-items: center; padding: 20px; text-align: left; border: 1px solid var(--app-border); border-radius: 8px; background: var(--app-surface); color: var(--app-text); font: inherit; min-width: 0; > .t-icon { width: 44px; height: 44px; padding: 10px; border: 1px solid var(--app-border); border-radius: 8px; flex-shrink: 0; } > span { display: grid; gap: 8px; min-width: 0; } strong { font-weight: 600; } small { color: var(--app-text-muted); overflow-wrap: anywhere; } }
+button.token-policy-template { cursor: pointer; &:hover { border-color: var(--td-brand-color); background: var(--app-surface-subtle); } &:disabled { cursor: default; opacity: .55; } }
+.token-policy-list { display: grid; gap: 18px; margin-top: 24px; }
+.token-policy { border: 1px solid var(--app-border); border-radius: 8px; overflow: hidden; }
+.token-policy-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 22px; background: var(--app-surface-subtle); > div:first-child { display: grid; gap: 6px; } small { color: var(--app-text-muted); } }
+.token-policy-summary { margin: 0; padding: 18px 22px; line-height: 1.8; overflow-wrap: anywhere; }
+.token-policy-body { padding: 22px; }
+.token-policy-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; .t-form__controls-content { display: block; } .t-input__wrap, .t-select__wrap { width: 100%; min-width: 0; } }
+.token-policy-toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding-bottom: 18px; border-bottom: 1px solid var(--app-border); > .t-input__wrap { flex: 1; min-width: 220px; } }
+.token-policy-count { color: var(--app-text-muted); }
+.token-policy-permissions { display: grid; gap: 0; > .t-checkbox { padding: 16px 0; border-bottom: 1px solid var(--app-border); align-items: flex-start; margin: 0; } .t-checkbox__label { min-width: 0; width: 100%; } }
+.token-policy-permission { display: grid; gap: 9px; margin-left: 4px; strong { font-weight: 500; } > span { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; } code { overflow-wrap: anywhere; } small { color: var(--app-text-muted); } }
+.token-policy-groups { display: grid; gap: 0; > .t-checkbox { padding: 16px 0; border-bottom: 1px solid var(--app-border); align-items: flex-start; margin: 0; } .t-checkbox__label { min-width: 0; width: 100%; } }
+.token-policy-group { display: grid; gap: 9px; margin-left: 4px; strong { font-weight: 500; } > span { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; } small { color: var(--app-text-muted); } }
+.token-policy-unavailable { margin-top: 14px; > div:not(.t-alert) { display: flex; align-items: center; justify-content: space-between; gap: 12px; } }
+.token-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; > span { color: var(--app-text-muted); } }
+@media (max-width: 800px) { .token-editor-grid, .token-policy-scope, .token-policy-templates { grid-template-columns: 1fr; } .token-policy-header, .token-editor-footer { align-items: flex-start; flex-direction: column; } .token-policy-body { padding: 16px; } }

@@ -1,5 +1,6 @@
 # NexusAuthorization 文档
 
+- [完整中文使用文档](user-guide.md)
 - [快速开始与使用流程](quick-start.md)
 - [Docker 部署与环境变量](docker-deployment-1.0.2.md)
 - [前端开发](frontend-development.md)
@@ -7,6 +8,8 @@
 - [功能与数据模型](current-system-overview.md)
 - [完整表结构](current-database-schema.md)
 - [应用边界 RBAC 设计](rbac-v1-design.md)
+- [开放 API Token 设计与实现](api-token-design.md)
+- [API Token 使用与服务接入](api-token-integration.md)
 - [接口参考](reference-api-rbac-v1.md)
 - [Go SDK 接入](sdk-application-integration.md)
 
@@ -35,7 +38,7 @@ The configuration flow is application first: associate enabled service resources
 
 Service resources can continue to come from the local catalog or NexusAuth, and existing deployment and authentication configuration remains applicable. The retired service-scoped RBAC routes must not be used for roles, menus, user bindings, releases, or simulation.
 
-Initialization uses a single schema script, `migrations/001_init.sql`. For a local rebuild, back up the existing database, recreate the `permission_center` database, and execute that script. The rebuild clears existing data; there is no `002_applications.sql` upgrade, legacy incremental migration, or old data seed to run. Restore or import old data only as an explicit, separately reviewed operation.
+The base schema uses `migrations/001_init.sql`. New installations must also apply `002_application_url.sql` and `003_api_tokens.sql`; existing installations apply the missing incremental migrations. For a local rebuild, back up the existing database, recreate the `permission_center` database, and execute that script. The rebuild clears existing data; there is no `002_applications.sql` upgrade, legacy incremental migration, or old data seed to run. Restore or import old data only as an explicit, separately reviewed operation.
 
 Run the backend and dashboard as direct processes in separate terminals during local development:
 
@@ -56,3 +59,5 @@ The Go runtime SDK change is breaking: `Client.Check` requires `Request.AppKey` 
 See [应用边界 API RBAC 设计](rbac-v1-design.md) for the data model and concrete endpoint contract, and [参考接口](reference-api-rbac-v1.md) for the lower-level API reference.
 
 Application Web entry addresses are optional `url` fields on application create/update/list APIs. Only absolute HTTP(S) URLs without embedded credentials are accepted. Enabled applications with a valid address offer an “打开应用” link in a new browser tab. Apply `migrations/002_application_url.sql` to existing databases before running the updated backend; it adds an empty-default column without changing existing applications. New databases include the field in `001_init.sql`.
+
+API Token management is available at `/api-tokens`. Tokens are scoped to one application and explicit service endpoints; Token validity and grants are checked without caching. Apply `migrations/003_api_tokens.sql` and configure Token administrator subjects and independent internal service keys before production use. See [API Token 使用与服务接入](api-token-integration.md).

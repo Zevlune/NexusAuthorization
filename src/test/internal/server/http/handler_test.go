@@ -59,6 +59,13 @@ func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {
 		{path: "/v1/applications/{key}", method: "put"},
 		{path: "/v1/applications/{key}/service-resources", method: "get"},
 		{path: "/v1/applications/{key}/service-resources", method: "put"},
+		{path: "/v1/api-tokens", method: "get"},
+		{path: "/v1/api-tokens", method: "post"},
+		{path: "/v1/api-tokens/{id}", method: "get"},
+		{path: "/v1/api-tokens/{id}", method: "put"},
+		{path: "/v1/api-tokens/{id}/status", method: "post"},
+		{path: "/v1/api-tokens/{id}/revoke", method: "post"},
+		{path: "/v1/api-tokens/{id}/rotate", method: "post"},
 		{path: "/v1/rbac-v1/menus", method: "get"},
 		{path: "/v1/rbac-v1/menus", method: "post"},
 		{path: "/v1/rbac-v1/menus/{id}", method: "delete"},
@@ -75,6 +82,36 @@ func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {
 			t.Fatalf("OpenAPI operation missing: %s %s", strings.ToUpper(operation.method), operation.path)
 		}
 	}
+	if _, ok := paths["/internal/v1/api-tokens/authorize"]; ok {
+		t.Fatal("internal API token authorization path must not be public in OpenAPI")
+	}
+	tokenList := paths["/v1/api-tokens"].(map[string]any)["get"].(map[string]any)
+	if !hasRequiredQueryParameter(tokenList, "app_key") {
+		t.Fatal("API token list must require app_key")
+	}
+	components := document["components"].(map[string]any)["schemas"].(map[string]any)
+	if _, ok := components["APITokenCreated"]; !ok {
+		t.Fatal("APITokenCreated schema missing")
+	}
+	permission := components["APITokenPermission"].(map[string]any)
+	action := permission["properties"].(map[string]any)["action"].(map[string]any)
+	if len(action["enum"].([]any)) != 2 {
+		t.Fatalf("API token action scope schema = %#v", action["enum"])
+	}
+}
+
+func hasRequiredQueryParameter(operation map[string]any, name string) bool {
+	parameters, ok := operation["parameters"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range parameters {
+		parameter, ok := raw.(map[string]any)
+		if ok && parameter["name"] == name && parameter["in"] == "query" && parameter["required"] == true {
+			return true
+		}
+	}
+	return false
 }
 
 func TestApplicationMenuRequiresAppKey(t *testing.T) {
@@ -366,5 +403,56 @@ func TestDevelopmentModeInjectsAuditActor(t *testing.T) {
 	}
 	if len(repository.actors) != 1 || repository.actors[0].ID != "development" || repository.actors[0].Name != "开发模式" {
 		t.Fatalf("audit actor = %#v", repository.actors)
+	}
+}
+
+type testSwaggerImportRepo struct {
+	*testRBACRepo
+	services []*biz.ServiceResource
+	saved    []biz.RBACEndpoint
+}
+
+func (r *testSwaggerImportRepo) ListEndpoints(context.Context, string) ([]biz.RBACEndpoint, error) {
+	return nil, nil
+}
+func (r *testSwaggerImportRepo) SaveEndpoint(_ context.Context, scope string, value biz.RBACEndpoint) (biz.RBACEndpoint, error) {
+	value.ServiceResource = scope
+	r.saved = append(r.saved, value)
+	return value, nil
+}
+func (r *testSwaggerImportRepo) ListApplications(context.Context) ([]biz.Application, error) {
+	return nil, nil
+}
+func (r *testSwaggerImportRepo) SaveApplication(_ context.Context, value biz.Application) (biz.Application, error) {
+	return value, nil
+}
+func (r *testSwaggerImportRepo) ListApplicationServices(context.Context, string) ([]*biz.ServiceResource, error) {
+	return r.services, nil
+}
+func (r *testSwaggerImportRepo) ReplaceApplicationServices(context.Context, string, []string) error {
+	return nil
+}
+
+func TestImportRBACV1SwaggerFromDocument(t *testing.T) {
+	repository := &testSwaggerImportRepo{testRBACRepo: &testRBACRepo{}, services: []*biz.ServiceResource{{Key: "orders", IsActive: true}}}
+	server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(repository)))
+	body := `{"swagger_document":"openapi: 3.0.3\ninfo:\n  title: Orders API\npaths:\n  \"/orders\":\n    get:\n      summary: List orders"}`
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/rbac-v1/endpoints/import-swagger?app_key=admin&service_resource=orders", strings.NewReader(body)))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("import document status = %d body=%s", response.Code, response.Body.String())
+	}
+	if len(repository.saved) != 1 || repository.saved[0].Method != "GET" || repository.saved[0].PathTemplate != "/orders" || repository.saved[0].Summary != "List orders" {
+		t.Fatalf("imported endpoints = %#v", repository.saved)
+	}
+}
+
+func TestImportRBACV1SwaggerRequiresSource(t *testing.T) {
+	repository := &testSwaggerImportRepo{testRBACRepo: &testRBACRepo{}, services: []*biz.ServiceResource{{Key: "orders", IsActive: true}}}
+	server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(repository)))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/rbac-v1/endpoints/import-swagger?app_key=admin&service_resource=orders", strings.NewReader(`{}`)))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("missing source status = %d body=%s", response.Code, response.Body.String())
 	}
 }

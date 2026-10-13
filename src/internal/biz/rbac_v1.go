@@ -120,9 +120,20 @@ func (s *RBACV1Service) DeleteEndpoint(ctx context.Context, serviceResource stri
 	}
 	return s.repository.DeleteEndpoint(ctx, normalizeRBACScope(serviceResource), id)
 }
-func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawURL string) (RBACV1SwaggerImportResult, error) {
+// ImportSwagger imports endpoint entries from a Swagger/OpenAPI document. The
+// document is fetched from rawURL unless an in-memory document body is passed,
+// which keeps the original URL-only call signature working.
+func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawURL string, document ...string) (RBACV1SwaggerImportResult, error) {
 	scope := normalizeRBACScope(serviceResource)
-	operations, err := ReadSwaggerEndpoints(ctx, rawURL)
+	var operations []SwaggerEndpoint
+	var err error
+	if len(document) > 0 && strings.TrimSpace(document[0]) != "" {
+		operations, err = ReadSwaggerDocumentEndpoints([]byte(document[0]))
+	} else if strings.TrimSpace(rawURL) != "" {
+		operations, err = ReadSwaggerEndpoints(ctx, rawURL)
+	} else {
+		err = fmt.Errorf("%w: swagger_url or swagger_document is required", ErrInvalidArgument)
+	}
 	if err != nil {
 		return RBACV1SwaggerImportResult{}, err
 	}

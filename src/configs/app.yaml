@@ -19,6 +19,15 @@ service_resource:
 authorization:
   # Required by the service-to-service /v1/authorize endpoint in production.
   service_credential: ""
+api_tokens:
+  service_resource: "nexusauthorization"
+  # Required in OIDC mode; subjects are NexusAuth user IDs, not usernames.
+  admin_subjects: []
+  # Independent callback key; loaded at startup, not managed as an API Token.
+  # internal_callers:
+  #   - service_resource: "nexusauth"
+  #     key: "<at-least-32-random-bytes>"
+  internal_callers: []
 oidc:
   enabled: false
   authority: "http://localhost:5100"

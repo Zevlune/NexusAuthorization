@@ -54,6 +54,8 @@ func run() int {
 				WithServiceResourceService(application.ServiceResources).
 				WithAPIEndpointService(application.APIEndpoints).
 				WithRBACV1Service(application.RBACV1).
+				WithAPITokens(application.APITokens, cfg.APITokens, cfg.OIDC.Enabled).
+				WithAPIPermissionGroups(application.APIPermissionGroups).
 				WithAuthorizationServiceCredential(cfg.Authorization.ServiceCredential),
 			application.Auth.Middleware,
 		)),

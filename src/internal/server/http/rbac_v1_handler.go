@@ -131,8 +131,12 @@ func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
+	// The uploaded document travels as JSON text, so leave headroom for the
+	// encoding wrapper while still bounding the request body.
+	r.Body = http.MaxBytesReader(w, r.Body, biz.MaxSwaggerDocumentSize+(1<<20))
 	var body struct {
-		SwaggerURL string `json:"swagger_url"`
+		SwaggerURL      string `json:"swagger_url"`
+		SwaggerDocument string `json:"swagger_document"`
 	}
 	if scope == "" || decodeJSON(r, &body) != nil {
 		writeError(w, biz.ErrInvalidArgument)
@@ -143,7 +147,7 @@ func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	result, err := h.rbacV1.ImportSwagger(r.Context(), service, body.SwaggerURL)
+	result, err := h.rbacV1.ImportSwagger(r.Context(), service, body.SwaggerURL, body.SwaggerDocument)
 	if err != nil {
 		writeError(w, err)
 		return

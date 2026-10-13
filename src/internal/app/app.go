@@ -12,12 +12,14 @@ import (
 )
 
 type Application struct {
-	Pool             *pgxpool.Pool
-	Permissions      *biz.PermissionService
-	ServiceResources *biz.ServiceResourceService
-	APIEndpoints     *biz.APIEndpointService
-	RBACV1           *biz.RBACV1Service
-	Auth             *auth.Service
+	Pool                *pgxpool.Pool
+	Permissions         *biz.PermissionService
+	ServiceResources    *biz.ServiceResourceService
+	APIEndpoints        *biz.APIEndpointService
+	RBACV1              *biz.RBACV1Service
+	Auth                *auth.Service
+	APITokens           *biz.APITokenService
+	APIPermissionGroups *biz.APIPermissionGroupService
 }
 
 // New 创建权限中心应用，并完成数据库仓储、业务服务和认证服务的装配。
@@ -43,12 +45,14 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 	permissions := biz.NewPermissionService(roles, menus, userRoles).WithServiceResourceCatalog(serviceResources)
 	apiEndpoints := biz.NewAPIEndpointService(repo.NewAPIEndpointRepository(pool)).WithServiceResourceCatalog(serviceResources)
 	return &Application{
-		Pool:             pool,
-		Permissions:      permissions,
-		ServiceResources: serviceResources,
-		APIEndpoints:     apiEndpoints,
-		RBACV1:           biz.NewRBACV1Service(repo.NewRBACV1Repository(pool, serviceResources)),
-		Auth:             authenticator,
+		Pool:                pool,
+		Permissions:         permissions,
+		ServiceResources:    serviceResources,
+		APIEndpoints:        apiEndpoints,
+		RBACV1:              biz.NewRBACV1Service(repo.NewRBACV1Repository(pool, serviceResources)),
+		Auth:                authenticator,
+		APITokens:           biz.NewAPITokenService(repo.NewAPITokenRepository(pool)),
+		APIPermissionGroups: biz.NewAPIPermissionGroupService(repo.NewAPIPermissionGroupRepository(pool)),
 	}, nil
 }
 

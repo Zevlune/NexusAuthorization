@@ -17,6 +17,15 @@ func (h *Handler) ListApplications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if token, ok := apiTokenFromRequest(r); ok {
+		filtered := make([]biz.Application, 0, 1)
+		for _, item := range items {
+			if item.Key == token.AppKey {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 

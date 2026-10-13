@@ -58,7 +58,12 @@ export const listAllEndpoints = async (appKey: string, pageSize = 100): Promise<
   return items;
 };
 export const saveEndpoint = (appKey: string, serviceResource: string, item: Partial<Endpoint>) => request.post<Endpoint>(`/v1/rbac-v1/endpoints${query(appKey, serviceResource)}`, item);
-export const importSwagger = (appKey: string, serviceResource: string, swaggerURL: string) => request.post<{ total: number; created: number; skipped: number }>(`/v1/rbac-v1/endpoints/import-swagger${query(appKey, serviceResource)}`, { swagger_url: swaggerURL });
+export type SwaggerImportInput = string | { swagger_url?: string; swagger_document?: string };
+// 兼容旧的 URL 字符串调用，同时支持直接提交 JSON/YAML 文档文本。
+export const importSwagger = (appKey: string, serviceResource: string, input: SwaggerImportInput) => request.post<{ total: number; created: number; skipped: number }>(
+  `/v1/rbac-v1/endpoints/import-swagger${query(appKey, serviceResource)}`,
+  typeof input === 'string' ? { swagger_url: input } : input,
+);
 export const deleteEndpoint = (appKey: string, serviceResource: string, id: string) => request.delete(`/v1/rbac-v1/endpoints/${id}${query(appKey, serviceResource)}`);
 export const listRoles = (appKey: string) => request.get<{ items: Role[] }>(`/v1/rbac-v1/roles${query(appKey)}`);
 export const saveRole = (appKey: string, item: Partial<Role>) => request.post<Role>(`/v1/rbac-v1/roles${query(appKey)}`, item);

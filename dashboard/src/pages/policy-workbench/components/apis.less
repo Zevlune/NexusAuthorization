@@ -77,6 +77,10 @@
 .resource-apis-form .t-textarea__inner { min-height: 88px; }
 .resource-apis-form-error { margin-bottom: 22px; }
 .resource-apis-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.resource-apis-file-picker { display: flex; align-items: center; gap: 12px; min-height: 44px; }
+.resource-apis-file-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.resource-apis-file-name { flex: 1; overflow: hidden; color: var(--resource-apis-text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.resource-apis-file-name.is-placeholder { color: var(--resource-apis-muted); }
 .resource-apis-import-note { margin: 0 0 14px; padding: 10px 12px; color: var(--resource-apis-muted); background: var(--resource-apis-surface-muted); border-radius: 6px; font-size: 13px; line-height: 20px; }
 .resource-apis-import-result { margin-top: 8px; }
 .resource-apis-drawer-footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; width: 100%; }

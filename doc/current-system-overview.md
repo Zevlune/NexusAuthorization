@@ -2,10 +2,11 @@
 
 整理日期：2026-10-10。示例应用、接口和用户标识均用于说明，不代表数据库中的真实数据。
 
-本文以当前工作区代码和 `migrations/001_init.sql` 为依据，描述本次应用化重构与 UI 调整后的实现，不把设计想法当作已完成能力。表结构来自初始化脚本，本次没有连接运行中的数据库核对 schema 或统计真实业务数据。
+本文以当前工作区代码和 `migrations/001_init.sql`、`migrations/003_api_tokens.sql` 为依据，描述本次应用化重构与 UI 调整后的实现，不把设计想法当作已完成能力。表结构来自迁移脚本，本次没有连接运行中的数据库核对 schema 或统计真实业务数据。
 
 - [完整字段、约束、索引和触发器说明](current-database-schema.md)
 - [完整 PostgreSQL 初始化 SQL](../migrations/001_init.sql)
+- [API Token 增量迁移](../migrations/003_api_tokens.sql)
 - [页面设计与验证截图说明](ui-design.md)
 - [Go SDK 接入说明](sdk-application-integration.md)
 
@@ -22,6 +23,7 @@
 | 按钮 | 菜单页面内的操作权限节点 | `orders:create`：创建订单 |
 | 角色 | 组合应用的菜单/按钮和已关联服务 API | 订单管理员 |
 | 主体与域 | 标识被授权的身份及其授权上下文 | `subject=user-001`，`domain=global` |
+| API Token | 应用范围的机器主体凭证，可授予多个已关联服务的 API | `service=directory-sync`，`read GET /api/orders/{id}` |
 | 发布版本 | 保存该应用某一时刻的权限配置快照 | 应用发布 v1、v2 |
 
 应用与服务是多对多：一个应用可关联多个服务，同一服务可被多个应用复用。API 属于服务，角色和菜单属于应用。关联服务不会自动给用户或角色授予 API 权限。
@@ -39,6 +41,8 @@ flowchart LR
     R --> M
     U[身份主体 + 域] --> B[应用内角色绑定]
     B --> R
+    A --> T[API Token]
+    T --> E
     A --> P[发布版本与快照]
     P --> D[运行时 API 判断 / 主体菜单查询]
 ```
@@ -53,6 +57,7 @@ flowchart LR
 | 配置总览 | — | `/dashboard` | 配置步骤说明、关联服务/API/角色/菜单数量 |
 | 资源管理 | 服务资源 | `/service-resources` | 服务目录、服务维护、应用关联、跳转查看服务 API |
 | 资源管理 | API 接口 | `/api-resources` | 搜索筛选、手动维护接口、Swagger 导入、分页 |
+| RBAC 授权 | API Token | `/api-tokens` | 按当前应用创建、编辑、启停、撤销和轮换 Token；选择已关联服务的启用 API |
 | 资源管理 | 菜单与按钮 | `/menus` | 树形层级、菜单/按钮维护、展开收起、搜索 |
 | RBAC 授权 | 角色管理 | `/roles` | 角色维护、选择跨服务 API、选择菜单与按钮 |
 | RBAC 授权 | 用户授权 | `/bindings` | 为指定主体和域分配应用角色 |
@@ -141,6 +146,16 @@ API 授权与菜单/按钮授权是两组独立绑定。目前没有“按钮绑
 
 应用本身的停用会使后端无法获取有效应用/活动版本，不是必须等下一次发布才能阻止应用级鉴权。
 
+### 2.8 API Token
+
+- `/api-tokens` 是当前工作台实际使用的 API Token 页面，按所选应用管理 Token；前端调用后端 `/v1/api-tokens` 路由。
+- Token 绑定一个应用和一个主体（`user` 或 `service`），权限可覆盖该应用已关联的多个服务资源；每个服务下只展示已启用 API，按 `read`/`write` 由 HTTP 方法映射权限 scope，并可填写租户和项目范围。
+- Token 支持永久或定时过期、启用、停用、撤销和轮换。撤销是终态；轮换可在同一操作中撤销旧 Token。
+- 创建和轮换成功时返回一次完整 `raw_token`；列表、详情和后续更新不会再次返回明文凭证，只展示前缀和元数据。
+- 运行时校验使用应用本地数据库中的 Token hash、权限快照和 API 目录实时查询，不依赖远程目录调用或本地授权缓存；应用、服务关联、端点启用状态和方法/路径快照不满足时拒绝。
+- 内部授权回调使用独立配置的服务 key，路由为 `/internal/v1/api-tokens/authorize`，不作为公开管理 API 或 Swagger 文档接口。
+- 成功的创建、编辑、状态变更、撤销和轮换会写入 `api_token_audit_logs`；当前只保存审计记录，没有审计查询 UI。
+
 ## 3. BFF / 服务运行时鉴权
 
 当前服务鉴权输入为：
@@ -206,12 +221,13 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 保存角色及授权 | `roles`、`role_api_endpoint_bindings`、`role_menu_bindings` | 为主体分配角色 |
 | 保存主体角色集合 | `subject_role_bindings` | 发布应用配置 |
 | 发布应用 | `rbac_releases`、`rbac_release_snapshots` | 模拟/运行时验证 |
+| 创建/维护 API Token | `api_tokens`、`api_token_permissions`、`api_token_audit_logs` | 通过 `/api-tokens` 或 `/v1/api-tokens` 管理机器主体访问 |
 
 建议操作顺序：创建应用 → 关联服务 → 导入 API 与配置菜单按钮 → 配置角色授权 → 分配用户角色 → 发布 → 模拟并验证实际服务请求。
 
 ## 5. 表结构总览
 
-共 **11 张业务表、4 个枚举、4 个数据库触发器、6 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键。
+共 **14 张业务表、4 个枚举、5 个数据库触发器、11 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键；API Token 权限另有端点外键和应用服务关联触发器。
 
 | 表 | 含义 | 主键 / 关键关系 |
 | --- | --- | --- |
@@ -226,8 +242,11 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | `subject_role_bindings` | 应用内主体域角色绑定 | UUID `id`；应用/主体/域/角色组合唯一 |
 | `rbac_releases` | 发布元数据 | UUID `id`；应用内版本号唯一 |
 | `rbac_release_snapshots` | JSONB 发布快照 | `release_id` 主键并引用发布版本 |
+| `api_tokens` | 应用范围 API Token 元数据 | UUID `id`；应用外键；hash 唯一；状态含撤销终态 |
+| `api_token_permissions` | Token 的服务/API 权限快照 | 复合主键 `(token_id, endpoint_id, tenant_id, project_id)`；Token 和端点外键 |
+| `api_token_audit_logs` | 成功 Token 写操作审计 | UUID `id`；Token 外键；当前无审计查询 UI |
 
-这 11 张表由 `001_init.sql` 创建；脚本无业务种子数据。已有数据库通过 `002_application_url.sql` 增量添加可选应用地址，不需要重建。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器。
+前 11 张表由 `001_init.sql` 创建，`003_api_tokens.sql` 增加后 3 张表；脚本无业务种子数据。已有数据库通过 `002_application_url.sql` 增量添加可选应用地址，API Token 结构通过 `003_api_tokens.sql` 增量添加，不需要重建。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器。
 
 ## 6. 当前主要接口
 
@@ -248,6 +267,9 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 发布与历史 | `GET/POST /v1/rbac-v1/releases` | `app_key` |
 | 权限模拟 | `POST /v1/rbac-v1/simulate` | `app_key`；正文服务、主体、域、方法、路径 |
 | 主体菜单与按钮查询 | `GET /v1/rbac-v1/subject-menus` | `app_key`、`subject`、`domain` |
+| API Token 列表/创建 | `GET/POST /v1/api-tokens` | 必填 `app_key`；列表支持搜索、状态和分页；创建成功一次性返回 `raw_token` |
+| API Token 详情/编辑 | `GET/PUT /v1/api-tokens/{id}` | 必填 `app_key`；主体不可编辑 |
+| API Token 启停/撤销/轮换 | `POST /v1/api-tokens/{id}/status`、`/revoke`、`/rotate` | 必填 `app_key`；撤销不可恢复；轮换一次性返回新 `raw_token` |
 | BFF/服务鉴权 | `POST /v1/authorize` | 服务 Bearer 凭证及鉴权正文 |
 
 管理路由通过服务器配置的认证中间件保护；仅登录校验不能视为已实现“权限中心管理员分权”。当前没有在上述管理路由逐操作套用应用 RBAC 的管理权限矩阵。
@@ -268,6 +290,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 用户资料、用户组、部门、组织架构管理 | 未实现；仅记录身份主体授权关系 |
 | 应用自动创建 OAuth 客户端 | 未实现；业务应用和 SSO 客户端配置独立 |
 | 发布审批、版本差异、回滚界面、未发布草稿模拟 | 未实现 |
+| API Token 审计查询与管理报表 | 未实现；成功写操作会落库到 `api_token_audit_logs`，当前没有查询 UI |
 | 权限中心管理操作的细粒度管理员授权 | 未实现；管理认证和业务服务鉴权分别处理 |
 
 还需区分规则所在层级：按钮必须挂在菜单、按钮不能有子项等目前主要由前端约束；后端已经验证菜单所属应用和循环，但不能把这些 UI 规则说成数据库已完整保障。初始化脚本也没有禁止直接修改历史快照的触发器；快照不可变是当前正常发布/读取流程的约定。
@@ -279,6 +302,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 内容 | 依据 |
 | --- | --- |
 | 完整表结构 | `migrations/001_init.sql` |
+| API Token 表结构与迁移 | `migrations/003_api_tokens.sql`、`src/internal/data/db/repo/api_token_repo.go` |
 | 导航与资源 UI | `dashboard/src/layouts/layout/side/static-menu.tsx`、`dashboard/src/pages/policy-workbench/` |
 | 后端路由与管理接口 | `src/internal/server/http/routes.go`、`rbac_v1_handler.go`、`application_handler.go`、`application_permissions_handler.go` |
 | 应用与服务关联 | `src/internal/biz/application.go`、`src/internal/data/db/repo/application_repo.go` |

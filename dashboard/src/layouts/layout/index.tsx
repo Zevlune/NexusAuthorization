@@ -28,7 +28,10 @@ const PublicLayout = () => {
     const navigationItem = WORKBENCH_NAV.find((item) => item.path === tab.value);
     return navigationItem ? { ...tab, label: navigationItem.label } : tab;
   }));
-  const currentLabel = WORKBENCH_NAV.find((item) => item.path === pathname)?.label || '配置总览';
+  const currentLabel = pathname === '/api-tokens/create' ? '创建服务 Token'
+    : pathname.startsWith('/api-tokens/') ? (pathname.endsWith('/permissions') ? 'Token 权限策略' : '编辑 API Token')
+    : pathname.startsWith('/api-permission-groups/') ? (pathname.endsWith('/create') ? '新增 API 权限组' : '编辑 API 权限组')
+    : WORKBENCH_NAV.find((item) => item.path === pathname)?.label || '配置总览';
 
   useEffect(() => { window.localStorage.setItem(LAYOUT_TABS_STORAGE_KEY, JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => {

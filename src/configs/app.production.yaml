@@ -15,6 +15,10 @@ service_resource:
   timeout: "5s"
 authorization:
   service_credential: ""
+api_tokens:
+  service_resource: "nexusauthorization"
+  admin_subjects: []
+  internal_callers: []
 oidc:
   enabled: true
   authority: ""

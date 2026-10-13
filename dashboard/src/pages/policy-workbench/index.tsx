@@ -6,6 +6,9 @@ import { deleteRole, listAllEndpoints, listMenus, listRBACReleases, listRoles, l
 import { State, Page, Guard, Empty, fail } from './shared';
 import Services from './components/services';
 import APIs from './components/apis';
+import ApiTokens from './components/api-tokens';
+import ApiPermissionGroups from './components/api-permission-groups';
+import ApiTokenEditor from './components/api-token-editor';
 import Menus from './components/menus';
 import { useLocation } from 'react-router-dom';
 import { getRequestErrorMessage } from '../permission-center/shared';
@@ -263,4 +266,4 @@ const Simulate = ({ state }: { state: State }) => {
   </Page></Guard>;
 };
 
-export default function WorkbenchPage() { const state = useRBAC(); const location = useLocation(); switch (location.pathname) { case '/service-resources': return <Services state={state} />; case '/api-resources': return <APIs state={state} />; case '/roles': return <Roles state={state} />; case '/bindings': return <Users state={state} />; case '/menus': return <Menus state={state} />; case '/releases': return <Releases state={state} />; case '/simulate': return <Simulate state={state} />; default: return <Overview state={state} />; } }
+export default function WorkbenchPage() { const state = useRBAC(); const location = useLocation(); if (location.pathname.startsWith('/api-permission-groups')) return <ApiPermissionGroups key={`${state.appKey}:${location.pathname}`} state={state} />; if (location.pathname.startsWith('/api-tokens/')) return <ApiTokenEditor key={`${state.appKey}:${location.pathname}`} state={state} />; switch (location.pathname) { case '/service-resources': return <Services state={state} />; case '/api-resources': return <APIs state={state} />; case '/open-api-permissions': return <APIs state={state} openAPI />; case '/api-tokens': return <ApiTokens state={state} />; case '/roles': return <Roles state={state} />; case '/bindings': return <Users state={state} />; case '/menus': return <Menus state={state} />; case '/releases': return <Releases state={state} />; case '/simulate': return <Simulate state={state} />; default: return <Overview state={state} />; } }

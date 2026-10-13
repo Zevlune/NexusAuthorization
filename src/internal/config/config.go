@@ -17,6 +17,20 @@ type Config struct {
 	OIDC            OIDCConfig            `yaml:"oidc"`
 	ServiceResource ServiceResourceConfig `yaml:"service_resource"`
 	Authorization   AuthorizationConfig   `yaml:"authorization"`
+	APITokens       APITokenConfig        `yaml:"api_tokens"`
+}
+
+// Internal callers are bootstrap credentials, loaded once at startup. They
+// never authenticate through the API Token system they are used to query.
+type APITokenInternalCaller struct {
+	ServiceResource string `yaml:"service_resource"`
+	Key             string `yaml:"key"`
+}
+
+type APITokenConfig struct {
+	ServiceResource string                   `yaml:"service_resource"`
+	AdminSubjects   []string                 `yaml:"admin_subjects"`
+	InternalCallers []APITokenInternalCaller `yaml:"internal_callers"`
 }
 
 // LoggingConfig controls the shared Luck log format and destinations.
@@ -107,6 +121,9 @@ func Load(path string) (*Config, error) {
 		cfg.Database.URL = value
 	}
 	applyOIDCEnv(&cfg.OIDC)
+	if err := applyAPITokenConfig(&cfg.APITokens); err != nil {
+		return nil, err
+	}
 	if value := os.Getenv("NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL"); value != "" {
 		cfg.Authorization.ServiceCredential = value
 	}
@@ -141,6 +158,46 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func applyAPITokenConfig(cfg *APITokenConfig) error {
+	if value := os.Getenv("NEXUSAUTHORIZATION_API_TOKEN_SERVICE_RESOURCE"); value != "" {
+		cfg.ServiceResource = value
+	}
+	cfg.ServiceResource = strings.TrimSpace(cfg.ServiceResource)
+	if cfg.ServiceResource == "" {
+		cfg.ServiceResource = "nexusauthorization"
+	}
+	if value, ok := os.LookupEnv("NEXUSAUTHORIZATION_API_TOKEN_ADMIN_SUBJECTS"); ok {
+		cfg.AdminSubjects = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	if value := os.Getenv("NEXUSAUTHORIZATION_API_TOKEN_INTERNAL_KEY"); value != "" {
+		// Environment shortcut for the NexusAuth callback. Other callers may
+		// have separate keys in YAML; never share one unrestricted global key.
+		replaced := false
+		for i := range cfg.InternalCallers {
+			if cfg.InternalCallers[i].ServiceResource == "nexusauth" {
+				cfg.InternalCallers[i].Key = value
+				replaced = true
+			}
+		}
+		if !replaced {
+			cfg.InternalCallers = append(cfg.InternalCallers, APITokenInternalCaller{ServiceResource: "nexusauth", Key: value})
+		}
+	}
+	services, keys := map[string]bool{}, map[string]bool{}
+	for i := range cfg.InternalCallers {
+		c := &cfg.InternalCallers[i]
+		c.ServiceResource, c.Key = strings.TrimSpace(c.ServiceResource), strings.TrimSpace(c.Key)
+		if c.ServiceResource == "" || len(c.ServiceResource) > 128 || len(c.Key) < 32 || services[c.ServiceResource] || keys[c.Key] {
+			return fmt.Errorf("api_tokens.internal_callers requires unique services and unique keys of at least 32 bytes")
+		}
+		services[c.ServiceResource], keys[c.Key] = true, true
+	}
+	for i := range cfg.AdminSubjects {
+		cfg.AdminSubjects[i] = strings.TrimSpace(cfg.AdminSubjects[i])
+	}
+	return nil
 }
 
 func applyServiceResourceEnv(cfg *ServiceResourceConfig) {

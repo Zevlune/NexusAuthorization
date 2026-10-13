@@ -1,0 +1,29 @@
+.api-token-error { margin-bottom: 16px; }
+.api-token-pagination { display: flex; justify-content: flex-end; margin-top: 16px; }
+.api-token-drawer .t-drawer__body { padding: 24px 28px; }
+.api-token-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.api-token-control, .api-token-scope-section, .api-token-expiry-section { display: block; width: 100%; }
+.api-token-date { width: 100%; margin-top: 8px; padding: 8px 12px; color: var(--app-text); border: 1px solid var(--app-border-strong); border-radius: 3px; background: var(--app-surface); font: inherit; }
+.api-token-scope-tools { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-bottom: 14px; }
+.api-token-service-filter { width: min(360px, 100%); margin-bottom: 12px; }
+.api-token-permissions { display: grid; gap: 14px; }
+.api-token-service { padding: 12px; border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-surface-subtle); }
+.api-token-service-key { margin-left: 8px; color: var(--app-text-muted); font-size: 12px; }
+.api-token-permission { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--app-border); }
+.api-token-permission .t-checkbox { align-items: flex-start; }
+.api-token-permission-fields { display: grid; min-width: 0; grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin: 8px 0 0 28px; }
+.api-token-permission-fields .t-input__wrap { min-width: 0; }
+.api-token-secret { display: flex; align-items: center; gap: 12px; margin-top: 18px; padding: 14px; border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-surface-subtle); }
+.api-token-secret code { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--app-text); }
+.api-token-detail p { display: grid; grid-template-columns: 100px 1fr; gap: 12px; margin: 0; padding: 10px 0; border-bottom: 1px solid var(--app-border); }
+.api-token-detail ul { margin: 8px 0 0 100px; padding-left: 18px; }
+.api-token-detail li { margin: 6px 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .api-token-drawer .t-drawer__body { padding: 20px 16px; }
+  .api-token-form-grid, .api-token-scope-tools, .api-token-permission-fields { grid-template-columns: 1fr; }
+  .api-token-permission-fields { margin-left: 28px; }
+  .api-token-secret { align-items: stretch; flex-direction: column; }
+}
+
+.api-token-control { width: 100%; min-width: 0; }
+.api-token-permissions, .api-token-service, .api-token-permission-fields > * { min-width: 0; }

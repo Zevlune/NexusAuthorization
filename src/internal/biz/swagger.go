@@ -17,7 +17,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const maxSwaggerDocumentSize = 8 << 20
+// MaxSwaggerDocumentSize caps both remotely fetched and uploaded Swagger or
+// OpenAPI documents at 8 MiB.
+const MaxSwaggerDocumentSize = 8 << 20
 
 // SwaggerEndpoint is an import projection, not an authorization grant.
 type SwaggerEndpoint struct {
@@ -32,7 +34,21 @@ func ReadSwaggerEndpoints(ctx context.Context, rawURL string) ([]SwaggerEndpoint
 	if err != nil {
 		return nil, err
 	}
-	ops, err := parseSwaggerOperations(body)
+	return ReadSwaggerDocumentEndpoints(body)
+}
+
+// ReadSwaggerDocumentEndpoints projects an in-memory Swagger or OpenAPI
+// document into endpoint entries. URL imports and uploaded document imports
+// share this function so both paths apply identical validation and summary
+// fallback rules.
+func ReadSwaggerDocumentEndpoints(document []byte) ([]SwaggerEndpoint, error) {
+	if len(document) == 0 {
+		return nil, fmt.Errorf("%w: Swagger document is empty", ErrInvalidArgument)
+	}
+	if len(document) > MaxSwaggerDocumentSize {
+		return nil, fmt.Errorf("%w: Swagger document exceeds 8 MiB", ErrInvalidArgument)
+	}
+	ops, err := parseSwaggerOperations(document)
 	if err != nil {
 		return nil, err
 	}
@@ -208,11 +224,11 @@ func fetchSwaggerDocumentAt(ctx context.Context, documentURL *url.URL, depth int
 		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 			return nil, "", fmt.Errorf("fetch Swagger document: received HTTP %d", resp.StatusCode)
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxSwaggerDocumentSize+1))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxSwaggerDocumentSize+1))
 		if err != nil {
 			return nil, "", err
 		}
-		if len(body) > maxSwaggerDocumentSize {
+		if len(body) > MaxSwaggerDocumentSize {
 			return nil, "", fmt.Errorf("%w: Swagger document exceeds 8 MiB", ErrInvalidArgument)
 		}
 		return body, resp.Header.Get("Content-Type"), nil

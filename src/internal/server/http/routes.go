@@ -19,12 +19,25 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.HandleFunc("GET /auth/me", handler.AuthMe)
 	mux.HandleFunc("POST /auth/logout", handler.AuthLogout)
 
-	protect := func(next http.Handler) http.Handler {
+	identity := func(next http.Handler) http.Handler {
 		if len(authMiddleware) > 0 && authMiddleware[0] != nil {
 			return authMiddleware[0](next)
 		}
 		return next
 	}
+	protect := func(next http.Handler) http.Handler { return handler.tokenOrIdentity(identity, next) }
+	manageTokens := func(next http.Handler) http.Handler { return identity(handler.tokenManagement(next)) }
+	mux.Handle("GET /v1/api-tokens", manageTokens(http.HandlerFunc(handler.ListAPITokens)))
+	mux.Handle("POST /v1/api-tokens", manageTokens(http.HandlerFunc(handler.CreateAPIToken)))
+	mux.Handle("GET /v1/api-tokens/{id}", manageTokens(http.HandlerFunc(handler.GetAPIToken)))
+	mux.Handle("PUT /v1/api-tokens/{id}", manageTokens(http.HandlerFunc(handler.UpdateAPIToken)))
+	mux.Handle("POST /v1/api-tokens/{id}/status", manageTokens(http.HandlerFunc(handler.SetAPITokenStatus)))
+	mux.Handle("POST /v1/api-tokens/{id}/revoke", manageTokens(http.HandlerFunc(handler.RevokeAPIToken)))
+	mux.Handle("POST /v1/api-tokens/{id}/rotate", manageTokens(http.HandlerFunc(handler.RotateAPIToken)))
+	mux.Handle("GET /v1/api-permission-groups", manageTokens(http.HandlerFunc(handler.ListAPIPermissionGroups)))
+	mux.Handle("POST /v1/api-permission-groups", manageTokens(http.HandlerFunc(handler.SaveAPIPermissionGroup)))
+	mux.Handle("DELETE /v1/api-permission-groups/{id}", manageTokens(http.HandlerFunc(handler.DeleteAPIPermissionGroup)))
+	mux.HandleFunc("POST /internal/v1/api-tokens/authorize", handler.AuthorizeAPIToken)
 	mux.Handle("/v1/", protect(http.NotFoundHandler()))
 	mux.Handle("POST /v1/authorize", http.HandlerFunc(handler.AuthorizeRBAC))
 	mux.Handle("GET /v1/applications", protect(http.HandlerFunc(handler.ListApplications)))

@@ -9,7 +9,7 @@ export type State = { appKey: string; services: ApplicationServiceResource[]; en
 export const fail = (error: unknown, fallback: string) => MessagePlugin.error(getRequestErrorMessage(error, fallback));
 export const Page = ({ actions, children }: { title?: string; description?: string; actions?: ReactNode; children: ReactNode }) => {
   const location = useLocation();
-  const item = WORKBENCH_NAV.find(item => item.path === location.pathname);
+  const item = WORKBENCH_NAV.find(item => item.path === location.pathname || location.pathname.startsWith(`${item.path}/`));
   const group = WORKBENCH_GROUPS.find(group => group.value === item?.group);
   return <div className="rbac-page"><div className="rbac-page-topline">{group && <Breadcrumb className="rbac-breadcrumb" aria-label="当前位置" options={[{ content: group.label }, { content: item?.label }]} />}{actions ? <div className="rbac-page-header">{actions}</div> : null}</div>{children}</div>;
 };

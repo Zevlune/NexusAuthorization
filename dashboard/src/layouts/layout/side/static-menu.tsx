@@ -10,7 +10,10 @@ export const WORKBENCH_NAV = [
   { path: '/dashboard', label: '配置总览', icon: DashboardIcon, group: '' },
   { path: '/service-resources', label: '服务资源', icon: LinkIcon, group: 'resources' },
   { path: '/api-resources', label: 'API 接口', icon: ApiIcon, group: 'resources' },
+  { path: '/open-api-permissions', label: '开放 API 权限', icon: ApiIcon, group: 'resources' },
+  { path: '/api-permission-groups', label: 'API 权限组', icon: ApiIcon, group: 'resources' },
   { path: '/menus', label: '菜单与按钮', icon: FilePasteIcon, group: 'resources' },
+  { path: '/api-tokens', label: 'API Token', icon: ApiIcon, group: 'rbac' },
   { path: '/roles', label: '角色管理', icon: UsergroupIcon, group: 'rbac' },
   { path: '/bindings', label: '用户授权', icon: UserIcon, group: 'rbac' },
   { path: '/releases', label: '发布版本', icon: HistoryIcon, group: 'delivery' },
@@ -26,7 +29,7 @@ export const WORKBENCH_GROUPS = [
 const StaticMenu = ({ collapse }: { collapse: boolean }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const currentItem = WORKBENCH_NAV.find(item => location.pathname === item.path);
+  const currentItem = WORKBENCH_NAV.find(item => location.pathname === item.path || location.pathname.startsWith(`${item.path}/`));
   const [expanded, setExpanded] = useState<Array<string | number>>(['resources', 'rbac', 'delivery']);
   const [lastPath, setLastPath] = useState(location.pathname);
   if (lastPath !== location.pathname) {

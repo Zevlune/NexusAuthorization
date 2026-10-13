@@ -13,7 +13,7 @@ const AuthCallback = () => {
   return <Navigate to={getServiceResourceSelectionPath(redirect)} replace />;
 };
 
-const workbenchRoutes = ['/dashboard', '/service-resources', '/api-resources', '/roles', '/bindings', '/menus', '/releases', '/simulate'];
+const workbenchRoutes = ['/dashboard', '/service-resources', '/api-resources', '/open-api-permissions', '/api-permission-groups', '/api-permission-groups/create', '/api-permission-groups/:groupId/edit', '/api-tokens', '/api-tokens/create', '/api-tokens/:tokenId/edit', '/api-tokens/:tokenId/permissions', '/roles', '/bindings', '/menus', '/releases', '/simulate'];
 
 export const routes: RouteObject[] = [
   { element: <RedirectIfAuthenticated />, children: [{ path: '/login', Component: Login }] },

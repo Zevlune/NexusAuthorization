@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/luck/permission-center-go/internal/auth"
 	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/permission-center-go/internal/config"
 )
 
 type Handler struct {
@@ -21,6 +22,10 @@ type Handler struct {
 	rbacV1                         *biz.RBACV1Service
 	authorizationServiceCredential string
 	auth                           *auth.Service
+	apiTokens                      *biz.APITokenService
+	apiPermissionGroups            *biz.APIPermissionGroupService
+	apiTokenConfig                 config.APITokenConfig
+	apiTokenRequireAdmin           bool
 }
 
 func (h *Handler) WithAuthorizationServiceCredential(credential string) *Handler {
@@ -123,6 +128,19 @@ func (h *Handler) DeleteServiceResource(w http.ResponseWriter, r *http.Request) 
 
 // ListServiceResources 返回当前身份平台发布的服务资源列表。
 func (h *Handler) ListServiceResources(w http.ResponseWriter, r *http.Request) {
+	if token, ok := apiTokenFromRequest(r); ok {
+		if h.rbacV1 == nil {
+			tokenHTTPError(w, 503, "TOKEN_SERVICE_UNAVAILABLE")
+			return
+		}
+		items, err := h.rbacV1.ListApplicationServices(r.Context(), token.AppKey)
+		if err != nil {
+			tokenManagementError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "writable": false})
+		return
+	}
 	if h.serviceResources == nil {
 		writeError(w, biz.ErrNotFound)
 		return
@@ -358,6 +376,9 @@ func (h *Handler) UserRoles(w http.ResponseWriter, r *http.Request) {
 
 // auditContext 将当前登录人写入业务审计上下文。
 func (h *Handler) auditContext(r *http.Request) context.Context {
+	if _, ok := apiTokenFromRequest(r); ok {
+		return r.Context()
+	}
 	actor := biz.AuditActor{ID: "system", Name: "system"}
 	if h.auth != nil {
 		if h.auth.Enabled() {

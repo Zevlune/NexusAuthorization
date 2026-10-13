@@ -2,9 +2,9 @@
 
 整理日期：2026-10-10。
 
-[返回当前功能总览](current-system-overview.md) · [完整初始化 SQL](../migrations/001_init.sql)
+[返回当前功能总览](current-system-overview.md) · [初始化 SQL](../migrations/001_init.sql) · [API Token 迁移](../migrations/003_api_tokens.sql)
 
-本文档按 `migrations/001_init.sql` 逐项整理，本次没有对运行中的数据库进行结构比对。该脚本是空数据库的纯初始化脚本：只创建扩展、枚举、表、约束、触发器和索引，不插入种子数据，也不执行升级或替换操作。
+本文档按 `migrations/001_init.sql` 及增量迁移 `migrations/002_application_url.sql`、`migrations/003_api_tokens.sql` 逐项整理，本次没有对运行中的数据库进行结构比对。`001_init.sql` 是空数据库的纯初始化脚本；`002` 添加应用地址，`003` 以事务和可重复创建语句添加 API Token 表结构，不插入种子数据。
 
 文档中的“允许 NULL”以列声明为准；“默认值”是脚本中的 PostgreSQL 表达式或字面量。`updated_at` 只有插入时的 `DEFAULT NOW()`，脚本没有自动更新时间触发器。
 
@@ -86,6 +86,61 @@
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
 约束：主键为 `id`；(`service_resource_key`, `endpoint_key`) 唯一；(`service_resource_key`, `method`, `path_template`) 唯一；`endpoint_key` 非空白；`method = upper(method)`；`left(path_template, 1) = '/'`。创建、查询和更新 API 前由当前服务资源目录校验 key 存在且启用；数据库不建立服务资源外键。
+
+### `api_tokens`
+
+按应用保存 API Token 元数据。数据库只保存 SHA-256 十六进制 hash，不保存明文凭证；完整 `raw_token` 只在创建或轮换成功响应中返回一次。
+
+| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | `UUID` | 否 | 无 | Token 主键，由应用生成 |
+| `application_id` | `UUID` | 否 | 无 | 应用外键 |
+| `name` | `VARCHAR(200)` | 否 | 无 | Token 名称 |
+| `token_prefix` | `VARCHAR(32)` | 否 | 无 | 展示用前缀 |
+| `token_hash` | `VARCHAR(64)` | 否 | 无 | SHA-256 十六进制 hash，不是明文凭证 |
+| `owner_type` | `VARCHAR(16)` | 否 | 无 | `user` 或 `service` |
+| `owner_id` | `VARCHAR(200)` | 否 | 无 | 主体标识 |
+| `status` | `VARCHAR(16)` | 否 | `'active'` | `active`、`disabled` 或 `revoked` |
+| `expires_at` | `TIMESTAMPTZ` | 是 | 无 | 过期时间；NULL 表示不过期 |
+| `last_used_at` | `TIMESTAMPTZ` | 是 | 无 | 最近一次成功使用时间 |
+| `created_by` | `VARCHAR(200)` | 否 | `'system'` | 创建操作者 |
+| `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
+| `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段 |
+| `revoked_at` | `TIMESTAMPTZ` | 是 | 无 | 撤销时间 |
+
+约束：主键为 `id`；`application_id` 外键引用 `applications(id)`，`ON DELETE CASCADE`；`token_hash` 唯一且必须为 64 位小写十六进制；主体类型、状态和非空字段受 CHECK 约束；`status = 'revoked'` 必须与 `revoked_at IS NOT NULL` 同步。`api_tokens_application_idx` 按应用和创建时间查询，`api_tokens_prefix_idx` 支持前缀搜索，`api_tokens_token_hash_uq` 防止 hash 重复。
+
+### `api_token_permissions`
+
+Token 对应用已关联服务 API 端点的授权集合。每条记录保存授予时的端点方法、路径模板和摘要快照，目录后续变化不会隐式扩大已有 Token 的授权边界。
+
+| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `token_id` | `UUID` | 否 | 无 | Token 外键 |
+| `endpoint_id` | `UUID` | 否 | 无 | API 端点外键 |
+| `service_resource_key` | `VARCHAR(128)` | 否 | 无 | 授予时的服务资源 key |
+| `action` | `VARCHAR(16)` | 否 | 无 | `read` 或 `write` |
+| `tenant_id` | `VARCHAR(200)` | 否 | `''` | 租户范围，空值表示不限 |
+| `project_id` | `VARCHAR(200)` | 否 | `''` | 项目范围，空值表示不限 |
+| `method` | `VARCHAR(16)` | 否 | 无 | 授予时的 HTTP 方法快照 |
+| `path_template` | `VARCHAR(500)` | 否 | 无 | 授予时的路径模板快照 |
+| `summary` | `TEXT` | 否 | `''` | 授予时的摘要快照 |
+
+约束：复合主键为 (`token_id`, `endpoint_id`, `tenant_id`, `project_id`)；`token_id` 外键引用 `api_tokens(id)`，`ON DELETE CASCADE`；`endpoint_id` 外键引用 `api_endpoints(id)`，`ON DELETE RESTRICT`；方法必须大写、路径必须以 `/` 开头，action 只允许 `read`/`write`。`api_token_permission_scope_guard` 还要求端点所属服务与记录一致，且该服务已关联 Token 所属应用；应用层在事务中另外重新校验端点仍存在、启用且快照未变化。`api_token_permissions_endpoint_idx` 支持按端点反查。
+
+### `api_token_audit_logs`
+
+API Token 成功创建、编辑、启停、撤销和轮换等写操作的审计记录；当前没有查询审计日志的 UI 或公开查询接口。
+
+| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | `UUID` | 否 | `gen_random_uuid()` | 审计记录主键 |
+| `token_id` | `UUID` | 否 | 无 | Token 外键 |
+| `actor_id` | `VARCHAR(200)` | 否 | `'system'` | 操作者标识 |
+| `action` | `VARCHAR(64)` | 否 | 无 | 成功操作类型 |
+| `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 记录时间 |
+
+约束：`token_id` 外键引用 `api_tokens(id)`，`ON DELETE CASCADE`；操作者和 action 不能为空白。`api_token_audit_logs_token_idx` 按 Token 和时间倒序查询。
 
 ### `roles`
 
@@ -198,7 +253,7 @@
 
 ## 数据库触发器
 
-初始化脚本定义 4 个触发器，均为数据库层保障：
+`001_init.sql` 定义 4 个触发器，`003_api_tokens.sql` 再增加 1 个 Token 权限范围触发器，均为数据库层保障：
 
 | 触发器 | 时机 | 作用 |
 | --- | --- | --- |
@@ -206,12 +261,13 @@
 | `application_service_resource_grant_guard` | `application_service_resources` 删除前、逐行 | 如果该应用已有角色授予该服务资源下 API，则禁止解除关联。 |
 | `role_api_endpoint_application_guard` | `role_api_endpoint_bindings` 插入或更新前、逐行 | 按端点的 `service_resource_key` 检查角色所属应用已关联该服务资源。 |
 | `role_menu_application_guard` | `role_menu_bindings` 插入或更新前、逐行 | 检查角色和菜单属于同一应用。 |
+| `api_token_permission_scope_guard` | `api_token_permissions` 插入或更新前、逐行 | 检查 Token 端点服务与记录一致，且该服务已关联 Token 所属应用。 |
 
-上述触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验，不能归因于这 4 个数据库触发器。
+上述触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验，不能归因于这 5 个数据库触发器。
 
 ## 显式索引
 
-PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 6 个普通索引：
+PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 11 个索引（其中 Token hash 索引为唯一索引）：
 
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
@@ -221,6 +277,11 @@ PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动�
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
 | `rbac_releases_application_active_idx` | `rbac_releases` | (`application_id`, `version DESC`) `WHERE status = 'published'` | 查询应用的已发布版本并按版本倒序；是普通部分索引，不是唯一索引 |
 | `application_service_resources_service_idx` | `application_service_resources` | (`service_resource_key`, `application_id`) | 按服务资源反查应用 |
+| `api_tokens_token_hash_uq` | `api_tokens` | (`token_hash`) 唯一 | 防止 Token hash 重复 |
+| `api_tokens_application_idx` | `api_tokens` | (`application_id`, `created_at DESC`) | 按应用分页查询 Token |
+| `api_tokens_prefix_idx` | `api_tokens` | (`token_prefix`) | 按展示前缀搜索 Token |
+| `api_token_permissions_endpoint_idx` | `api_token_permissions` | (`endpoint_id`) | 按端点反查 Token 权限 |
+| `api_token_audit_logs_token_idx` | `api_token_audit_logs` | (`token_id`, `created_at DESC`) | 按 Token 查询审计记录 |
 
 ## 关系概览
 
@@ -240,6 +301,10 @@ erDiagram
     roles ||--o{ subject_role_bindings : assigned
     applications ||--o{ rbac_releases : publishes
     rbac_releases ||--o| rbac_release_snapshots : contains
+    applications ||--o{ api_tokens : owns
+    api_tokens ||--o{ api_token_permissions : grants
+    api_endpoints ||--o{ api_token_permissions : granted_to
+    api_tokens ||--o{ api_token_audit_logs : audits
 ```
 
 图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。
@@ -248,5 +313,9 @@ erDiagram
 
 - 初始化脚本不创建用户表；主体以 `subject` 字符串保存在 `subject_role_bindings`，身份来源不由此 schema 管理。
 - 初始化脚本不创建 OAuth 客户端表。
-- 初始化脚本不创建独立的 API 字段权限表；API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。
+- 初始化脚本不创建独立的 API 字段权限表；API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示，Token 授权通过 `api_token_permissions` 表示。
 - 初始化脚本不插入任何应用、服务资源、角色、菜单、绑定或发布版本种子数据。
+
+## 增量迁移
+
+`003_api_tokens.sql` 使用 `BEGIN`/`COMMIT`，表、索引和触发器创建语句可重复执行；它依赖 `001_init.sql` 创建的 `applications`、`application_service_resources`、`api_endpoints` 和 `pgcrypto`。API Token repository 在创建、更新、状态变更和轮换时使用本地事务；数据库结构本身不保存明文 Token，也没有缓存授权目录。

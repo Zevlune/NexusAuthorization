@@ -171,3 +171,79 @@ func TestAuthorizationUsesMostSpecificEndpointBeforeGrants(t *testing.T) {
 		t.Fatalf("dynamic grant rejected: %+v", d)
 	}
 }
+
+type rbacV1ImportRepository struct {
+	*rbacV1FakeRepository
+	endpoints []RBACEndpoint
+	saved     []RBACEndpoint
+}
+
+func (r *rbacV1ImportRepository) ListEndpoints(context.Context, string) ([]RBACEndpoint, error) {
+	return r.endpoints, nil
+}
+func (r *rbacV1ImportRepository) SaveEndpoint(_ context.Context, scope string, value RBACEndpoint) (RBACEndpoint, error) {
+	value.ServiceResource = scope
+	r.saved = append(r.saved, value)
+	return value, nil
+}
+
+func TestRBACV1ServiceImportSwaggerFromDocument(t *testing.T) {
+	repo := &rbacV1ImportRepository{rbacV1FakeRepository: &rbacV1FakeRepository{}}
+	service := NewRBACV1Service(repo)
+	document := `{"openapi":"3.0.3","info":{"title":"Orders API"},"paths":{` +
+		`"/orders":{"post":{"operationId":"Orders_create"}},` +
+		`"/orders/{id}":{"get":{"tags":["Orders"],"summary":"Get order"}}}}`
+	result, err := service.ImportSwagger(context.Background(), "order-service", "", document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 2 || result.Created != 2 || result.Skipped != 0 {
+		t.Fatalf("import result = %#v", result)
+	}
+	if len(repo.saved) != 2 {
+		t.Fatalf("saved = %#v", repo.saved)
+	}
+	byPath := map[string]RBACEndpoint{}
+	for _, item := range repo.saved {
+		byPath[item.PathTemplate] = item
+	}
+	if item := byPath["/orders"]; item.Method != "POST" || item.Summary != "Orders_create" || item.Source != "swagger" || !item.Enabled {
+		t.Fatalf("operationId fallback endpoint = %#v", item)
+	}
+	if item := byPath["/orders/{id}"]; item.Method != "GET" || item.Summary != "Get order" {
+		t.Fatalf("summary endpoint = %#v", item)
+	}
+}
+
+func TestRBACV1ServiceImportSwaggerSkipsExistingRoutes(t *testing.T) {
+	repo := &rbacV1ImportRepository{
+		rbacV1FakeRepository: &rbacV1FakeRepository{},
+		endpoints:            []RBACEndpoint{{Method: "GET", PathTemplate: "/orders/{id}"}},
+	}
+	document := `{"openapi":"3.0.3","paths":{"/orders/{id}":{"get":{"summary":"Get order"}},"/orders":{"post":{"summary":"Create"}}}}`
+	result, err := NewRBACV1Service(repo).ImportSwagger(context.Background(), "order-service", "", document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 2 || result.Created != 1 || result.Skipped != 1 {
+		t.Fatalf("import result = %#v", result)
+	}
+}
+
+func TestRBACV1ServiceImportSwaggerKeepsURLCallCompatible(t *testing.T) {
+	repo := &rbacV1ImportRepository{rbacV1FakeRepository: &rbacV1FakeRepository{}}
+	// 旧调用只传 URL 时仍走远程抓取分支；非绝对地址由 URL 校验拒绝。
+	if _, err := NewRBACV1Service(repo).ImportSwagger(context.Background(), "order-service", "not-a-url"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("url-only import error = %v", err)
+	}
+	if len(repo.saved) != 0 {
+		t.Fatalf("unexpected endpoints saved: %#v", repo.saved)
+	}
+}
+
+func TestRBACV1ServiceImportSwaggerRequiresSource(t *testing.T) {
+	repo := &rbacV1ImportRepository{rbacV1FakeRepository: &rbacV1FakeRepository{}}
+	if _, err := NewRBACV1Service(repo).ImportSwagger(context.Background(), "order-service", ""); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("empty source error = %v", err)
+	}
+}
