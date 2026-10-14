@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 // Requires a disposable database initialized only with migrations/001_init.sql.

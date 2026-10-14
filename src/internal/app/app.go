@@ -2,22 +2,23 @@ package app
 
 import (
 	"context"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/luck/permission-center-go/internal/auth"
-	"github.com/luck/permission-center-go/internal/biz"
-	"github.com/luck/permission-center-go/internal/config"
-	"github.com/luck/permission-center-go/internal/data/db"
-	"github.com/luck/permission-center-go/internal/data/db/repo"
+	"github.com/luck/nexus-authorization/internal/auth"
+	"github.com/luck/nexus-authorization/internal/biz"
+	"github.com/luck/nexus-authorization/internal/config"
+	"github.com/luck/nexus-authorization/internal/data/db"
+	"github.com/luck/nexus-authorization/internal/data/db/repo"
 )
 
 type Application struct {
 	Pool             *pgxpool.Pool
-	Permissions      *biz.PermissionService
 	ServiceResources *biz.ServiceResourceService
 	APIEndpoints     *biz.APIEndpointService
 	RBACV1           *biz.RBACV1Service
 	Auth             *auth.Service
+	Users            *biz.NexusAuthSCIMClient
 }
 
 // New 创建权限中心应用，并完成数据库仓储、业务服务和认证服务的装配。
@@ -26,9 +27,6 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	roles := repo.NewRoleRepository(pool)
-	menus := repo.NewMenuRepository(pool)
-	userRoles := repo.NewUserRoleRepository(pool)
 	serviceResourceRepository := repo.NewServiceResourceRepository(pool)
 	serviceResources, err := newServiceResourceCatalog(serviceResourceRepository, cfg.ServiceResource)
 	if err != nil {
@@ -40,15 +38,27 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 		pool.Close()
 		return nil, err
 	}
-	permissions := biz.NewPermissionService(roles, menus, userRoles).WithServiceResourceCatalog(serviceResources)
+	var users *biz.NexusAuthSCIMClient
+	if strings.TrimSpace(cfg.SCIM.NexusAuthBaseURL) != "" {
+		timeout, err := cfg.SCIM.TimeoutDuration()
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		users, err = biz.NewNexusAuthSCIMClient(cfg.SCIM.NexusAuthBaseURL, cfg.SCIM.APIKey, timeout)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
 	apiEndpoints := biz.NewAPIEndpointService(repo.NewAPIEndpointRepository(pool)).WithServiceResourceCatalog(serviceResources)
 	return &Application{
 		Pool:             pool,
-		Permissions:      permissions,
 		ServiceResources: serviceResources,
 		APIEndpoints:     apiEndpoints,
 		RBACV1:           biz.NewRBACV1Service(repo.NewRBACV1Repository(pool, serviceResources)),
 		Auth:             authenticator,
+		Users:            users,
 	}, nil
 }
 

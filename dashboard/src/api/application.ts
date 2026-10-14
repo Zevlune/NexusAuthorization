@@ -1,7 +1,7 @@
 import request from './request';
 
-export const APPLICATION_STORAGE_KEY = 'permission-center-application';
-export const APPLICATION_CHANGE_EVENT = 'permission-center-application-change';
+export const APPLICATION_STORAGE_KEY = 'nexus-authorization-application';
+export const APPLICATION_CHANGE_EVENT = 'nexus-authorization-application-change';
 
 export type Application = {
   key: string;
@@ -84,12 +84,6 @@ const normalizeServiceResource = (value: unknown): ApplicationServiceResource =>
   };
 };
 
-const dispatchApplicationChange = (key?: string) => {
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(APPLICATION_CHANGE_EVENT, { detail: key || '' }));
-  }
-};
-
 export const getStoredApplication = (): string => {
   if (typeof window === 'undefined') return '';
   try {
@@ -146,5 +140,3 @@ export const replaceApplicationServiceResources = async (appKey: string, service
     service_resource_keys: serviceResourceKeys,
   });
 };
-
-export { normalizeApplication, normalizeServiceResource, dispatchApplicationChange };

@@ -72,6 +72,15 @@ func openAPIDocument() map[string]any {
 				parameters = append(parameters, map[string]any{"name": name, "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 			}
 		}
+		if operation.path == "/v1/users" {
+			parameters = append(parameters,
+				map[string]any{"name": "filter", "in": "query", "schema": map[string]any{"type": "string"}, "description": "NexusAuth SCIM filter, e.g. userName eq \"alice\""},
+				map[string]any{"name": "startIndex", "in": "query", "schema": map[string]any{"type": "integer", "minimum": 1, "default": 1}},
+				map[string]any{"name": "count", "in": "query", "schema": map[string]any{"type": "integer", "minimum": 0, "maximum": 200, "default": 100}},
+			)
+			definition["responses"].(map[string]any)["502"] = map[string]any{"description": "NexusAuth SCIM request failed"}
+			definition["responses"].(map[string]any)["503"] = map[string]any{"description": "SCIM user directory is not configured"}
+		}
 		if len(parameters) > 0 {
 			definition["parameters"] = parameters
 		}
@@ -103,7 +112,7 @@ func openAPIDocument() map[string]any {
 		"paths":   paths,
 		"components": map[string]any{
 			"securitySchemes": map[string]any{
-				"cookieAuth":        map[string]any{"type": "apiKey", "in": "cookie", "name": "permission_center_session"},
+				"cookieAuth":        map[string]any{"type": "apiKey", "in": "cookie", "name": "nexusauthorization_session"},
 				"serviceCredential": map[string]any{"type": "http", "scheme": "bearer", "description": "Configured service-to-service credential for PEP calls."},
 			},
 			"schemas": map[string]any{"APIResponse": map[string]any{"type": "object", "properties": map[string]any{"success": map[string]any{"type": "boolean"}, "errorCode": map[string]any{"nullable": true}, "errorMessage": map[string]any{"nullable": true}, "result": map[string]any{}}}},
@@ -112,6 +121,7 @@ func openAPIDocument() map[string]any {
 }
 
 var openAPIOperations = []openAPIOperation{
+	{http.MethodGet, "/v1/users", "Users", "List NexusAuth SCIM users", false},
 	{http.MethodGet, "/v1/applications", "applications", "List business applications", false},
 	{http.MethodPost, "/v1/applications", "applications", "Create business application", true},
 	{http.MethodPut, "/v1/applications/{key}", "applications", "Update business application", true},

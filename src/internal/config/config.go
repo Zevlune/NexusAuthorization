@@ -17,6 +17,41 @@ type Config struct {
 	OIDC            OIDCConfig            `yaml:"oidc"`
 	ServiceResource ServiceResourceConfig `yaml:"service_resource"`
 	Authorization   AuthorizationConfig   `yaml:"authorization"`
+	SCIM            SCIMConfig            `yaml:"scim"`
+}
+
+// SCIMConfig 配置 NexusAuth 的只读用户目录；凭据独立于服务资源目录。
+type SCIMConfig struct {
+	NexusAuthBaseURL string `yaml:"nexusauth_base_url"`
+	APIKey           string `yaml:"api_key"`
+	Timeout          string `yaml:"timeout"`
+}
+
+func (c SCIMConfig) TimeoutDuration() (time.Duration, error) {
+	if strings.TrimSpace(c.Timeout) == "" {
+		return 5 * time.Second, nil
+	}
+	duration, err := time.ParseDuration(strings.TrimSpace(c.Timeout))
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("scim.timeout must be a positive duration")
+	}
+	return duration, nil
+}
+
+func (c SCIMConfig) Validate() error {
+	if _, err := c.TimeoutDuration(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.NexusAuthBaseURL) == "" && strings.TrimSpace(c.APIKey) == "" {
+		return nil
+	}
+	if err := validateHTTPURL(strings.TrimSpace(c.NexusAuthBaseURL), "scim.nexusauth_base_url"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.APIKey) == "" {
+		return fmt.Errorf("scim.api_key is required when SCIM is configured")
+	}
+	return nil
 }
 
 // LoggingConfig controls the shared Luck log format and destinations.
@@ -90,6 +125,7 @@ type OIDCConfig struct {
 	Scopes                []string `yaml:"scopes"`
 	Audience              string   `yaml:"audience"`
 	SessionSecret         string   `yaml:"session_secret"`
+	SessionSecretFile     string   `yaml:"session_secret_file"`
 	CookieSecure          bool     `yaml:"cookie_secure"`
 	CookieName            string   `yaml:"cookie_name"`
 }
@@ -111,6 +147,10 @@ func Load(path string) (*Config, error) {
 		cfg.Authorization.ServiceCredential = value
 	}
 	applyServiceResourceEnv(&cfg.ServiceResource)
+	applySCIMEnv(&cfg.SCIM)
+	if err := cfg.SCIM.Validate(); err != nil {
+		return nil, err
+	}
 	cfg.ServiceResource.Source = strings.ToLower(strings.TrimSpace(cfg.ServiceResource.Source))
 	if cfg.ServiceResource.Source == "" {
 		cfg.ServiceResource.Source = "nexusauth"
@@ -141,6 +181,18 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func applySCIMEnv(cfg *SCIMConfig) {
+	if value := os.Getenv("NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL"); value != "" {
+		cfg.NexusAuthBaseURL = value
+	}
+	if value := os.Getenv("NEXUSAUTHORIZATION_SCIM_API_KEY"); value != "" {
+		cfg.APIKey = value
+	}
+	if value := os.Getenv("NEXUSAUTHORIZATION_SCIM_TIMEOUT"); value != "" {
+		cfg.Timeout = value
+	}
 }
 
 func applyServiceResourceEnv(cfg *ServiceResourceConfig) {
@@ -220,7 +272,7 @@ func (c OIDCConfig) Validate() error {
 	if err := validateHTTPURL(c.PostLogoutRedirectURI, "oidc.post_logout_redirect_uri"); err != nil {
 		return err
 	}
-	if len(c.SessionSecret) < 32 || strings.HasPrefix(c.SessionSecret, "replace-with-") {
+	if secret := strings.TrimSpace(c.SessionSecret); c.SessionSecret != "" && (len(secret) < 32 || strings.HasPrefix(secret, "replace-with-")) {
 		return fmt.Errorf("oidc.session_secret must be at least 32 characters when oidc is enabled")
 	}
 	if strings.TrimSpace(c.CookieName) == "" || strings.ContainsAny(c.CookieName, " \t\r\n;") {

@@ -29,12 +29,6 @@ export const getThemeMode = (): ThemeMode => {
   return getPreferredThemeMode();
 };
 
-export const isDarkTheme = () => getCurrentThemeMode() === 'dark';
-
-export const getCurrentThemeMode = (): ThemeMode => {
-  return document.documentElement.getAttribute(THEME_ATTRIBUTE) === 'dark' ? 'dark' : 'light';
-};
-
 export const applyThemeMode = (theme: ThemeMode) => {
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute(THEME_ATTRIBUTE, theme);

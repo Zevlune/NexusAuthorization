@@ -1,6 +1,6 @@
--- Permission Center application-scoped RBAC clean initialization.
--- This is a fresh schema. It intentionally contains no upgrade seed or
--- supersede operation; deploy it against an empty database.
+-- NexusAuthorization first-deployment schema for nexus-authorization.
+-- Connect to the empty target database before running this file.
+-- All schema changes are atomic; no business data or upgrade steps are included.
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -62,6 +62,31 @@ CREATE TABLE api_endpoints (
     UNIQUE (service_resource_key, endpoint_key),
     UNIQUE (service_resource_key, method, path_template),
     CHECK (btrim(endpoint_key) <> ''),
+    CHECK (method = upper(method)),
+    CHECK (left(path_template, 1) = '/')
+);
+
+-- Compatibility table for the still-registered /v1/authorization/api-endpoints
+-- routes. It is a standalone, service-resource-scoped endpoint registry with
+-- audit columns and soft delete; it is separate from api_endpoints and does not
+-- participate in application RBAC publishing or release snapshots.
+CREATE TABLE authorization_api_endpoints (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    service_resource VARCHAR(128) NOT NULL,
+    controller VARCHAR(200) NOT NULL,
+    method VARCHAR(16) NOT NULL,
+    path_template VARCHAR(500) NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by_id VARCHAR(200) NOT NULL DEFAULT 'system',
+    created_by_name VARCHAR(200) NOT NULL DEFAULT 'system',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by_id VARCHAR(200) NOT NULL DEFAULT 'system',
+    updated_by_name VARCHAR(200) NOT NULL DEFAULT 'system',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    CHECK (btrim(service_resource) <> ''),
+    CHECK (btrim(controller) <> ''),
     CHECK (method = upper(method)),
     CHECK (left(path_template, 1) = '/')
 );
@@ -239,6 +264,9 @@ BEFORE INSERT OR UPDATE ON role_menu_bindings
 FOR EACH ROW EXECUTE FUNCTION enforce_role_menu_application();
 
 CREATE INDEX api_endpoints_scope_enabled_idx ON api_endpoints(service_resource_key, enabled);
+CREATE UNIQUE INDEX authorization_api_endpoints_active_route_idx
+    ON authorization_api_endpoints(service_resource, method, path_template)
+    WHERE is_deleted = FALSE;
 CREATE INDEX role_api_endpoint_bindings_endpoint_idx ON role_api_endpoint_bindings(endpoint_id, role_id);
 CREATE INDEX subject_role_bindings_application_lookup_idx ON subject_role_bindings(application_id, subject, domain);
 CREATE INDEX menus_application_enabled_idx ON menus(application_id, enabled, sort_order);

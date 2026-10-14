@@ -8,7 +8,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5275',
+    baseURL: 'http://localhost:5275',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'off',
@@ -18,8 +18,8 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
   },
   webServer: {
-    command: 'yarn dev --host 127.0.0.1 --port 5275',
-    url: 'http://127.0.0.1:5275',
+    command: 'yarn dev --host localhost --port 5275',
+    url: 'http://localhost:5275',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

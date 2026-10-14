@@ -4,7 +4,7 @@ import { getStoredApplication } from '../api/application';
 
 let cachedAuthStatus: boolean | null = null;
 
-export const LOGIN_REDIRECT_STORAGE_KEY = 'permission-center-login-redirect';
+export const LOGIN_REDIRECT_STORAGE_KEY = 'nexus-authorization-login-redirect';
 
 export const getCachedAuthStatus = () => cachedAuthStatus;
 

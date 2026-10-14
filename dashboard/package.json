@@ -1,5 +1,5 @@
 {
-  "name": "permission-center-dashboard",
+  "name": "nexus-authorization-dashboard",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,7 +11,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tdesign-react/chat": "^1.0.2",
     "@types/node": "^22.14.1",
     "axios": "^1.7.9",
     "less": "^4.4.0",

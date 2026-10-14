@@ -1,6 +1,6 @@
 # 权限中心当前功能与数据模型
 
-整理日期：2026-10-10。示例应用、接口和用户标识均用于说明，不代表数据库中的真实数据。
+整理日期：2026-10-14。示例应用、接口和用户标识均用于说明，不代表数据库中的真实数据。
 
 本文以当前工作区代码和 `migrations/001_init.sql` 为依据，描述本次应用化重构与 UI 调整后的实现，不把设计想法当作已完成能力。表结构来自初始化脚本，本次没有连接运行中的数据库核对 schema 或统计真实业务数据。
 
@@ -54,12 +54,11 @@ flowchart LR
 | 资源管理 | 服务资源 | `/service-resources` | 服务目录、服务维护、应用关联、跳转查看服务 API |
 | 资源管理 | API 接口 | `/api-resources` | 搜索筛选、手动维护接口、Swagger 导入、分页 |
 | 资源管理 | 菜单与按钮 | `/menus` | 树形层级、菜单/按钮维护、展开收起、搜索 |
-| RBAC 授权 | 角色管理 | `/roles` | 角色维护、选择跨服务 API、选择菜单与按钮 |
-| RBAC 授权 | 用户授权 | `/bindings` | 为指定主体和域分配应用角色 |
+| RBAC 授权 | 角色管理 | `/roles` | 角色维护、选择跨服务 API、选择菜单与按钮、在“分配用户”中绑定用户（固定域 `global`） |
 | 发布与验证 | 发布版本 | `/releases` | 填写说明、发布当前配置、查看版本历史 |
 | 发布与验证 | 权限模拟 | `/simulate` | 输入主体/域/服务/方法/路径，检查已发布权限 |
 
-侧栏支持两级分组、当前页面选中和分组展开；工作台支持页面标签、切换应用、明暗主题和全屏。原 `/select-service-resource` 入口重定向到应用选择页。
+工作台还有两个不在侧栏显示的页面：新增角色 `/roles/new` 与编辑角色 `/roles/:roleId/edit`，两者复用同一工作台页面组件。`/bindings` 现在重定向到 `/roles`，用户授权是角色管理抽屉里的操作，不再是独立路由。侧栏支持任意层级分组、当前页面选中和分组展开；工作台支持页面标签、切换应用、明暗主题和全屏。原 `/select-service-resource` 入口重定向到应用选择页。侧栏菜单当前来自前端内置导航定义（`dashboard/src/api/auth.ts` 的 mock 结构），不是后端菜单接口。各页面的字段与操作说明见 [标准使用手册](user-guide.md)。
 
 ### 2.1 登录与业务应用
 
@@ -102,14 +101,15 @@ API 是共享目录。某个应用编辑服务的 API 元数据，会修改这�
 - 使用同一张 `menus` 表，通过 `menu_type` 区分 `menu`、`button`；`directory` 保留兼容已有目录节点。
 - 菜单树按父节点和排序展示，支持搜索名称/权限标识、展开全部、收起全部。
 - 可新增顶级菜单、子菜单，也可直接在某个菜单下“添加按钮”。
-- 菜单字段包括名称、权限标识、上级、路由、组件、图标、排序与状态；路由可空，填写时前端要求以 `/` 开头。
+- 菜单表单包括名称、权限标识、上级、路由、组件、排序与状态；路由可空，填写时前端要求以 `/` 开头。编辑会保留既有图标字段，当前表单不提供图标输入。
 - 按钮字段包括名称、权限标识、所属菜单、排序与状态；按钮表单不填写路由、组件、图标，保存时这些字段置空。
 - 前端禁止选择自己或后代作上级，禁止将有子项的节点转为按钮，要求按钮选择菜单父节点。
-- 后端校验父节点属于同一应用，并检测循环层级；数据库复合外键保证父子同应用。
+- 后端同样拒绝把按钮设为父节点、拒绝把仍有子节点的节点改为按钮，并检测循环层级。
+- 后端校验父节点属于同一应用；数据库复合外键保证父子同应用。
 - 有子项的节点不能直接删除；删除叶子节点须二次确认。
 - 前端编辑界面保持权限标识不变。
 
-工作台侧栏的二级导航是权限中心自身的静态导航；这里维护的菜单树是业务应用的授权资源，两者并非同一份菜单数据。
+工作台侧栏是权限中心自身的前端 mock 导航；这里维护的菜单树是业务应用的授权资源，两者并非同一份菜单数据。
 
 ### 2.5 角色管理
 
@@ -123,12 +123,14 @@ API 授权与菜单/按钮授权是两组独立绑定。目前没有“按钮绑
 
 ### 2.6 用户授权
 
-- 根据 `subject + domain` 分组展示绑定关系，为该组合分配一个或多个应用角色。
-- 保存操作替换该主体/域在当前应用中的整组角色，不是追加单条授权。
-- 前端只提供启用角色作为分配候选；后端限制角色必须属于当前应用。
-- 当前默认域是 `global`，界面可填写其他域字符串。
+- 用户授权通过 `/roles` 角色行的“分配用户”抽屉完成，没有独立的用户授权页面。
+- 抽屉从 NexusAuth SCIM 目录分页读取用户；可按姓名、用户名和邮箱搜索，目录不落库。
+- 当前操作固定使用域 `global`，选择框回显该角色已绑定用户；不能为停用角色或停用用户新增分配，但可取消原绑定。
+- 保存前读取最新主体绑定，对变更用户合并其其它角色，再调用主体角色替换 API；保留其它角色和其它 Domain 的绑定。
+- 后端 `PUT /v1/rbac-v1/subject-roles` 按应用、`subject + domain` 原子替换整组角色；API 调用者必须自行提交希望保留的完整角色集合，角色须属于同一应用。
+- 用户目录失败时禁用保存并提供重试；部分写入失败保留成功变更，抽屉停留并允许重试未完成项。
 
-当前没有用户资料表、用户同步列表、组织架构、用户组或完整账号 CRUD。“用户授权”本质是角色绑定管理，身份账号由 SSO/业务身份来源提供。`domain` 是授权上下文字符串，目前没有独立域目录或租户管理表。
+当前没有用户资料表、用户同步存储、组织架构、用户组或账号 CRUD。身份账号由统一认证服务提供。后端保留 `domain` 作为授权上下文字符串，没有独立的域目录或租户管理表；其它域可通过管理 API 配置。
 
 ### 2.7 发布版本与权限模拟
 
@@ -187,7 +189,7 @@ Content-Type: application/json
 }
 ```
 
-判断原因包括 `allowed`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。请求缺少必要字段、凭证不符或应用/发布不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
+判断原因包括 `allowed`、`service_resource_required`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。每次鉴权都从 PostgreSQL 读取当前活动发布并解码 JSONB 快照，没有常驻内存快照；请求缺少必要字段、凭证不符或应用/发布不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
 
 Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource, resolve, next)`。身份解析由接入服务负责；身份无效返回 401，鉴权错误或拒绝返回 403；SDK 请求默认有 3 秒超时。
 
@@ -211,7 +213,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 
 ## 5. 表结构总览
 
-共 **11 张业务表、4 个枚举、4 个数据库触发器、6 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键。
+共 **12 张表（11 张应用 RBAC 及服务目录表、1 张兼容 API 目录表）、4 个枚举、4 个数据库触发器、7 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键。
 
 | 表 | 含义 | 主键 / 关键关系 |
 | --- | --- | --- |
@@ -226,8 +228,23 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | `subject_role_bindings` | 应用内主体域角色绑定 | UUID `id`；应用/主体/域/角色组合唯一 |
 | `rbac_releases` | 发布元数据 | UUID `id`；应用内版本号唯一 |
 | `rbac_release_snapshots` | JSONB 发布快照 | `release_id` 主键并引用发布版本 |
+| `authorization_api_endpoints` | 兼容服务范围 API 目录，不参与应用发布 | UUID `id`；有效记录的服务/方法/路径唯一，保留审计与软删 |
 
-这 11 张表由 `001_init.sql` 创建；脚本无业务种子数据。已有数据库通过 `002_application_url.sql` 增量添加可选应用地址，不需要重建。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器。
+这 12 张表由 `001_init.sql` 创建；脚本无业务种子数据，可选应用地址 `applications.url` 已包含在初始化 schema 中。首次上线使用空库并执行该脚本，不再需要单独的增量升级脚本。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器。
+
+### 删除与停用语义
+
+| 对象 | 删除 | 停用 |
+| --- | --- | --- |
+| 业务应用 | 无删除路由 | `enabled=false`，需要重新启用；停用立即生效 |
+| 服务资源 | 物理 `DELETE`（仓储方法名为 `SoftDelete`），触发器阻止删除仍被应用关联或 API 端点引用的资源 | `enabled=false`，触发器阻止停用仍被应用关联的本地资源 |
+| API Endpoint | 物理删除 | `enabled=false`，重新发布后才影响运行时快照 |
+| 角色 | 物理删除，级联删除其 API/菜单授权与主体绑定 | `enabled=false`，重新发布后生效 |
+| 菜单/按钮 | 物理删除，子节点存在时被复合外键阻止 | `enabled=false`，重新发布后生效 |
+| 主体角色绑定 | `PUT` 替换时按 `subject + domain` 删除旧集合 | 无独立停用字段 |
+| 发布版本 | 无删除路由 | 新版本发布时旧 `published` 置为 `superseded` |
+
+RBAC v1 这些表没有 `is_deleted` 软删标记；唯一的软删语义在遗留的 `authorization_api_endpoints.is_deleted`。当前没有历史发布版本回滚接口，`GET /v1/rbac-v1/releases` 只读。
 
 ## 6. 当前主要接口
 
@@ -252,7 +269,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 
 管理路由通过服务器配置的认证中间件保护；仅登录校验不能视为已实现“权限中心管理员分权”。当前没有在上述管理路由逐操作套用应用 RBAC 的管理权限矩阵。
 
-服务器另外保留 `/v1/authorization/api-endpoints*` 的服务目录级接口路由；当前新工作台使用 `/v1/rbac-v1/*` 的应用上下文接口。这些目录路由不应被描述为新的角色、菜单、用户绑定或发布流程。
+服务器另外保留 `/v1/authorization/api-endpoints*` 的服务目录级接口路由，仍注册在路由表和 OpenAPI 文档中，并有 handler 路由测试覆盖；当前新工作台使用 `/v1/rbac-v1/*` 的应用上下文接口。这些目录路由由 `biz.APIEndpointService` 提供，读写 `authorization_api_endpoints` 表，与 RBAC v1 的 `api_endpoints` 表不是同一份数据（已纳入首次初始化 SQL），不应被描述为新的角色、菜单、用户绑定或发布流程。
 
 ## 7. 已实现边界与待补能力
 
@@ -270,7 +287,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 发布审批、版本差异、回滚界面、未发布草稿模拟 | 未实现 |
 | 权限中心管理操作的细粒度管理员授权 | 未实现；管理认证和业务服务鉴权分别处理 |
 
-还需区分规则所在层级：按钮必须挂在菜单、按钮不能有子项等目前主要由前端约束；后端已经验证菜单所属应用和循环，但不能把这些 UI 规则说成数据库已完整保障。初始化脚本也没有禁止直接修改历史快照的触发器；快照不可变是当前正常发布/读取流程的约定。
+还需区分规则所在层级：按钮必须是叶子、按钮不能作为父节点、不能把有子节点的菜单改为按钮，这些后端已经拒绝，数据库复合外键保证父子同应用，但“按钮必须挂在菜单下”仍主要由前端表单约束，不能说成数据库已完整保障。初始化脚本也没有禁止直接修改历史快照的触发器；快照不可变是当前正常发布/读取流程的约定。
 
 共享 API 的普通修改只在各应用下一次发布时进入对应快照。撤销角色、删除接口或解除服务关联后，也应发布相应应用才能撤销旧快照中的权限；应用整体停用的行为例外已在发布章节说明。
 
@@ -279,7 +296,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 内容 | 依据 |
 | --- | --- |
 | 完整表结构 | `migrations/001_init.sql` |
-| 导航与资源 UI | `dashboard/src/layouts/layout/side/static-menu.tsx`、`dashboard/src/pages/policy-workbench/` |
+| 导航与资源 UI | `dashboard/src/api/auth.ts`（导航 mock）、`dashboard/src/router/workbench-menu.ts`、`dashboard/src/router/workbench-routes.tsx`、`dashboard/src/layouts/layout/side/workbench-menu.tsx`、`dashboard/src/pages/policy-workbench/` |
 | 后端路由与管理接口 | `src/internal/server/http/routes.go`、`rbac_v1_handler.go`、`application_handler.go`、`application_permissions_handler.go` |
 | 应用与服务关联 | `src/internal/biz/application.go`、`src/internal/data/db/repo/application_repo.go` |
 | 服务资源目录与 NexusAuth 读取 | `src/internal/biz/service_resource.go`、`src/internal/data/db/repo/service_resource_repo.go` |

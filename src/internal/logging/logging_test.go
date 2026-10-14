@@ -14,13 +14,13 @@ import (
 
 func TestHandlerUsesCanonicalTemplateAndDefaults(t *testing.T) {
 	var output bytes.Buffer
-	logger := NewText(&output, "permission-center", "debug")
+	logger := NewText(&output, "nexus-authorization", "debug")
 	record := slog.NewRecord(time.Date(2026, time.September, 9, 10, 11, 12, 123456000, time.Local), slog.LevelInfo, "Started", 0)
 	record.Add(slog.String(Category, "HTTP"), slog.String("Address", ":8080"))
 	if err := logger.Handler().Handle(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	want := "[2026-09-09 10:11:12.123][INF][permission-center][HTTP][][][][][Started Address=:8080]\n"
+	want := "[2026-09-09 10:11:12.123][INF][nexus-authorization][HTTP][][][][][Started Address=:8080]\n"
 	if output.String() != want {
 		t.Fatalf("log output = %q, want %q", output.String(), want)
 	}
@@ -38,7 +38,7 @@ func TestHandlerFiltersMinimumLevelAndEscapesNewlines(t *testing.T) {
 
 func TestHTTPMiddlewareAddsRequestContextAndCompletionLog(t *testing.T) {
 	var output bytes.Buffer
-	logger := NewText(&output, "permission-center", "info")
+	logger := NewText(&output, "nexus-authorization", "info")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /items/{id}", func(w http.ResponseWriter, r *http.Request) {
 		FromContext(r.Context()).Info("Inside handler.", slog.String(Subcategory, "GetItem"))

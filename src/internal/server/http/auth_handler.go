@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/luck/permission-center-go/internal/auth"
+	"github.com/luck/nexus-authorization/internal/auth"
 )
 
 // AuthConfig 返回前端启动登录流程所需的认证开关。

@@ -70,7 +70,8 @@ const Footer = ({ cancel, submit, loading, submitText }: { cancel: () => void; s
 
 const Field = ({ label, required, error, children }: { label: string; required?: boolean; error?: string; children: ReactNode }) => (
   <Form.FormItem label={required ? `${label} *` : label} help={error} status={error ? 'error' : undefined}>
-    {children}
+    {/* FormItem 会 clone 自定义子控件并注入 value/onChange；用 Fragment 包一层可跳过该 clone，保留受控状态与原有布局。 */}
+    <>{children}</>
   </Form.FormItem>
 );
 
@@ -302,10 +303,10 @@ export default function APIs({ state }: { state: State }) {
             <>
               <div className="page-filter-bar">
                 <Form className="workbench-filter-form" layout="inline" colon={false} labelWidth={100} onSubmit={() => { setSearch(draftSearch); setFilterService(draftService ?? effectiveServiceFilter); setMethodFilter(draftMethod); setPage(1); }}>
-                  <Form.FormItem label="关键词"><Input className="workbench-keyword" value={draftSearch} placeholder="摘要、路径、模块或服务" prefixIcon={<SearchIcon />} clearable onChange={setDraftSearch} /></Form.FormItem>
-                  <Form.FormItem label="服务"><Select className="workbench-select" value={draftService ?? effectiveServiceFilter} placeholder="全部服务" clearable options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={value => setDraftService(String(value || ''))} /></Form.FormItem>
-                  <Form.FormItem label="方法"><Select className="workbench-select" value={draftMethod} placeholder="全部方法" clearable options={METHODS.map((method) => ({ label: method, value: method }))} onChange={value => setDraftMethod(String(value || ''))} /></Form.FormItem>
-                  <Form.FormItem><Space size={16}><Button theme="primary" type="submit" icon={<SearchIcon />}>查询</Button><Button theme="primary" icon={<RefreshIcon />} onClick={clearFilters}>重置</Button></Space></Form.FormItem>
+                  <Form.FormItem label="关键词"><><Input className="workbench-keyword" value={draftSearch} placeholder="摘要、路径、模块或服务" prefixIcon={<SearchIcon />} clearable onChange={setDraftSearch} /></></Form.FormItem>
+                  <Form.FormItem label="服务"><><Select className="workbench-select" value={draftService ?? effectiveServiceFilter} placeholder="全部服务" clearable options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={value => setDraftService(String(value || ''))} /></></Form.FormItem>
+                  <Form.FormItem label="方法"><><Select className="workbench-select" value={draftMethod} placeholder="全部方法" clearable options={METHODS.map((method) => ({ label: method, value: method }))} onChange={value => setDraftMethod(String(value || ''))} /></></Form.FormItem>
+                  <Form.FormItem><><Space size={16}><Button theme="primary" type="submit" icon={<SearchIcon />}>查询</Button><Button theme="primary" icon={<RefreshIcon />} onClick={clearFilters}>重置</Button></Space></></Form.FormItem>
                 </Form>
               </div>
               <Card className="resource-apis-card">
@@ -348,7 +349,7 @@ export default function APIs({ state }: { state: State }) {
               <Field label="模块"><Input disabled={saving} value={edit.module} placeholder="例如用户中心" onChange={(value) => updateDraft(setEdit, { module: value })} /></Field>
             </div>
             <Field label="路径" required error={errors.path_template}><Input disabled={saving} value={edit.path_template} placeholder="例如 /v1/users/{id}" onChange={(value) => updateDraft(setEdit, { path_template: value })} /></Field>
-            <Form.FormItem label="启用接口" help="停用接口无法通过权限授权"><Switch aria-label="启用接口" disabled={saving} value={edit.enabled} onChange={(value) => updateDraft(setEdit, { enabled: Boolean(value) })} /></Form.FormItem>
+            <Form.FormItem label="启用接口" help="停用接口无法通过权限授权"><><Switch aria-label="启用接口" disabled={saving} value={edit.enabled} onChange={(value) => updateDraft(setEdit, { enabled: Boolean(value) })} /></></Form.FormItem>
           </Form> : null}
         </Drawer>
 

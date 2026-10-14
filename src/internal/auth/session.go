@@ -6,15 +6,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/luck/permission-center-go/internal/config"
+	"github.com/luck/nexus-authorization/internal/config"
 )
 
 const (
@@ -53,11 +56,11 @@ type sessionStore struct {
 }
 
 func newSessionStore(cfg config.OIDCConfig) (*sessionStore, error) {
-	secret := strings.TrimSpace(cfg.SessionSecret)
-	if secret == "" {
-		return nil, errors.New("oidc session secret is empty")
+	secret, err := resolveSessionSecret(cfg)
+	if err != nil {
+		return nil, err
 	}
-	key := sha256.Sum256([]byte("permission-center/session-key/" + secret))
+	key := sha256.Sum256([]byte("nexus-authorization/session-key/" + secret))
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return nil, fmt.Errorf("create session cipher: %w", err)
@@ -71,6 +74,74 @@ func newSessionStore(cfg config.OIDCConfig) (*sessionStore, error) {
 		name = defaultCookieName
 	}
 	return &sessionStore{name: name, secure: cfg.CookieSecure, block: gcm}, nil
+}
+
+// resolveSessionSecret preserves the generated key across process restarts.
+// An explicit secret remains supported for deployments managing their own keys.
+func resolveSessionSecret(cfg config.OIDCConfig) (string, error) {
+	if cfg.SessionSecret != "" {
+		secret := strings.TrimSpace(cfg.SessionSecret)
+		if len(secret) < 32 || strings.HasPrefix(secret, "replace-with-") {
+			return "", errors.New("oidc session secret must be at least 32 characters")
+		}
+		return secret, nil
+	}
+	path := cfg.SessionSecretFile
+	if path == "" {
+		path = filepath.Join("data", "oidc-session.key")
+	}
+	readKey := func() (string, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		secret := strings.TrimSpace(string(data))
+		decoded, err := hex.DecodeString(secret)
+		if err != nil || len(decoded) != 32 {
+			return "", fmt.Errorf("invalid persisted OIDC session key at %s", path)
+		}
+		return secret, nil
+	}
+	if secret, err := readKey(); err == nil {
+		return secret, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read OIDC session key: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("create OIDC session key directory: %w", err)
+	}
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return "", fmt.Errorf("generate OIDC session key: %w", err)
+	}
+	// Publish a fully written file without replacing another instance's key.
+	file, err := os.CreateTemp(dir, ".oidc-session-*")
+	if err != nil {
+		return "", fmt.Errorf("create OIDC session key file: %w", err)
+	}
+	defer os.Remove(file.Name())
+	secret := hex.EncodeToString(key)
+	_, writeErr := file.WriteString(secret + "\n")
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return "", fmt.Errorf("write OIDC session key: %w", writeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close OIDC session key: %w", closeErr)
+	}
+	if err := os.Link(file.Name(), path); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("persist OIDC session key: %w", err)
+		}
+		// A concurrent instance has already published the shared key.
+		return readKey()
+	}
+	return secret, nil
 }
 
 func (s *sessionStore) load(r *http.Request) (*sessionData, error) {

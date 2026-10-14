@@ -271,10 +271,9 @@
 
   .layout-content-tabs {
     flex-shrink: 0;
-    min-height: 44px;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--app-border);
-    background: var(--app-surface);
+    min-height: 0;
+    padding: 0;
+    border-bottom: 0;
 
     .t-tabs {
       width: 100%;
@@ -292,8 +291,16 @@
       background: transparent;
     }
 
+    .t-tabs__nav {
+      height: auto;
+      // TDesign sets an inline 48px minimum on the nav. Keep it in sync with
+      // the compact 36px tab items so edge controls have the same height.
+      min-height: var(--td-comp-size-m) !important;
+    }
+
     .t-tabs__nav-item {
-      height: 44px;
+      height: auto;
+      min-height: 0;
       padding: 0 14px;
       border-radius: 4px 4px 0 0;
       color: var(--app-text-secondary);
@@ -349,6 +356,16 @@
     .t-tabs__btn {
       color: var(--app-text-secondary);
       background: var(--app-surface);
+    }
+
+    .t-tabs__operations {
+      height: 100%;
+      border-bottom: 0;
+    }
+
+    .t-tabs__btn {
+      height: 100%;
+      line-height: normal;
     }
 
     .t-tabs__content {
@@ -476,7 +493,7 @@
     .layout-header-edit [aria-label='退出全屏'] { display: none; }
 
     .layout-content-tabs {
-      padding: 0 8px;
+      padding: 0;
 
       .t-tabs__nav-item {
         padding: 0 10px;

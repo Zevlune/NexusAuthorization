@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 // writeJSON 以统一成功包裹格式写入 JSON 响应。

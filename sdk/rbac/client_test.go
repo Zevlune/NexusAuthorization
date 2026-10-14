@@ -35,7 +35,7 @@ func TestMiddlewareFailClosed(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.body)), Header: make(http.Header)}, nil
 			})
-			client := NewClient("http://permission-center.test", "secret")
+			client := NewClient("http://nexus-authorization.test", "secret")
 			client.HTTP = &http.Client{Transport: transport}
 			middleware := client.Require("books", "book-service", func(*http.Request) (Identity, bool) { return Identity{"user:1", "global"}, tc.authenticated }, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
 			w := httptest.NewRecorder()
@@ -48,7 +48,7 @@ func TestMiddlewareFailClosed(t *testing.T) {
 }
 
 func TestCheckRequiresApplicationAndService(t *testing.T) {
-	client := NewClient("http://permission-center.test", "secret")
+	client := NewClient("http://nexus-authorization.test", "secret")
 	for _, tc := range []struct {
 		name    string
 		request Request
@@ -76,7 +76,7 @@ func TestCheckSendsApplicationAndServiceContext(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"allowed":false,"reason":"no_binding"}`)), Header: make(http.Header)}, nil
 	})
-	client := NewClient("http://permission-center.test", "secret")
+	client := NewClient("http://nexus-authorization.test", "secret")
 	client.HTTP = &http.Client{Transport: transport}
 	if _, err := client.Check(t.Context(), Request{AppKey: "books", ServiceResource: "book-service", Subject: "user:1", Domain: "global", Method: "GET", Path: "/api/books"}); err != nil {
 		t.Fatalf("Check returned error: %v", err)
@@ -95,7 +95,7 @@ func TestMiddlewareRequiresTrustedApplicationAndServiceConfiguration(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			client := NewClient("http://permission-center.test", "secret")
+			client := NewClient("http://nexus-authorization.test", "secret")
 			middleware := client.Require(tc.appKey, tc.service, func(*http.Request) (Identity, bool) {
 				return Identity{"user:1", "global"}, true
 			}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))

@@ -74,7 +74,6 @@ type RBACDecision struct {
 // to an application; endpoint catalog entries remain service scoped.
 type RBACV1Repository interface {
 	ListEndpoints(context.Context, string) ([]RBACEndpoint, error)
-	ListEndpointsPage(context.Context, string, int, int) ([]RBACEndpoint, int, error)
 	SaveEndpoint(context.Context, string, RBACEndpoint) (RBACEndpoint, error)
 	DeleteEndpoint(context.Context, string, uuid.UUID) error
 	ListRoles(context.Context, string) ([]RBACRole, error)
@@ -100,14 +99,6 @@ func NewRBACV1Service(repository RBACV1Repository) *RBACV1Service {
 	return &RBACV1Service{repository: repository}
 }
 
-func (s *RBACV1Service) ListEndpoints(ctx context.Context, serviceResource string) ([]RBACEndpoint, error) {
-	return s.repository.ListEndpoints(ctx, normalizeRBACScope(serviceResource))
-}
-func (s *RBACV1Service) ListEndpointsPage(ctx context.Context, serviceResource string, page, pageSize int) (RBACPage[RBACEndpoint], error) {
-	page, pageSize = normalizeRBACPage(page, pageSize)
-	items, total, err := s.repository.ListEndpointsPage(ctx, normalizeRBACScope(serviceResource), page, pageSize)
-	return RBACPage[RBACEndpoint]{Items: items, Total: total, Page: page, PageSize: pageSize}, err
-}
 func (s *RBACV1Service) SaveEndpoint(ctx context.Context, serviceResource string, value RBACEndpoint) (RBACEndpoint, error) {
 	if strings.TrimSpace(value.Method) == "" || !strings.HasPrefix(strings.TrimSpace(value.PathTemplate), "/") {
 		return RBACEndpoint{}, fmt.Errorf("%w: method and absolute path_template are required", ErrInvalidArgument)

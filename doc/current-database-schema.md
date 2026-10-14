@@ -1,6 +1,6 @@
 # 当前数据库结构
 
-整理日期：2026-10-10。
+整理日期：2026-10-14。
 
 [返回当前功能总览](current-system-overview.md) · [完整初始化 SQL](../migrations/001_init.sql)
 
@@ -48,6 +48,7 @@
 | `app_key` | `VARCHAR(128)` | 否 | 无 | 应用稳定标识 |
 | `display_name` | `VARCHAR(200)` | 否 | 无 | 应用展示名称 |
 | `description` | `TEXT` | 否 | `''` | 应用描述 |
+| `url` | `VARCHAR(2048)` | 否 | `''` | 可选 HTTP(S) Web 入口地址 |
 | `enabled` | `BOOLEAN` | 否 | `TRUE` | 是否启用 |
 | `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
@@ -86,6 +87,29 @@
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
 约束：主键为 `id`；(`service_resource_key`, `endpoint_key`) 唯一；(`service_resource_key`, `method`, `path_template`) 唯一；`endpoint_key` 非空白；`method = upper(method)`；`left(path_template, 1) = '/'`。创建、查询和更新 API 前由当前服务资源目录校验 key 存在且启用；数据库不建立服务资源外键。
+
+### `authorization_api_endpoints`
+
+兼容目录接口 `/v1/authorization/api-endpoints*` 使用的服务资源作用域 Endpoint 登记表。它与 `api_endpoints` 是两套独立数据，只服务该兼容路由，不参与应用 RBAC 的角色、菜单、主体绑定和发布快照。
+
+| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | `UUID` | 否 | `gen_random_uuid()` | Endpoint 主键 |
+| `service_resource` | `VARCHAR(128)` | 否 | 无 | 所属服务资源业务键；由当前服务资源目录校验，不是数据库外键 |
+| `controller` | `VARCHAR(200)` | 否 | 无 | 控制器或模块名 |
+| `method` | `VARCHAR(16)` | 否 | 无 | HTTP 方法，必须大写 |
+| `path_template` | `VARCHAR(500)` | 否 | 无 | 路径模板，必须以 `/` 开头 |
+| `summary` | `TEXT` | 否 | `''` | API 摘要 |
+| `enabled` | `BOOLEAN` | 否 | `TRUE` | 是否启用 |
+| `created_by_id` | `VARCHAR(200)` | 否 | `'system'` | 创建人标识 |
+| `created_by_name` | `VARCHAR(200)` | 否 | `'system'` | 创建人名称 |
+| `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
+| `updated_by_id` | `VARCHAR(200)` | 否 | `'system'` | 最近更新人标识 |
+| `updated_by_name` | `VARCHAR(200)` | 否 | `'system'` | 最近更新人名称 |
+| `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护，仓储写入时置为 `NOW()` |
+| `is_deleted` | `BOOLEAN` | 否 | `FALSE` | 软删除标记；仓储查询过滤 `is_deleted = FALSE` |
+
+约束：主键为 `id`；`service_resource` 和 `controller` 必须非空白；`method = upper(method)`；`left(path_template, 1) = '/'`。`authorization_api_endpoints_active_route_idx` 是 (`service_resource`, `method`, `path_template`) 上的唯一部分索引，条件为 `WHERE is_deleted = FALSE`：未软删除的同一服务资源方法路径不得重复，软删除后同一路由可以重新登记。审计值由写入请求上下文提供，缺省为 `system`。
 
 ### `roles`
 
@@ -211,11 +235,12 @@
 
 ## 显式索引
 
-PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 6 个普通索引：
+PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 7 个索引：
 
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
 | `api_endpoints_scope_enabled_idx` | `api_endpoints` | (`service_resource_key`, `enabled`) | 按服务资源和启用状态查询端点 |
+| `authorization_api_endpoints_active_route_idx` | `authorization_api_endpoints` | (`service_resource`, `method`, `path_template`) `WHERE is_deleted = FALSE` | 唯一部分索引：未软删除的同一服务资源方法路径不得重复，软删除后允许重新登记 |
 | `role_api_endpoint_bindings_endpoint_idx` | `role_api_endpoint_bindings` | (`endpoint_id`, `role_id`) | 按端点反查角色 |
 | `subject_role_bindings_application_lookup_idx` | `subject_role_bindings` | (`application_id`, `subject`, `domain`) | 按应用、主体和域查询角色绑定 |
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
@@ -240,13 +265,20 @@ erDiagram
     roles ||--o{ subject_role_bindings : assigned
     applications ||--o{ rbac_releases : publishes
     rbac_releases ||--o| rbac_release_snapshots : contains
+    authorization_api_endpoints {
+        uuid id PK
+        varchar service_resource
+        varchar method
+        varchar path_template
+        boolean is_deleted
+    }
 ```
 
-图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。
+图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。`authorization_api_endpoints` 不建立数据库外键、不被发布快照引用，因此在上图中是独立节点。
 
 ## 明确不包含的结构
 
 - 初始化脚本不创建用户表；主体以 `subject` 字符串保存在 `subject_role_bindings`，身份来源不由此 schema 管理。
 - 初始化脚本不创建 OAuth 客户端表。
-- 初始化脚本不创建独立的 API 字段权限表；API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。
+- 初始化脚本不创建独立的 API 字段权限表；应用 RBAC 的 API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。兼容目录接口的 `authorization_api_endpoints` 是带软删除的独立 Endpoint 登记表，不参与应用 RBAC 发布快照。
 - 初始化脚本不插入任何应用、服务资源、角色、菜单、绑定或发布版本种子数据。

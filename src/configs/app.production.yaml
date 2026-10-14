@@ -14,7 +14,12 @@ service_resource:
   api_key: ""
   timeout: "5s"
 authorization:
+  # Keep /v1/authorize closed until unified Open API token management is integrated.
   service_credential: ""
+scim:
+  nexusauth_base_url: ""
+  api_key: ""
+  timeout: "5s"
 oidc:
   enabled: true
   authority: ""
@@ -24,4 +29,5 @@ oidc:
   post_logout_redirect_uri: ""
   scopes: ["openid", "profile", "offline_access", "permission.center.api"]
   audience: "permission.center.api"
+  # Empty: generate and persist the session key in data/oidc-session.key.
   session_secret: ""

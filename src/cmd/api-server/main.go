@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/luck/permission-center-go/internal/app"
-	"github.com/luck/permission-center-go/internal/config"
-	"github.com/luck/permission-center-go/internal/logging"
-	httpserver "github.com/luck/permission-center-go/internal/server/http"
+	"github.com/luck/nexus-authorization/internal/app"
+	"github.com/luck/nexus-authorization/internal/config"
+	"github.com/luck/nexus-authorization/internal/logging"
+	httpserver "github.com/luck/nexus-authorization/internal/server/http"
 )
 
 func main() {
@@ -20,7 +20,7 @@ func main() {
 func run() int {
 	cfg, err := config.Load("configs/app.yaml")
 	if err != nil {
-		logging.NewText(os.Stderr, "permission-center-go", "info").Error("Load configuration failed.", slog.Any("Error", err))
+		logging.NewText(os.Stderr, "nexus-authorization", "info").Error("Load configuration failed.", slog.Any("Error", err))
 		return 1
 	}
 	logger, closer, err := logging.New(logging.Options{
@@ -49,11 +49,12 @@ func run() int {
 			}
 			return user.Subject
 		})(httpserver.NewServer(
-			httpserver.NewHandler(application.Permissions, application.Auth).
+			httpserver.NewHandler(application.Auth).
 				WithServiceResourceCatalog(application.ServiceResources).
 				WithServiceResourceService(application.ServiceResources).
 				WithAPIEndpointService(application.APIEndpoints).
 				WithRBACV1Service(application.RBACV1).
+				WithUserDirectory(application.Users).
 				WithAuthorizationServiceCredential(cfg.Authorization.ServiceCredential),
 			application.Auth.Middleware,
 		)),

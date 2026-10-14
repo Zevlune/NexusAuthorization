@@ -10,7 +10,7 @@ export const DEFAULT_LAYOUT_TAB: LayoutTabItem = {
   removable: false,
 };
 
-export const LAYOUT_TABS_STORAGE_KEY = 'permission-center-layout-tabs';
+export const LAYOUT_TABS_STORAGE_KEY = 'nexus-authorization-layout-tabs';
 
 export const getStoredLayoutTabs = (): LayoutTabItem[] => {
   const defaultTabs = [{ ...DEFAULT_LAYOUT_TAB }];
@@ -25,7 +25,7 @@ export const getStoredLayoutTabs = (): LayoutTabItem[] => {
       return defaultTabs;
     }
 
-    const validTabs = parsed.filter((tab) => tab?.value && tab?.label);
+    const validTabs = parsed.filter((tab) => tab?.value && tab?.label && tab.value !== '/bindings');
     const hasDashboard = validTabs.some((tab) => tab.value === DEFAULT_LAYOUT_TAB.value);
     return hasDashboard ? validTabs : [...defaultTabs, ...validTabs];
   } catch {

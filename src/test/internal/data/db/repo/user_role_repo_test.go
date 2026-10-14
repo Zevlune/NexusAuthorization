@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func TestNormalizeUserRoleScope(t *testing.T) {

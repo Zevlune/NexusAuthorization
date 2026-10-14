@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/luck/permission-center-go/internal/data/db/model"
+	"github.com/luck/nexus-authorization/internal/data/db/model"
 )
 
 func TestToBizAPIEndpointMapsFieldsAndAuditState(t *testing.T) {

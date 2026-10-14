@@ -28,7 +28,7 @@ import {
 } from '../../api/application';
 import { getPostServiceResourceSelectionPath } from '../../router/auth';
 import { applyThemeMode, getThemeMode } from '../../theme';
-import { getRequestErrorMessage } from '../permission-center/shared';
+import { getRequestErrorMessage } from '../nexus-authorization/shared';
 import './style.less';
 
 const empty: Application = { key: '', displayName: '', description: '', enabled: true, url: '' };
@@ -250,46 +250,60 @@ export default function SelectApplication() {
         ) : (
           <div className="application-grid">
             {visibleItems.map(item => (
-              <Card
+              <div
                 key={item.key}
-                className={`application-card${selected === item.key ? ' is-selected' : ''}${!item.enabled ? ' is-disabled' : ''}`}
-                bordered
-                header={(
-                  <Radio
-                    className="application-card-radio"
-                    checked={selected === item.key}
-                    disabled={!item.enabled}
-                    value={item.key}
-                    onChange={(checked) => { if (checked) setSelected(item.key); }}
-                  >
-                    <strong title={getApplicationLabel(item)}>{getApplicationLabel(item)}</strong>
-                  </Radio>
-                )}
-                footer={(
-                  <Space className="application-card-footer" align="center" breakLine>
-                    <Tag theme={item.enabled ? 'success' : 'default'} variant="light">{item.enabled ? '已启用' : '已停用'}</Tag>
-                    <Space className="application-card-actions" align="center" size="small">
-                      {item.enabled && isValidApplicationUrl(item.url) ? (
-                        <a
-                          className="application-card-link"
-                          href={item.url?.trim()}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={event => event.stopPropagation()}
-                        >
-                          打开应用
-                        </a>
-                      ) : null}
-                      <Button variant="text" type="button" icon={<EditIcon />} onClick={() => openEdit(item)}>编辑</Button>
-                    </Space>
-                  </Space>
-                )}
+                className="application-card-hit-area"
+                role={item.enabled ? 'button' : 'group'}
+                tabIndex={item.enabled ? 0 : -1}
+                aria-label={`选择应用：${getApplicationLabel(item)}`}
+                onClick={() => { if (item.enabled) setSelected(item.key); }}
+                onKeyDown={(event) => {
+                  if (item.enabled && (event.key === 'Enter' || event.key === ' ')) {
+                    event.preventDefault();
+                    setSelected(item.key);
+                  }
+                }}
               >
-                <div className="application-card-content">
-                  <code>{item.key}</code>
-                  <span className="application-description">{item.description || '尚未填写应用描述'}</span>
-                </div>
-              </Card>
+                <Card
+                  className={`application-card${selected === item.key ? ' is-selected' : ''}${!item.enabled ? ' is-disabled' : ''}`}
+                  bordered
+                  header={(
+                    <Radio
+                      className="application-card-radio"
+                      checked={selected === item.key}
+                      disabled={!item.enabled}
+                      value={item.key}
+                      onChange={(checked) => { if (checked) setSelected(item.key); }}
+                    >
+                      <strong title={getApplicationLabel(item)}>{getApplicationLabel(item)}</strong>
+                    </Radio>
+                  )}
+                  footer={(
+                    <Space className="application-card-footer" align="center" breakLine>
+                      <Tag theme={item.enabled ? 'success' : 'default'} variant="light">{item.enabled ? '已启用' : '已停用'}</Tag>
+                      <Space className="application-card-actions" align="center" size="small">
+                        {item.enabled && isValidApplicationUrl(item.url) ? (
+                          <a
+                            className="application-card-link"
+                            href={item.url?.trim()}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={event => event.stopPropagation()}
+                          >
+                            打开应用
+                          </a>
+                        ) : null}
+                        <Button variant="text" type="button" icon={<EditIcon />} onClick={(event) => { event.stopPropagation(); openEdit(item); }}>编辑</Button>
+                      </Space>
+                    </Space>
+                  )}
+                >
+                  <div className="application-card-content">
+                    <code>{item.key}</code>
+                    <span className="application-description">{item.description || '尚未填写应用描述'}</span>
+                  </div>
+                </Card>
+              </div>
             ))}
           </div>
         )}
@@ -316,8 +330,8 @@ export default function SelectApplication() {
       >
         <Form id="application-form" className="application-form" labelAlign="top" preventSubmitDefault onSubmit={() => void save()}>
           <p className="application-form-intro">先填写应用基本信息，创建后可关联服务资源并配置菜单。</p>
-          <Form.FormItem label="应用名称" name="displayName" requiredMark status={fieldErrors.displayName ? 'error' : undefined} help={fieldErrors.displayName || '便于团队识别，可随时修改。'}>
-            <Input
+          <Form.FormItem label="应用名称" requiredMark status={fieldErrors.displayName ? 'error' : undefined} help={fieldErrors.displayName || '便于团队识别，可随时修改。'}>
+            <><Input
               ref={nameInput}
               autofocus
               value={form.displayName}
@@ -325,35 +339,35 @@ export default function SelectApplication() {
               disabled={saving}
               onBlur={() => validateField('displayName')}
               onChange={value => updateField('displayName', value)}
-            />
+            /></>
           </Form.FormItem>
-          <Form.FormItem label="应用标识" name="key" requiredMark status={fieldErrors.key ? 'error' : undefined} help={fieldErrors.key || '应用的唯一标识，创建后不可修改。'}>
-            <Input
+          <Form.FormItem label="应用标识" requiredMark status={fieldErrors.key ? 'error' : undefined} help={fieldErrors.key || '应用的唯一标识，创建后不可修改。'}>
+            <><Input
               value={form.key}
               disabled={Boolean(editingKey) || saving}
               placeholder="例如：business.portal"
               onBlur={() => validateField('key')}
               onChange={value => updateField('key', value)}
-            />
+            /></>
           </Form.FormItem>
-          <Form.FormItem label="应用地址" name="url" status={fieldErrors.url ? 'error' : undefined} help={fieldErrors.url || '选填，填写后可从应用卡片直接打开。'}>
-            <Input
+          <Form.FormItem label="应用地址" status={fieldErrors.url ? 'error' : undefined} help={fieldErrors.url || '选填，填写后可从应用卡片直接打开。'}>
+            <><Input
               value={form.url || ''}
               disabled={saving}
               placeholder="例如：https://portal.example.com"
               onBlur={() => validateField('url')}
               onChange={value => updateField('url', value)}
-            />
+            /></>
           </Form.FormItem>
-          <Form.FormItem label="应用描述" name="description">
-            <Textarea
+          <Form.FormItem label="应用描述">
+            <><Textarea
               value={form.description}
               disabled={saving}
               placeholder="简要说明应用用途（选填）"
               onChange={value => updateField('description', value)}
-            />
+            /></>
           </Form.FormItem>
-          <Form.FormItem className="application-switch-item" name="enabled">
+          <Form.FormItem className="application-switch-item">
             <div className="application-switch-field">
               <div>
                 <span>启用应用</span>

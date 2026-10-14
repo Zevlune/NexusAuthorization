@@ -2,9 +2,11 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/jackc/pgx/v5"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func (r *RBACV1Repository) ListApplicationMenus(ctx context.Context, app string) ([]biz.ApplicationMenu, error) {
@@ -42,13 +44,16 @@ func (r *RBACV1Repository) SaveApplicationMenu(ctx context.Context, app string, 
 		return v, err
 	}
 	if v.ParentID != nil {
-		var valid bool
-		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM menus WHERE id=$1 AND application_id=$2)`, *v.ParentID, aid).Scan(&valid)
+		var parentType string
+		err = tx.QueryRow(ctx, `SELECT menu_type FROM menus WHERE id=$1 AND application_id=$2`, *v.ParentID, aid).Scan(&parentType)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return v, fmt.Errorf("%w: parent outside application", biz.ErrInvalidArgument)
+		}
 		if err != nil {
 			return v, err
 		}
-		if !valid {
-			return v, fmt.Errorf("%w: parent outside application", biz.ErrInvalidArgument)
+		if parentType == "button" {
+			return v, fmt.Errorf("%w: button cannot have child nodes", biz.ErrInvalidArgument)
 		}
 		var cycle bool
 		err = tx.QueryRow(ctx, `WITH RECURSIVE ancestors AS (SELECT id,parent_id FROM menus WHERE id=$1 UNION SELECT m.id,m.parent_id FROM menus m JOIN ancestors a ON m.id=a.parent_id) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=$2)`, *v.ParentID, v.ID).Scan(&cycle)
@@ -57,6 +62,16 @@ func (r *RBACV1Repository) SaveApplicationMenu(ctx context.Context, app string, 
 		}
 		if cycle {
 			return v, fmt.Errorf("%w: cyclic menu hierarchy", biz.ErrInvalidArgument)
+		}
+	}
+	if v.MenuType == "button" && v.ID != uuid.Nil {
+		var hasChildren bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM menus WHERE parent_id=$1 AND application_id=$2)`, v.ID, aid).Scan(&hasChildren)
+		if err != nil {
+			return v, err
+		}
+		if hasChildren {
+			return v, fmt.Errorf("%w: menu with children cannot become a button", biz.ErrInvalidArgument)
 		}
 	}
 	if v.ID == uuid.Nil {

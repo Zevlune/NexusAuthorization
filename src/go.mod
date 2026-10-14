@@ -1,4 +1,4 @@
-module github.com/luck/permission-center-go
+module github.com/luck/nexus-authorization
 
 go 1.25
 

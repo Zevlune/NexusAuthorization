@@ -29,13 +29,16 @@ export type Menu = {
   parent_id: string | null;
   code: string;
   name: string;
-  menu_type: 'directory' | 'menu' | 'button';
+  menu_type: 'menu' | 'button';
   route: string;
   component: string;
   icon: string;
   sort_order: number;
   enabled: boolean;
 };
+/** 后台 wire 兼容类型：历史记录仍可能返回 directory。 */
+type MenuWire = Omit<Menu, 'menu_type'> & { menu_type: 'directory' | 'menu' | 'button' };
+const normalizeMenu = (item: MenuWire): Menu => ({ ...item, menu_type: item.menu_type === 'button' ? 'button' : 'menu' });
 export type PageResult<T> = { items: T[]; total: number; page: number; page_size: number };
 export type Release = { id: string; version: number; status: string; description: string; published_by: string; published_at: string };
 
@@ -68,6 +71,9 @@ export const replaceSubjectRoles = (appKey: string, subject: string, domain: str
 export const publishRBAC = (appKey: string, description: string) => request.post<Release>(`/v1/rbac-v1/releases${query(appKey)}`, { description });
 export const listRBACReleases = (appKey: string) => request.get<{ items: Release[] }>(`/v1/rbac-v1/releases${query(appKey)}`);
 export const simulateRBAC = (appKey: string, input: { service_resource: string; subject: string; domain: string; method: string; path: string }) => request.post(`/v1/rbac-v1/simulate${query(appKey, input.service_resource)}`, input);
-export const listMenus = (appKey: string) => request.get<{ items: Menu[] }>(`/v1/rbac-v1/menus${query(appKey)}`);
+export const listMenus = async (appKey: string): Promise<{ items: Menu[] }> => {
+  const result = await request.get<{ items: MenuWire[] }>(`/v1/rbac-v1/menus${query(appKey)}`);
+  return { items: (result.items || []).map(normalizeMenu) };
+};
 export const saveMenu = (appKey: string, item: Partial<Menu>) => request.post<Menu>(`/v1/rbac-v1/menus${query(appKey)}`, item);
 export const deleteMenu = (appKey: string, id: string) => request.delete(`/v1/rbac-v1/menus/${id}${query(appKey)}`);

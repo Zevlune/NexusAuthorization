@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// BaseFields contains the audit state shared by every permission record.
+// BaseFields contains audit state for the compatibility API endpoint catalog.
 type BaseFields struct {
 	CreatedByID   string
 	CreatedByName string

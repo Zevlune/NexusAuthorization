@@ -3,7 +3,8 @@ import ErrorPage from '../components/error';
 import PublicLayout from '../layouts/layout';
 import Login from '../pages/login';
 import SelectServiceResource from '../pages/select-service-resource';
-import WorkbenchPage from '../pages/policy-workbench';
+import { createWorkbenchRoutes } from './workbench-routes';
+import type { WorkbenchMenu } from './workbench-menu';
 import { consumeLoginRedirect, getServiceResourceSelectionPath, getSafeRedirectPath, HomeRedirect, RedirectIfAuthenticated, RequireServiceResource, RequireAuth, setCachedAuthStatus } from './auth';
 
 const AuthCallback = () => {
@@ -13,9 +14,7 @@ const AuthCallback = () => {
   return <Navigate to={getServiceResourceSelectionPath(redirect)} replace />;
 };
 
-const workbenchRoutes = ['/dashboard', '/service-resources', '/api-resources', '/roles', '/bindings', '/menus', '/releases', '/simulate'];
-
-export const routes: RouteObject[] = [
+export const createRoutes = (menus: WorkbenchMenu[]): RouteObject[] => [
   { element: <RedirectIfAuthenticated />, children: [{ path: '/login', Component: Login }] },
   { path: '/auth/callback', Component: AuthCallback },
   { path: '/', element: <HomeRedirect /> },
@@ -32,7 +31,11 @@ export const routes: RouteObject[] = [
         children: [
           {
             element: <RequireServiceResource />,
-            children: workbenchRoutes.map((path) => ({ path: path.slice(1), Component: WorkbenchPage })),
+            children: [
+              ...createWorkbenchRoutes(menus),
+              { path: 'bindings', element: <Navigate to="/roles" replace /> },
+              { path: '*', Component: ErrorPage },
+            ],
           },
         ],
       },

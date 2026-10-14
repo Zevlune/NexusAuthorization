@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func rbacPageParams(r *http.Request) (int, int) {

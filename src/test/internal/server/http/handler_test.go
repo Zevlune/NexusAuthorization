@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/luck/permission-center-go/internal/auth"
-	"github.com/luck/permission-center-go/internal/biz"
-	"github.com/luck/permission-center-go/internal/config"
+	"github.com/luck/nexus-authorization/internal/auth"
+	"github.com/luck/nexus-authorization/internal/biz"
+	"github.com/luck/nexus-authorization/internal/config"
 )
 
 func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {

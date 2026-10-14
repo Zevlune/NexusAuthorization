@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 const applicationColumns = `id,app_key,display_name,description,enabled,url`

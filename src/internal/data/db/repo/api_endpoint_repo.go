@@ -7,8 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/luck/permission-center-go/internal/biz"
-	"github.com/luck/permission-center-go/internal/data/db/model"
+	"github.com/luck/nexus-authorization/internal/biz"
+	"github.com/luck/nexus-authorization/internal/data/db/model"
 )
 
 const apiEndpointColumns = `id, service_resource, controller, method, path_template, summary,
@@ -156,15 +156,7 @@ func toBizAPIEndpoint(value *model.APIEndpoint) *biz.APIEndpoint {
 		return nil
 	}
 	return &biz.APIEndpoint{
-		BaseFields: biz.BaseFields{
-			CreatedByID:   value.CreatedByID,
-			CreatedByName: value.CreatedByName,
-			CreatedAt:     value.CreatedAt,
-			UpdatedByID:   value.UpdatedByID,
-			UpdatedByName: value.UpdatedByName,
-			UpdatedAt:     value.UpdatedAt,
-			IsDeleted:     value.IsDeleted,
-		},
+		BaseFields:      baseFields(value.BaseFields),
 		ID:              value.ID,
 		ServiceResource: value.ServiceResource,
 		Controller:      value.Controller,

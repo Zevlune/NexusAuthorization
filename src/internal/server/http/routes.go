@@ -26,6 +26,7 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 		return next
 	}
 	mux.Handle("/v1/", protect(http.NotFoundHandler()))
+	mux.Handle("GET /v1/users", protect(http.HandlerFunc(handler.ListUsers)))
 	mux.Handle("POST /v1/authorize", http.HandlerFunc(handler.AuthorizeRBAC))
 	mux.Handle("GET /v1/applications", protect(http.HandlerFunc(handler.ListApplications)))
 	mux.Handle("POST /v1/applications", protect(http.HandlerFunc(handler.SaveApplication)))

@@ -1,0 +1,45 @@
+/* 触发器：TDesign TreeSelect 的只读输入框，仅对齐原 44px 输入框的尺寸与主题色。 */
+.menus-parent-picker { width: 100%; }
+.menus-parent-picker .t-input { width: 100%; height: 44px; padding: 0 12px; border-color: var(--app-border); border-radius: 6px; background: var(--app-surface); }
+.menus-parent-picker .t-input:hover { border-color: var(--app-accent); }
+.menus-parent-picker .t-input--focused { border-color: var(--app-accent); box-shadow: 0 0 0 2px var(--app-accent-soft); }
+.menus-parent-picker .t-input.t-is-disabled { border-color: var(--app-border); background: var(--app-surface-muted); }
+.menus-parent-picker .t-input__inner { color: var(--app-text-secondary); font-size: 12px; }
+.menus-parent-picker .t-input__suffix .t-icon { color: var(--app-text-secondary); }
+
+/* 面板内部：顶部独立搜索行 + 可滚动树 + 底部说明。面板宽度/边框由 overlayInnerStyle 控制。 */
+.menus-parent-picker-search.t-space { display: block; width: 100%; padding: 12px 12px 0; background: var(--app-surface); }
+.menus-parent-picker-search.t-space > .t-space-item { width: 100%; }
+
+.menus-parent-picker-tree {
+  max-height: 254px;
+  padding: 8px 12px;
+  overflow: auto;
+  overflow-x: hidden;
+}
+
+/* 深层缩进：按节点层级递增缩进，超长内容在面板内省略而不横向溢出。 */
+.menus-parent-picker-tree .t-tree__item { min-height: 30px; padding-left: calc(12px + 20px * var(--level)); }
+.menus-parent-picker-tree .t-tree__item:hover { background: var(--app-surface-subtle); }
+.menus-parent-picker-tree .t-tree__item.t-is-active { background: var(--app-accent-soft); }
+
+.menus-parent-picker-node.t-space { display: flex; width: 100%; min-width: 0; color: var(--app-text); font-size: 12px; line-height: 18px; word-break: normal; }
+/* Space 默认给每个子项 width: inherit，会撑破单行布局，这里按行内布局重排。 */
+.menus-parent-picker-node.t-space > .t-space-item { width: auto; min-width: 0; }
+.menus-parent-picker-node.t-space > .t-space-item:nth-of-type(2) { flex: 1 1 0; min-width: 0; overflow: hidden; }
+.menus-parent-picker-node-icon { flex-shrink: 0; color: var(--app-text-muted); font-size: 14px; }
+.menus-parent-picker-node-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menus-parent-picker-node-meta.t-space { flex-shrink: 0; }
+.menus-parent-picker-node-meta.t-space > .t-space-item { width: auto; }
+.menus-parent-picker-node-meta .t-typography--secondary { color: var(--app-text-muted); font-size: 11px; line-height: 18px; }
+.menus-parent-picker-node-reason { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menus-parent-picker-node-check { flex-shrink: 0; color: var(--app-accent); font-size: 14px; }
+.menus-parent-picker-node.is-selected .menus-parent-picker-node-name { color: var(--app-accent); }
+.menus-parent-picker-node.is-selected .menus-parent-picker-node-icon { color: var(--app-accent); }
+.menus-parent-picker-tree .t-tree__item.t-is-disabled .menus-parent-picker-node-name { color: var(--app-text-muted); }
+
+.menus-parent-picker-empty.t-typography--secondary { display: block; padding: 18px 12px; color: var(--app-text-muted); font-size: 12px; text-align: center; }
+.menus-parent-picker-note.t-typography--secondary { display: block; margin: 0; padding: 8px 12px; border-top: 1px solid var(--app-border); background: var(--app-surface); color: var(--app-text-secondary); font-size: 11px; line-height: 18px; }
+
+.menus-parent-picker-search .t-input { height: 32px; border-color: transparent; background: var(--app-surface-subtle); }
+.menus-parent-picker-search .t-input__inner { font-size: 12px; }

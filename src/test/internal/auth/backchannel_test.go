@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/luck/permission-center-go/internal/config"
+	"github.com/luck/nexus-authorization/internal/config"
 )
 
 func TestNewUsesBackchannelWithoutChangingBrowserEndpoints(t *testing.T) {
@@ -49,14 +49,14 @@ func TestNewUsesBackchannelWithoutChangingBrowserEndpoints(t *testing.T) {
 		Enabled:               true,
 		Authority:             publicAuthority,
 		BackchannelAuthority:  backchannelAuthority,
-		ClientID:              "permission-center-api",
+		ClientID:              "nexus-authorization-api",
 		Audience:              "permission.center.api",
 		ClientSecret:          "test-client-secret",
 		RedirectURI:           "http://localhost:8080/signin-oidc",
 		PostLogoutRedirectURI: "http://localhost:5274/",
 		Scopes:                []string{"openid", "profile"},
 		SessionSecret:         "test-session-secret-at-least-32-characters",
-		CookieName:            "permission_center_session",
+		CookieName:            "nexusauthorization_session",
 	}
 	service, err := New(context.Background(), cfg)
 	if err != nil {

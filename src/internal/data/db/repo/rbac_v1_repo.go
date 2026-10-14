@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 // RBACV1Repository persists the normalized RBAC v1 control plane. It does
@@ -80,30 +80,6 @@ func (r *RBACV1Repository) ListEndpoints(ctx context.Context, key string) ([]biz
 		items = append(items, v)
 	}
 	return items, mapDBError(rows.Err())
-}
-func (r *RBACV1Repository) ListEndpointsPage(ctx context.Context, key string, page, pageSize int) ([]biz.RBACEndpoint, int, error) {
-	scope, err := r.resourceKey(ctx, key)
-	if err != nil {
-		return nil, 0, err
-	}
-	var total int
-	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM api_endpoints WHERE service_resource_key=$1`, scope).Scan(&total); err != nil {
-		return nil, 0, mapDBError(err)
-	}
-	rows, err := r.pool.Query(ctx, `SELECT id,service_resource_key,endpoint_key,method,path_template,module,summary,source,enabled,last_discovered_at,created_at,updated_at FROM api_endpoints WHERE service_resource_key=$1 ORDER BY module,method,path_template LIMIT $2 OFFSET $3`, scope, pageSize, (page-1)*pageSize)
-	if err != nil {
-		return nil, 0, mapDBError(err)
-	}
-	defer rows.Close()
-	items := make([]biz.RBACEndpoint, 0, pageSize)
-	for rows.Next() {
-		var v biz.RBACEndpoint
-		if err := rows.Scan(&v.ID, &v.ServiceResource, &v.EndpointKey, &v.Method, &v.PathTemplate, &v.Module, &v.Summary, &v.Source, &v.Enabled, &v.LastDiscoveredAt, &v.CreatedAt, &v.UpdatedAt); err != nil {
-			return nil, 0, mapDBError(err)
-		}
-		items = append(items, v)
-	}
-	return items, total, mapDBError(rows.Err())
 }
 func (r *RBACV1Repository) SaveEndpoint(ctx context.Context, key string, value biz.RBACEndpoint) (biz.RBACEndpoint, error) {
 	scope, err := r.resourceKey(ctx, key)

@@ -15,7 +15,7 @@ func TestLoadOIDCBackchannelAuthorityFromEnvironment(t *testing.T) {
 http:
   addr: ":8080"
 database:
-  url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"
+  url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"
 service_resource:
   source: nexusauth
   nexusauth_base_url: "http://nexus-auth:5100"
@@ -24,7 +24,7 @@ oidc:
   enabled: true
   authority: "http://localhost:5100"
   backchannel_authority: "http://yaml-nexus-auth:5100"
-  client_id: "permission-center-api"
+  client_id: "nexus-authorization-api"
   client_secret: "test-client-secret"
   audience: "permission.center.api"
   redirect_uri: "http://localhost:8080/signin-oidc"
@@ -54,7 +54,7 @@ func TestLoadLoggingRemainsFromYAMLWhenEnvironmentIsSet(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
 	contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 service_resource: {source: local}
 logging: {module: "yaml-module", minimum_level: "info"}
 oidc: {enabled: false}
@@ -87,12 +87,12 @@ func TestLoadDerivesCookieSecurityAndNameFromRedirectURI(t *testing.T) {
 			configPath := filepath.Join(t.TempDir(), "app.yaml")
 			contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 service_resource: {source: local}
 oidc:
   enabled: true
   authority: "http://localhost:5100"
-  client_id: "permission-center-api"
+  client_id: "nexus-authorization-api"
   client_secret: "test-client-secret"
   audience: "permission.center.api"
   redirect_uri: "` + testCase.uri + `"
@@ -143,6 +143,20 @@ func TestOIDCValidateRequiresAudience(t *testing.T) {
 	}
 }
 
+func TestOIDCValidateAllowsAutomaticSessionKey(t *testing.T) {
+	cfg := validOIDCConfig()
+	cfg.SessionSecret = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("automatic session key should be allowed: %v", err)
+	}
+	for _, secret := range []string{"short", "replace-with-at-least-32-random-characters", strings.Repeat(" ", 32)} {
+		cfg.SessionSecret = secret
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("invalid explicit session key should fail validation")
+		}
+	}
+}
+
 func TestOIDCValidateRequiresClientSecretForIntrospection(t *testing.T) {
 	cfg := validOIDCConfig()
 	cfg.ClientSecret = ""
@@ -158,7 +172,7 @@ func TestLoadServiceResourceFromEnvironment(t *testing.T) {
 http:
   addr: ":8080"
 database:
-  url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"
+  url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"
 service_resource:
   source: nexusauth
   nexusauth_base_url: "http://yaml-nexus-auth:5100"
@@ -187,12 +201,45 @@ oidc:
 	}
 }
 
+func TestLoadSCIMConfigFromEnvironment(t *testing.T) {
+	clearConfigEnv(t)
+	configPath := filepath.Join(t.TempDir(), "app.yaml")
+	contents := []byte(`
+http: {addr: ":8080"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
+service_resource: {source: local}
+scim:
+  nexusauth_base_url: "http://yaml-scim:8800"
+  api_key: "yaml-token"
+  timeout: "2s"
+oidc: {enabled: false}
+`)
+	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL", "https://env-scim:8800")
+	t.Setenv("NEXUSAUTHORIZATION_SCIM_API_KEY", "scim-read-token")
+	t.Setenv("NEXUSAUTHORIZATION_SCIM_TIMEOUT", "3s")
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SCIM.NexusAuthBaseURL != "https://env-scim:8800" || cfg.SCIM.APIKey != "scim-read-token" || cfg.SCIM.Timeout != "3s" {
+		t.Fatalf("SCIM config = %#v", cfg.SCIM)
+	}
+	duration, err := cfg.SCIM.TimeoutDuration()
+	if err != nil || duration != 3*time.Second {
+		t.Fatalf("SCIM timeout = %v, %v", duration, err)
+	}
+}
+
 func TestLoadRejectsNexusAuthServiceResourceWithoutCredential(t *testing.T) {
 	clearConfigEnv(t)
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
 	contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 service_resource:
   source: nexusauth
   nexusauth_base_url: "http://nexus-auth:5100"
@@ -211,7 +258,7 @@ func TestLoadDefaultsServiceResourceToNexusAuth(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
 	contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 oidc: {enabled: false}
 `)
 	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
@@ -233,7 +280,7 @@ func TestLoadRejectsUnsupportedServiceResourceSource(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
 	contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 service_resource: {source: unsupported}
 oidc: {enabled: false}
 `)
@@ -250,7 +297,7 @@ func TestLoadIgnoresRemovedServiceResourceTimeoutEnvironment(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
 	contents := []byte(`
 http: {addr: ":8080"}
-database: {url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"}
+database: {url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"}
 service_resource:
   nexusauth_base_url: "http://nexus-auth:5100"
   api_key: "directory-token"
@@ -269,7 +316,7 @@ func validOIDCConfig() OIDCConfig {
 	return OIDCConfig{
 		Enabled:               true,
 		Authority:             "http://localhost:5100",
-		ClientID:              "permission-center-api",
+		ClientID:              "nexus-authorization-api",
 		ClientSecret:          "test-client-secret",
 		Audience:              "permission.center.api",
 		RedirectURI:           "http://localhost:8080/signin-oidc",
@@ -297,6 +344,9 @@ func clearConfigEnv(t *testing.T) {
 		"NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE",
 		"NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL",
 		"NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY",
+		"NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL",
+		"NEXUSAUTHORIZATION_SCIM_API_KEY",
+		"NEXUSAUTHORIZATION_SCIM_TIMEOUT",
 		"NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL",
 		"NEXUSAUTHORIZATION_LOGGING_MODULE",
 		"NEXUSAUTHORIZATION_OIDC_COOKIE_SECURE",

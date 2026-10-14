@@ -108,3 +108,16 @@
 .resource-services-name-cell { display: flex; align-items: center; gap: 8px; }
 .resource-services-row-actions { flex-wrap: nowrap; white-space: nowrap; }
 .rbac-page .resource-apis-pagination > .t-pagination { width: 100%; }
+
+/* Menu and role lists share the API page's separate filter / table layout. */
+.role-management { width: 100%; min-width: 0; }
+.role-management > .t-space-item { width: 100%; min-width: 0; }
+.role-management-panel .t-table__content { max-width: 100%; overflow-x: auto; }
+.role-management-footer { width: 100%; min-height: 32px; margin-top: 14px; justify-content: space-between; }
+.role-management-footer > .t-space-item { width: auto; min-width: 0; }
+.role-management-footer .t-typography { font-size: 13px; color: var(--app-text-secondary); }
+.role-management-footer .t-pagination { width: auto; }
+@media (max-width: 760px) {
+  .role-management-panel table { min-width: 720px; }
+  .role-management-footer { flex-wrap: wrap; }
+}

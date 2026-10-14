@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func (h *Handler) ListApplications(w http.ResponseWriter, r *http.Request) {

@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/luck/permission-center-go/internal/config"
-	"github.com/luck/permission-center-go/internal/logging"
+	"github.com/luck/nexus-authorization/internal/config"
+	"github.com/luck/nexus-authorization/internal/logging"
 	"golang.org/x/oauth2"
 )
 

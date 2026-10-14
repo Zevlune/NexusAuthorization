@@ -108,6 +108,23 @@
   gap: 18px;
 }
 
+.application-card-hit-area {
+  min-width: 0;
+  height: 220px;
+  border-radius: 10px;
+  outline: none;
+  cursor: pointer;
+}
+
+.application-card-hit-area:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 4px;
+}
+
+.application-card-hit-area[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
 .application-card {
   display: flex;
   min-width: 0;

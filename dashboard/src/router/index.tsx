@@ -1,4 +1,5 @@
 import { createBrowserRouter } from 'react-router-dom';
-import { routes } from './routes';
+import { createRoutes } from './routes';
+import type { WorkbenchMenu } from './workbench-menu';
 
-export const router: ReturnType<typeof createBrowserRouter> = createBrowserRouter(routes);
+export const createWorkbenchRouter = (menus: WorkbenchMenu[]) => createBrowserRouter(createRoutes(menus));

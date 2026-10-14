@@ -3,10 +3,10 @@ http:
 logging:
   module: "NexusAuthorization"
   minimum_level: "info"
-  # Set a path such as "logs/permission-center-go.log" to also write to a file.
+  # Set a path such as "logs/nexus-authorization.log" to also write to a file.
   file_path: ""
 database:
-  url: "postgres://postgres:postgres@localhost:55433/permission_center?sslmode=disable"
+  url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"
   max_conns: 10
   min_conns: 2
 service_resource:
@@ -17,8 +17,14 @@ service_resource:
   api_key: ""
   timeout: "5s"
 authorization:
-  # Required by the service-to-service /v1/authorize endpoint in production.
+  # Legacy service credential; empty keeps /v1/authorize closed until unified Open API token management is integrated.
   service_credential: ""
+scim:
+  # Optional read-only NexusAuth user directory. Set URL and credential through
+  # NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL and NEXUSAUTHORIZATION_SCIM_API_KEY.
+  nexusauth_base_url: ""
+  api_key: ""
+  timeout: "5s"
 oidc:
   enabled: false
   authority: "http://localhost:5100"
@@ -29,4 +35,5 @@ oidc:
   post_logout_redirect_uri: "http://localhost:5274/"
   scopes: ["openid", "profile", "offline_access", "permission.center.api"]
   audience: "permission.center.api"
-  session_secret: "replace-with-at-least-32-random-characters"
+  # Empty: generate and persist the session key in data/oidc-session.key.
+  session_secret: ""

@@ -20,7 +20,7 @@ const PublicHeader = ({ theme, onChangeTheme }: PublicHeaderProps) => {
             setApplication(getStoredApplication());
         };
         const handleStorage = (event: StorageEvent) => {
-            if (event.key === 'permission-center-application') syncApplication();
+            if (event.key === 'nexus-authorization-application') syncApplication();
         };
 
         window.addEventListener(APPLICATION_CHANGE_EVENT, syncApplication);

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/luck/permission-center-go/internal/config"
+	"github.com/luck/nexus-authorization/internal/config"
 )
 
 func testConfig(enabled bool) config.OIDCConfig {
@@ -220,7 +220,7 @@ func TestLogoutUsesNexusAuthIDTokenHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.endSessionEndpoint = "http://localhost:5100/connect/endsession"
-	service.cfg.ClientID = "permission-center-web"
+	service.cfg.ClientID = "nexus-authorization-web"
 	service.cfg.PostLogoutRedirectURI = "http://localhost:5274/"
 
 	loginRecorder := httptest.NewRecorder()

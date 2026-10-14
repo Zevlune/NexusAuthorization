@@ -1,7 +1,7 @@
 # Permission Center E2E tests
 
 The Playwright suite starts an isolated Vite server on port `5275`. It mocks
-the authenticated user and permission-center API routes, so it does not need
+the authenticated user and nexus-authorization API routes, so it does not need
 NexusAuth, PostgreSQL, or a running backend.
 
 Install the Playwright browser once before the first run:
@@ -24,6 +24,6 @@ without changing the project configuration:
 PLAYWRIGHT_EXECUTABLE_PATH="/path/to/browser" yarn test:e2e
 ```
 
-The tests seed `permission-center-service-resource` when a selected service
+The tests seed `nexus-authorization-service-resource` when a selected service
 resource is needed and assert the service-resource gate, Header context, role
 creation flow, and user-role refresh flow.

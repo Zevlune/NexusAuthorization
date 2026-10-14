@@ -33,6 +33,10 @@ go.work.sum
 .env.dev
 release/
 /data/policies/
+/data/oidc-session.key
+/data/.oidc-session-*
+/src/data/oidc-session.key
+/src/data/.oidc-session-*
 
 # Editor/IDE
 # .idea/

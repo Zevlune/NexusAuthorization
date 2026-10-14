@@ -51,7 +51,7 @@ func New(options Options) (*slog.Logger, io.Closer, error) {
 
 	module := strings.TrimSpace(options.Module)
 	if module == "" {
-		module = "permission-center-go"
+		module = "nexus-authorization"
 	}
 	handler := &Handler{
 		output: &lockedWriter{writer: io.MultiWriter(writers...)},

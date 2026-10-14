@@ -16,7 +16,7 @@ import {
   type UpdateServiceResourceRequest,
 } from '../../../api/permission';
 import { Empty, fail, Guard, Page, type State } from '../shared';
-import { getRequestErrorMessage } from '../../permission-center/shared';
+import { getRequestErrorMessage } from '../../nexus-authorization/shared';
 import './services.less';
 
 type Filter = 'all' | 'associated';
@@ -117,7 +117,7 @@ export default function Services({ state }: { state: State }) {
       await replaceApplicationServiceResources(state.appKey, Array.from(next));
       await state.reload();
     } catch (error) {
-      setAssociationError('服务关联保存失败，请重试。');
+      setAssociationError(getRequestErrorMessage(error, '服务关联保存失败，请重试。'));
       fail(error, '服务关联保存失败');
     } finally {
       setAssociationSaving(null);
@@ -265,8 +265,8 @@ export default function Services({ state }: { state: State }) {
   >
     <div className="page-filter-bar">
       <Form className="workbench-filter-form" layout="inline" colon={false} labelWidth={100} onSubmit={() => { setSearch(draftSearch); setFilter(draftFilter); }}>
-        <Form.FormItem label="关键词"><Input className="workbench-keyword" value={draftSearch} clearable prefixIcon={<SearchIcon />} placeholder="服务名称、标识或 Audience" onChange={setDraftSearch} /></Form.FormItem>
-        <Form.FormItem label="关联状态"><Select className="workbench-select" value={draftFilter === 'associated' ? 'associated' : ''} placeholder="全部服务" clearable options={[{ label: '已关联服务', value: 'associated' }]} onChange={value => setDraftFilter(value ? 'associated' : 'all')} /></Form.FormItem>
+        <Form.FormItem label="关键词"><><Input className="workbench-keyword" value={draftSearch} clearable prefixIcon={<SearchIcon />} placeholder="服务名称、标识或 Audience" onChange={setDraftSearch} /></></Form.FormItem>
+        <Form.FormItem label="关联状态"><><Select className="workbench-select" value={draftFilter === 'associated' ? 'associated' : ''} placeholder="全部服务" clearable options={[{ label: '已关联服务', value: 'associated' }]} onChange={value => setDraftFilter(value ? 'associated' : 'all')} /></></Form.FormItem>
         <Form.FormItem><Space size={16}><Button theme="primary" type="submit" icon={<SearchIcon />}>查询</Button><Button theme="primary" icon={<RefreshIcon />} onClick={() => { setDraftSearch(''); setSearch(''); setDraftFilter('all'); setFilter('all'); }}>重置</Button></Space></Form.FormItem>
       </Form>
     </div>
@@ -279,11 +279,11 @@ export default function Services({ state }: { state: State }) {
     </Card>
     <Drawer className="resource-services-drawer" visible={editorOpen} header={editingKey ? '编辑服务资源' : '新建服务资源'} size="560px" closeOnOverlayClick={false} closeOnEscKeydown={!editorSaving} footer={<Space className="resource-services-drawer-footer"><Button variant="outline" disabled={editorSaving} onClick={closeEditor}>取消</Button><Button theme="primary" loading={editorSaving} disabled={editorSaving || !canEdit} onClick={() => void saveEditor()}>{editingKey ? '保存修改' : '创建服务'}</Button></Space>} onClose={closeEditor}>
       <Form className="resource-services-form" labelAlign="top" colon={false} onSubmit={() => void saveEditor()}>
-        <Form.FormItem label="服务名称" requiredMark help={fieldErrors.displayName || '便于团队识别。'} status={fieldErrors.displayName ? 'error' : undefined}><Input value={form.displayName} disabled={editorSaving || !canEdit} onChange={value => setFormField('displayName', value)} /></Form.FormItem>
-        <Form.FormItem label="服务标识" requiredMark help={fieldErrors.key || '用于 API 和权限数据关联，创建后不可修改。'} status={fieldErrors.key ? 'error' : undefined}><Input value={form.key} disabled={Boolean(editingKey) || editorSaving || !canEdit} onChange={value => setFormField('key', value)} /></Form.FormItem>
-        <Form.FormItem label="Audience"><Input value={form.audience} placeholder="例如：orders" disabled={editorSaving || !canEdit} onChange={value => setFormField('audience', value)} /></Form.FormItem>
-        <Form.FormItem label="描述"><Textarea value={form.description} placeholder="简要说明服务用途（选填）" disabled={editorSaving || !canEdit} onChange={value => setFormField('description', value)} /></Form.FormItem>
-        <Form.FormItem label="启用服务" help="停用前请先解除所有应用关联；停用后不可新增关联。"><Switch aria-label="启用服务" value={form.isActive} disabled={editorSaving || !canEdit} onChange={value => setFormField('isActive', Boolean(value))} /></Form.FormItem>
+        <Form.FormItem label="服务名称" requiredMark help={fieldErrors.displayName || '便于团队识别。'} status={fieldErrors.displayName ? 'error' : undefined}><><Input value={form.displayName} disabled={editorSaving || !canEdit} onChange={value => setFormField('displayName', value)} /></></Form.FormItem>
+        <Form.FormItem label="服务标识" requiredMark help={fieldErrors.key || '用于 API 和权限数据关联，创建后不可修改。'} status={fieldErrors.key ? 'error' : undefined}><><Input value={form.key} disabled={Boolean(editingKey) || editorSaving || !canEdit} onChange={value => setFormField('key', value)} /></></Form.FormItem>
+        <Form.FormItem label="Audience"><><Input value={form.audience} placeholder="例如：orders" disabled={editorSaving || !canEdit} onChange={value => setFormField('audience', value)} /></></Form.FormItem>
+        <Form.FormItem label="描述"><><Textarea value={form.description} placeholder="简要说明服务用途（选填）" disabled={editorSaving || !canEdit} onChange={value => setFormField('description', value)} /></></Form.FormItem>
+        <Form.FormItem label="启用服务" help="停用前请先解除所有应用关联；停用后不可新增关联。"><><Switch aria-label="启用服务" value={form.isActive} disabled={editorSaving || !canEdit} onChange={value => setFormField('isActive', Boolean(value))} /></></Form.FormItem>
         {!canEdit ? <Alert theme="info" message="当前服务目录由 NexusAuth 提供，资源为只读。" /> : null}
         {editorError ? <Alert theme="error" message={editorError} /> : null}
       </Form>

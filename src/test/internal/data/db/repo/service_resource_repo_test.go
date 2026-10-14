@@ -3,7 +3,7 @@ package repo
 import (
 	"testing"
 
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func TestServiceResourceRepositoryImplementsBusinessContract(t *testing.T) {

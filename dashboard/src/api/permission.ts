@@ -1,8 +1,8 @@
 import request from './request';
 
-export const SERVICE_RESOURCE_STORAGE_KEY = 'permission-center-service-resource';
-export const SERVICE_RESOURCE_CHANGE_EVENT = 'permission-center-service-resource-change';
-export const MENU_CHANGE_EVENT = 'permission-center-menu-change';
+export const SERVICE_RESOURCE_STORAGE_KEY = 'nexus-authorization-service-resource';
+export const SERVICE_RESOURCE_CHANGE_EVENT = 'nexus-authorization-service-resource-change';
+export const MENU_CHANGE_EVENT = 'nexus-authorization-menu-change';
 export const DEFAULT_SERVICE_RESOURCE = '';
 
 export type ServiceResourceSource = 'local' | 'nexusauth';
@@ -353,35 +353,10 @@ export const getStoredServiceResource = (): string => {
   }
 };
 
-export const setStoredServiceResource = (serviceResource: string): string => {
-  const next = serviceResource.trim();
-  if (typeof window !== 'undefined') {
-    try {
-      if (next) {
-        window.sessionStorage.setItem(SERVICE_RESOURCE_STORAGE_KEY, next);
-      } else {
-        window.sessionStorage.removeItem(SERVICE_RESOURCE_STORAGE_KEY);
-      }
-      // 旧版本使用 localStorage；清理旧值，避免其他页签覆盖当前会话选择。
-      window.localStorage.removeItem(SERVICE_RESOURCE_STORAGE_KEY);
-      window.dispatchEvent(new CustomEvent(SERVICE_RESOURCE_CHANGE_EVENT, { detail: next }));
-    } catch {
-      // Browsers can disable localStorage in private or restricted contexts.
-    }
-  }
-  return next;
-};
-
 export const listServiceResources = async (): Promise<ServiceResourceList> => {
   const response = await request.get<unknown>('/v1/service-resources');
   const record = (response && typeof response === 'object' ? response : {}) as RawRecord;
   return { items: readItems(response).map(normalizeServiceResource), writable: rawBoolean(record, 'writable', 'Writable') };
-};
-
-export const getServiceResource = async (key: string): Promise<ServiceResource> => {
-  const resourceKey = key.trim();
-  const response = await request.get<unknown>(`/v1/service-resources/${encodeURIComponent(resourceKey)}`);
-  return normalizeServiceResource(readItem(response));
 };
 
 export const createServiceResource = async (payload: CreateServiceResourceRequest): Promise<ServiceResource> => {

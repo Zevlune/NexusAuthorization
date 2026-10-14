@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/luck/permission-center-go/internal/biz"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 type serviceResourceHandlerRepository struct {
