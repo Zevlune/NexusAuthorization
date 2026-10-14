@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
 
   permission-api:
-    image: 18790997531/nexusauthorization:1.0.2
+    image: 18790997531/nexusauthorization-api:1.0.2
     platform: linux/amd64
     environment:
       NEXUSAUTHORIZATION_DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB:-nexus-authorization} user=${POSTGRES_USER:-postgres} password=${POSTGRES_PASSWORD:-postgres} sslmode=disable"

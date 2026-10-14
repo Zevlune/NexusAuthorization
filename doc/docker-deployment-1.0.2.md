@@ -1,6 +1,14 @@
 # NexusAuthorization 1.0.2 Docker 部署
 
-前后端镜像为 `18790997531/nexusauthorization:1.0.2` 和 `18790997531/nexusauthorization-dashboard:1.0.2`，架构为 Linux amd64。配置只使用 `NEXUSAUTHORIZATION_` 前缀；旧版本使用过的历史前缀变量不再读取。已有服务器需要同步更新 `.env` 并拉取更新后的镜像。
+前后端镜像为 `18790997531/nexusauthorization-api:1.0.2` 和 `18790997531/nexusauthorization-dashboard:1.0.2`，架构为 Linux amd64。配置只使用 `NEXUSAUTHORIZATION_` 前缀；旧版本使用过的历史前缀变量不再读取。已有服务器需要同步更新 `.env` 并拉取更新后的镜像。
+
+## GitHub Actions 发布镜像
+
+在本仓库的 Settings → Secrets and variables → Actions 中配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，名称及凭据与 NexusAuth 项目一致。仓库级 Secrets 需要在本仓库单独配置；组织级 Secrets 需要允许本仓库访问。
+
+在 Actions 中分别选择 `Build and Push NexusAuthorization API Docker Image` 和 `Build and Push NexusAuthorization Dashboard Docker Image`，点击 Run workflow，为两个 workflow 填写相同的 `tag`（例如 `1.0.2` 或 `latest`）。发布架构为 `linux/amd64`，只推送填写的标签；前端 workflow 会先安装依赖并构建 `dist`。
+
+发布成功后，将 Compose 中前后端镜像的标签改为填写的版本，再执行 `docker compose pull` 和 `docker compose up -d`。
 
 ## 部署当前工作区代码
 
@@ -9,11 +17,11 @@
 ```sh
 # 在仓库根运行；保留当前锁文件，先安装 dashboard 依赖
 (cd dashboard && yarn install --frozen-lockfile && npm run build)
-docker build --platform linux/amd64 -t YOUR_REGISTRY/nexusauthorization:YOUR_RELEASE .
+docker build --platform linux/amd64 -t YOUR_REGISTRY/nexusauthorization-api:YOUR_RELEASE .
 docker build --platform linux/amd64 -t YOUR_REGISTRY/nexusauthorization-dashboard:YOUR_RELEASE dashboard
 
 # 需要在其它服务器拉取时，再推送两个镜像
-docker push YOUR_REGISTRY/nexusauthorization:YOUR_RELEASE
+docker push YOUR_REGISTRY/nexusauthorization-api:YOUR_RELEASE
 docker push YOUR_REGISTRY/nexusauthorization-dashboard:YOUR_RELEASE
 ```
 

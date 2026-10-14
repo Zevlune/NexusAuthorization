@@ -1,7 +1,7 @@
 name: nexusauthorization
 services:
   permission-api:
-    image: 18790997531/nexusauthorization:1.0.2
+    image: 18790997531/nexusauthorization-api:1.0.2
     platform: linux/amd64
     environment:
       NEXUSAUTHORIZATION_DATABASE_URL: ${NEXUSAUTHORIZATION_DATABASE_URL:?Configure external PostgreSQL connection in .env}
