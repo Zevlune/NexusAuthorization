@@ -1,18 +1,17 @@
 name: nexusauthorization
 
 services:
-  nexus-authorization:
-    image: 18790997531/nexusauthorization-api:1.0.1
-    container_name: nexus-authorization
-    platform: linux/amd64
+  nexusauthorization-api:
+    image: 18790997531/nexusauthorization-api:1.0.2
+    container_name: nexusauthorization-api
     pull_policy: missing
     environment:
       TZ: Asia/Shanghai
-      NEXUSAUTHORIZATION_DATABASE_URL: ${NEXUSAUTHORIZATION_DATABASE_URL:?Configure in .env.deploy}
+      NEXUSAUTHORIZATION_DATABASE_URL: "postgres://postgres:wzw0126%40..@pgsql-postgres-1:5432/nexus-authorization?sslmode=disable"
       NEXUSAUTHORIZATION_OIDC_ENABLED: 'true'
       NEXUSAUTHORIZATION_OIDC_AUTHORITY: "https://authlogin.kawhiwei.com:8800"
       NEXUSAUTHORIZATION_OIDC_CLIENT_ID: "nexusauthorization"
-      NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET: ${NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET:?Configure in .env.deploy}
+      NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET: ""
       NEXUSAUTHORIZATION_OIDC_REDIRECT_URI: "https://authorizationdashboard.kawhiwei.com:8800/signin-oidc"
       NEXUSAUTHORIZATION_OIDC_POST_LOGOUT_REDIRECT_URI: "https://authorizationdashboard.kawhiwei.com:8800/"
       NEXUSAUTHORIZATION_OIDC_SCOPES: "openid profile offline_access nexusauthorization.api"
@@ -20,15 +19,15 @@ services:
 
       NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE: "nexusauth"
       NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL: "http://nexusauth-host:8080"
-      NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY: ${NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY:?Configure in .env.deploy}
+      NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY: ""
 
       NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL: "http://nexusauth-host:8080"
-      NEXUSAUTHORIZATION_SCIM_API_KEY: ${NEXUSAUTHORIZATION_SCIM_API_KEY:?Configure in .env.deploy}
+      NEXUSAUTHORIZATION_SCIM_API_KEY: ""
       NEXUSAUTHORIZATION_SCIM_TIMEOUT: "10s"
     ports:
       - "9101:8080"
     volumes:
-      - /vol1/1000/dockervm/nexus-authorization/data:/app/data:rw
+      - /vol1/1000/dockervm/nexus-authorization/data:/app/data
     healthcheck:
       test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/healthz']
       interval: 10s
@@ -42,12 +41,11 @@ services:
   dashboard:
     image: 18790997531/nexusauthorization-dashboard:1.0.3
     container_name: nexusauthorization-dashboard
-    platform: linux/amd64
     pull_policy: missing
     ports:
       - "5274:80"
     depends_on:
-      nexus-authorization:
+      nexusauthorization-api:
         condition: service_healthy
     healthcheck:
       test: [CMD-SHELL, 'wget -qO- http://127.0.0.1/ || exit 1']
@@ -55,6 +53,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    volumes:
+      - /vol1/1000/dockervm/nexus-authorization/dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     restart: always
     networks:
       - nexusauth
