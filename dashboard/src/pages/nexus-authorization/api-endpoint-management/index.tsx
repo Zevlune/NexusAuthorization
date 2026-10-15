@@ -225,7 +225,7 @@ const APIEndpointManagementPage = () => {
   ];
 
   return (
-    <div className="permission-page permission-api-endpoint-page">
+    <div className="permission-page nexus-authorization-endpoint-page">
       <PageHeader
         title="API 端点管理"
         actions={(
@@ -243,7 +243,7 @@ const APIEndpointManagementPage = () => {
 
       {lastImport ? (
         <Alert
-          className="permission-api-endpoint-import-result"
+          className="nexus-authorization-endpoint-import-result"
           theme="success"
           message={`最近一次导入：总计 ${lastImport.total} 个，新增 ${lastImport.created} 个，跳过 ${lastImport.skipped} 个`}
         />
@@ -252,7 +252,7 @@ const APIEndpointManagementPage = () => {
       <Card className="permission-card" bordered>
         <div className="permission-table-wrap">
           <Table<APIEndpoint>
-            className="permission-table permission-api-endpoint-table"
+            className="permission-table nexus-authorization-endpoint-table"
             rowKey="id"
             data={loading ? [] : endpoints}
             columns={columns}

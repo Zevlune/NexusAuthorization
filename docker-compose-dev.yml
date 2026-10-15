@@ -18,7 +18,7 @@ services:
       retries: 30
     restart: unless-stopped
 
-  permission-api:
+  nexus-authorization:
     image: 18790997531/nexusauthorization-api:1.0.2
     platform: linux/amd64
     environment:
@@ -60,7 +60,7 @@ services:
     ports:
       - '${DASHBOARD_BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-5274}:80'
     depends_on:
-      permission-api:
+      nexus-authorization:
         condition: service_healthy
     healthcheck:
       test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1/']

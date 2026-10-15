@@ -55,3 +55,4 @@ dashboard/.env
 dashboard/.env.*
 !dashboard/.env.example
 dashboard/.DS_Store
+.env.deploy

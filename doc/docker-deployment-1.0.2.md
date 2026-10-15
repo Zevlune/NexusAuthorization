@@ -1,5 +1,7 @@
 # NexusAuthorization 1.0.2 Docker 部署
 
+当前生产 Compose 使用外部 `nexusauth` 网络、API 宿主端口 `9101`、Dashboard 宿主端口 `5274`，数据目录挂载至 `/app/data`。数据库连接串、OIDC 客户端密钥、服务目录和 SCIM 凭据通过环境变量传入。本地真实值保存在被 Git 忽略的 `.env.deploy` 中；目标服务器需自行准备此文件，启动时使用 `docker compose --env-file .env.deploy -f docker-compose.yml up -d`。不要把该文件提交到仓库。入口脚本在启动时初始化数据目录权限，再降权运行服务；需使用包含入口脚本和自动会话密钥功能的新构建镜像。
+
 前后端镜像为 `18790997531/nexusauthorization-api:1.0.2` 和 `18790997531/nexusauthorization-dashboard:1.0.2`，架构为 Linux amd64。配置只使用 `NEXUSAUTHORIZATION_` 前缀；旧版本使用过的历史前缀变量不再读取。已有服务器需要同步更新 `.env` 并拉取更新后的镜像。
 
 ## GitHub Actions 发布镜像
@@ -121,7 +123,7 @@ openssl rand -hex 32
 
 ```sh
 docker compose -f docker-compose.yml ps
-docker compose -f docker-compose.yml logs --tail=200 permission-api dashboard
+docker compose -f docker-compose.yml logs --tail=200 nexus-authorization dashboard
 ```
 
 开发版在命令中增加 `--env-file .env.dev -f docker-compose-dev.yml`。不要通过 `down -v` 重启开发环境，这会删除数据库卷。

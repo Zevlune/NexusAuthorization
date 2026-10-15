@@ -40,7 +40,7 @@ npm run build
 docker build -t nexusauthorization-dashboard:local .
 ```
 
-镜像使用 Nginx 提供静态文件，容器监听 `80`。Nginx 将 `/api` 和精确的 `/signin-oidc` 转发到 `permission-api:8080`，并对 `/api` 删除前缀；其它路径回退到 `index.html`，支持 React 路由刷新。生产反向代理应使用 HTTPS，并保留 Host、转发协议、客户端地址和 cookie。
+镜像使用 Nginx 提供静态文件，容器监听 `80`。Nginx 将 `/api` 和精确的 `/signin-oidc` 转发到 `nexus-authorization:8080`，并对 `/api` 删除前缀；其它路径回退到 `index.html`，支持 React 路由刷新。生产反向代理应使用 HTTPS，并保留 Host、转发协议、客户端地址和 cookie。
 
 部署配置与镜像标签见 [Docker 部署](docker-deployment-1.0.2.md) 和 [快速开始](quick-start.md)；不要把 OIDC secret 写进 dashboard 构建参数或前端静态资源。
 
