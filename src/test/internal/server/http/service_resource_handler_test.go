@@ -141,7 +141,7 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	createResponse := httptest.NewRecorder()
-	server.ServeHTTP(createResponse, httptest.NewRequest(http.MethodPost, "/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"订单服务","audience":"orders-api","description":"订单权限","is_active":true}`)))
+	server.ServeHTTP(createResponse, httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"订单服务","audience":"orders-api","description":"订单权限","is_active":true}`)))
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("create status = %d body=%s", createResponse.Code, createResponse.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	}
 
 	listResponse := httptest.NewRecorder()
-	server.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, "/v1/service-resources", nil))
+	server.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, "/api/v1/service-resources", nil))
 	var listEnvelope struct {
 		Result struct {
 			Items    []*biz.ServiceResource `json:"items"`
@@ -170,13 +170,13 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	}
 
 	getResponse := httptest.NewRecorder()
-	server.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/v1/service-resources/orders", nil))
+	server.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/api/v1/service-resources/orders", nil))
 	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"display_name":"订单服务"`) {
 		t.Fatalf("get status = %d body=%s", getResponse.Code, getResponse.Body.String())
 	}
 
 	updateResponse := httptest.NewRecorder()
-	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/v1/service-resources/orders", strings.NewReader(`{"display_name":"订单中心","audience":"orders-web","description":"更新后的订单权限","is_active":false}`)))
+	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/api/v1/service-resources/orders", strings.NewReader(`{"display_name":"订单中心","audience":"orders-web","description":"更新后的订单权限","is_active":false}`)))
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("update status = %d body=%s", updateResponse.Code, updateResponse.Body.String())
 	}
@@ -186,7 +186,7 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	}
 
 	deleteResponse := httptest.NewRecorder()
-	server.ServeHTTP(deleteResponse, httptest.NewRequest(http.MethodDelete, "/v1/service-resources/orders", nil))
+	server.ServeHTTP(deleteResponse, httptest.NewRequest(http.MethodDelete, "/api/v1/service-resources/orders", nil))
 	if deleteResponse.Code != http.StatusOK {
 		t.Fatalf("delete status = %d body=%s", deleteResponse.Code, deleteResponse.Body.String())
 	}
@@ -208,7 +208,7 @@ func TestCreateServiceResourceDefaultsToActive(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/service-resources", strings.NewReader(`{"key":"billing","display_name":"账单服务"}`)))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"billing","display_name":"账单服务"}`)))
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -224,13 +224,13 @@ func TestServiceResourceNexusAuthWriteProtection(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	updateResponse := httptest.NewRecorder()
-	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/v1/service-resources/remote", strings.NewReader(`{"display_name":"禁止修改","audience":"remote","description":"","is_active":true}`)))
+	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/api/v1/service-resources/remote", strings.NewReader(`{"display_name":"禁止修改","audience":"remote","description":"","is_active":true}`)))
 	if updateResponse.Code != http.StatusConflict {
 		t.Fatalf("remote update status = %d body=%s", updateResponse.Code, updateResponse.Body.String())
 	}
 
 	deleteResponse := httptest.NewRecorder()
-	server.ServeHTTP(deleteResponse, httptest.NewRequest(http.MethodDelete, "/v1/service-resources/remote", nil))
+	server.ServeHTTP(deleteResponse, httptest.NewRequest(http.MethodDelete, "/api/v1/service-resources/remote", nil))
 	if deleteResponse.Code != http.StatusConflict {
 		t.Fatalf("remote delete status = %d body=%s", deleteResponse.Code, deleteResponse.Body.String())
 	}
@@ -249,7 +249,7 @@ func TestServiceResourceNexusAuthConfiguredModeHandlers(t *testing.T) {
 	server := newNexusAuthServiceResourceHandlerServer(t, repository, remote)
 
 	listResponse := httptest.NewRecorder()
-	server.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, "/v1/service-resources", nil))
+	server.ServeHTTP(listResponse, httptest.NewRequest(http.MethodGet, "/api/v1/service-resources", nil))
 	var listEnvelope struct {
 		Result struct {
 			Items    []*biz.ServiceResource `json:"items"`
@@ -267,7 +267,7 @@ func TestServiceResourceNexusAuthConfiguredModeHandlers(t *testing.T) {
 	}
 
 	getResponse := httptest.NewRecorder()
-	server.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/v1/service-resources/remote", nil))
+	server.ServeHTTP(getResponse, httptest.NewRequest(http.MethodGet, "/api/v1/service-resources/remote", nil))
 	if getResponse.Code != http.StatusOK || !strings.Contains(getResponse.Body.String(), `"display_name":"远程服务"`) {
 		t.Fatalf("nexusauth get status = %d body=%s", getResponse.Code, getResponse.Body.String())
 	}
@@ -280,11 +280,11 @@ func TestServiceResourceNexusAuthConfiguredModeHandlers(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{method: http.MethodPost, path: "/v1/service-resources", body: `{"key":"local","display_name":"禁止创建"}`},
-		{method: http.MethodPut, path: "/v1/service-resources/remote", body: `{"display_name":"禁止修改","is_active":true}`},
-		{method: http.MethodDelete, path: "/v1/service-resources/remote"},
-		{method: http.MethodPut, path: "/v1/service-resources/local", body: `{"display_name":"禁止修改本地键","is_active":true}`},
-		{method: http.MethodDelete, path: "/v1/service-resources/local"},
+		{method: http.MethodPost, path: "/api/v1/service-resources", body: `{"key":"local","display_name":"禁止创建"}`},
+		{method: http.MethodPut, path: "/api/v1/service-resources/remote", body: `{"display_name":"禁止修改","is_active":true}`},
+		{method: http.MethodDelete, path: "/api/v1/service-resources/remote"},
+		{method: http.MethodPut, path: "/api/v1/service-resources/local", body: `{"display_name":"禁止修改本地键","is_active":true}`},
+		{method: http.MethodDelete, path: "/api/v1/service-resources/local"},
 	} {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(request.method, request.path, strings.NewReader(request.body)))

@@ -8,6 +8,10 @@ services:
     environment:
       TZ: Asia/Shanghai
       NEXUSAUTHORIZATION_DATABASE_URL: "postgres://postgres:wzw0126%40..@pgsql-postgres-1:5432/nexus-authorization?sslmode=disable"
+      NEXUSAUTHORIZATION_REDIS_URL: ${NEXUSAUTHORIZATION_REDIS_URL:-}
+      NEXUSAUTHORIZATION_REDIS_KEY_PREFIX: ${NEXUSAUTHORIZATION_REDIS_KEY_PREFIX:-nexusauthorization:prod}
+      NEXUSAUTHORIZATION_REDIS_CACHE_TTL: ${NEXUSAUTHORIZATION_REDIS_CACHE_TTL:-24h}
+      NEXUSAUTHORIZATION_REDIS_TIMEOUT: ${NEXUSAUTHORIZATION_REDIS_TIMEOUT:-200ms}
       NEXUSAUTHORIZATION_OIDC_ENABLED: 'true'
       NEXUSAUTHORIZATION_OIDC_AUTHORITY: "https://authlogin.kawhiwei.com:8800"
       NEXUSAUTHORIZATION_OIDC_CLIENT_ID: "nexusauthorization"
@@ -29,7 +33,7 @@ services:
     volumes:
       - /vol1/1000/dockervm/nexus-authorization/data:/app/data
     healthcheck:
-      test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/healthz']
+      test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/api/healthz']
       interval: 10s
       timeout: 5s
       retries: 12

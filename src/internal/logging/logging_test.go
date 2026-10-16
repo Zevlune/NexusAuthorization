@@ -69,7 +69,7 @@ func TestHTTPMiddlewareGeneratesRequestID(t *testing.T) {
 	var output bytes.Buffer
 	server := HTTPMiddleware(NewText(&output, "module", "info"), nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/healthz", nil))
 	requestID := response.Header().Get(traceHeader)
 	if matched, _ := regexp.MatchString(`^[0-9a-f]{32}$`, requestID); !matched {
 		t.Fatalf("generated request id = %q", requestID)

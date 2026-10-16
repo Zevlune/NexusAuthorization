@@ -40,7 +40,7 @@ const groupNode = (id: string, name: string, parentId: string | null = null, rou
   id, route, componentPath: null, name, show: true, iconName: null, parentId,
 });
 
-// Mirrors the shipped default: 3 groups + 7 visible pages + 2 hidden role routes.
+// Mirrors the shipped default: 3 groups + 6 visible pages + 2 hidden role routes.
 const DEFAULT_MENUS: DashboardMenu[] = [
   pageNode('dashboard', '配置总览', '/dashboard'),
   groupNode('group-resources', '资源管理', null, '/resources'),
@@ -51,8 +51,7 @@ const DEFAULT_MENUS: DashboardMenu[] = [
   pageNode('roles', '角色管理', '/roles', 'group-rbac'),
   pageNode('role-new', '新增角色', '/roles/new', 'roles', false),
   pageNode('role-edit', '编辑角色', '/roles/:roleId/edit', 'roles', false),
-  groupNode('group-delivery', '发布与验证', null, '/delivery'),
-  pageNode('releases', '发布版本', '/releases', 'group-delivery'),
+  groupNode('group-delivery', '权限验证', null, '/delivery'),
   pageNode('simulate', '权限模拟', '/simulate', 'group-delivery'),
 ];
 
@@ -255,7 +254,7 @@ test('菜单首次加载失败展示错误与重试，重试成功后恢复导�
   await expect(menuItem(page, '角色管理')).toBeVisible();
 });
 
-test('默认导航保留工作台 7 个可见页面，业务 listMenus 数据不影响侧栏', async ({ page }) => {
+test('默认导航保留工作台 6 个可见页面，业务 listMenus 数据不影响侧栏', async ({ page }) => {
   const state = await installWorkbench(page, DEFAULT_MENUS, {
     businessMenus: [
       { id: 'm-user-grant', parent_id: null, code: 'user-grant', name: '用户授权', menu_type: 'menu', route: '/user-grant', component: '', icon: '', sort_order: 1, enabled: true },
@@ -269,16 +268,31 @@ test('默认导航保留工作台 7 个可见页面，业务 listMenus 数据不
   await expect(menuItem(page, 'API 接口')).toBeVisible();
   await expect(menuItem(page, '菜单与按钮')).toBeVisible();
   await revealMenu(page, '角色管理', ['RBAC 授权']);
-  await revealMenu(page, '发布版本', ['发布与验证']);
   await expect(menuItem(page, '权限模拟')).toBeVisible();
 
-  for (const name of ['配置总览', '服务资源', 'API 接口', '菜单与按钮', '角色管理', '发布版本', '权限模拟']) {
+  for (const name of ['配置总览', '服务资源', 'API 接口', '菜单与按钮', '角色管理', '权限模拟']) {
     await expect(menuItem(page, name)).toBeVisible();
   }
 
   await expect(menuItem(page, '用户授权')).toHaveCount(0);
   await expect(siderMenu(page)).not.toContainText('用户授权');
   await expect.poll(() => state.businessMenuRequests).toBeGreaterThan(0);
+});
+
+test('发布入口已删除：侧栏无发布项，直接访问 /releases 落到 404 页面', async ({ page }) => {
+  await installWorkbench(page, DEFAULT_MENUS);
+  await page.goto('/dashboard');
+  await expect(siderMenu(page)).toBeVisible();
+
+  // 发布页面、发布菜单和发布路由都已删除，导航只保留 6 个可见页面。
+  await expect(menuItem(page, '发布')).toHaveCount(0);
+  await expect(menuItem(page, '权限模拟')).toBeVisible();
+  await expect(siderMenu(page)).not.toContainText('发布');
+
+  // 发布入口不再注册路由，访问旧地址渲染 404 页面。
+  await page.goto('/releases');
+  await expect(page.getByText('对不起，你访问的页面不存在')).toBeVisible();
+  await expect(page.getByRole('button', { name: '发布当前配置' })).toHaveCount(0);
 });
 
 test('未登录直接访问 /roles 跳转登录并携带回跳地址', async ({ page }) => {

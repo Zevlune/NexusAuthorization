@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,6 +21,18 @@ import (
 type RBACV1Repository struct {
 	pool    *pgxpool.Pool
 	catalog biz.ServiceResourceCatalog
+	cache   RBACPolicyCache
+}
+
+// RBACPolicyCache stores only current permission records, validated against database tokens.
+type RBACPolicyCache interface {
+	Load(context.Context, biz.CurrentPolicy) (map[string]any, error)
+	Store(context.Context, biz.CurrentPolicy) error
+}
+
+func (r *RBACV1Repository) WithPolicyCache(cache RBACPolicyCache) *RBACV1Repository {
+	r.cache = cache
+	return r
 }
 
 var _ biz.RBACV1Repository = (*RBACV1Repository)(nil)
@@ -171,10 +185,8 @@ func (r *RBACV1Repository) SaveRole(ctx context.Context, key string, value biz.R
 	if _, err = tx.Exec(ctx, `DELETE FROM role_api_endpoint_bindings WHERE role_id=$1`, value.ID); err != nil {
 		return value, mapDBError(err)
 	}
-	for _, endpointID := range value.EndpointIDs {
-		if _, err = tx.Exec(ctx, `INSERT INTO role_api_endpoint_bindings(role_id,endpoint_id) VALUES($1,$2)`, value.ID, endpointID); err != nil {
-			return value, mapDBError(err)
-		}
+	if _, err = tx.Exec(ctx, `INSERT INTO role_api_endpoint_bindings(role_id,endpoint_id) SELECT $1,unnest($2::uuid[])`, value.ID, value.EndpointIDs); err != nil {
+		return value, mapDBError(err)
 	}
 	var menuCount int
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM menus WHERE application_id=$1 AND id=ANY($2::uuid[])`, scope, value.MenuIDs).Scan(&menuCount); err != nil {
@@ -186,10 +198,8 @@ func (r *RBACV1Repository) SaveRole(ctx context.Context, key string, value biz.R
 	if _, err = tx.Exec(ctx, `DELETE FROM role_menu_bindings WHERE role_id=$1`, value.ID); err != nil {
 		return value, err
 	}
-	for _, id := range value.MenuIDs {
-		if _, err = tx.Exec(ctx, `INSERT INTO role_menu_bindings(role_id,menu_id) VALUES($1,$2)`, value.ID, id); err != nil {
-			return value, mapDBError(err)
-		}
+	if _, err = tx.Exec(ctx, `INSERT INTO role_menu_bindings(role_id,menu_id) SELECT $1,unnest($2::uuid[])`, value.ID, value.MenuIDs); err != nil {
+		return value, mapDBError(err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return value, mapDBError(err)
@@ -221,20 +231,42 @@ func (r *RBACV1Repository) ListSubjectRoleBindings(ctx context.Context, key stri
 	}
 	defer rows.Close()
 	items := []biz.SubjectRoleBinding{}
+	// After the legacy alias folds onto the empty default domain, an old
+	// "global" row and its empty-string twin describe the same grant. Collapse
+	// them on read so callers never see duplicate bindings before 003 runs.
+	seen := map[subjectRoleKey]struct{}{}
 	for rows.Next() {
 		var v biz.SubjectRoleBinding
 		if err := rows.Scan(&v.ID, &v.ApplicationID, &v.Subject, &v.Domain, &v.RoleID); err != nil {
 			return nil, mapDBError(err)
 		}
+		// Legacy "global"/blank rows fold onto the empty default domain so
+		// callers never observe the retired literal.
+		v.Domain = biz.NormalizeRBACDomain(v.Domain)
+		key := subjectRoleKey{subject: v.Subject, domain: v.Domain, roleID: v.RoleID}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
 		items = append(items, v)
 	}
 	return items, mapDBError(rows.Err())
 }
+
+type subjectRoleKey struct {
+	subject string
+	domain  string
+	roleID  uuid.UUID
+}
+
 func (r *RBACV1Repository) ReplaceSubjectRoles(ctx context.Context, key, subject, domain string, roleIDs []uuid.UUID) error {
 	scope, err := r.applicationID(ctx, key)
 	if err != nil {
 		return err
 	}
+	// Defensive normalization: persisted default-domain bindings use the empty
+	// string, never the retired "global" alias.
+	domain = biz.NormalizeRBACDomain(domain)
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return mapDBError(err)
@@ -250,13 +282,21 @@ func (r *RBACV1Repository) ReplaceSubjectRoles(ctx context.Context, key, subject
 	if count != len(roleIDs) {
 		return fmt.Errorf("%w: a role belongs to another application", biz.ErrConflict)
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM subject_role_bindings WHERE application_id=$1 AND subject=$2 AND domain=$3`, scope, subject, domain); err != nil {
+	// Replacing the default domain must also clear the retired legacy aliases
+	// ("global", " global ", whitespace-only). Reads and the compiled policy
+	// already fold those onto the empty domain, so leaving them behind would
+	// keep authorizing a grant the caller just removed. Named domains stay
+	// scoped to exactly that name.
+	if domain == "" {
+		_, err = tx.Exec(ctx, `DELETE FROM subject_role_bindings WHERE application_id=$1 AND subject=$2 AND btrim(domain) IN ('global', '')`, scope, subject)
+	} else {
+		_, err = tx.Exec(ctx, `DELETE FROM subject_role_bindings WHERE application_id=$1 AND subject=$2 AND domain=$3`, scope, subject, domain)
+	}
+	if err != nil {
 		return mapDBError(err)
 	}
-	for _, roleID := range roleIDs {
-		if _, err = tx.Exec(ctx, `INSERT INTO subject_role_bindings(application_id,subject,domain,role_id)VALUES($1,$2,$3,$4)`, scope, subject, domain, roleID); err != nil {
-			return mapDBError(err)
-		}
+	if _, err = tx.Exec(ctx, `INSERT INTO subject_role_bindings(application_id,subject,domain,role_id) SELECT $1,$2,$3,unnest($4::uuid[])`, scope, subject, domain, roleIDs); err != nil {
+		return mapDBError(err)
 	}
 	return mapDBError(tx.Commit(ctx))
 }
@@ -300,137 +340,64 @@ func (r *RBACV1Repository) ListApplicationEndpoints(ctx context.Context, app, se
 	return out, total, rows.Err()
 }
 
-// A single SQL statement captures a consistent view of the entire application.
-const applicationSnapshotSQL = `SELECT jsonb_build_object(
+// Read current normalized tables in one MVCC statement; nothing is persisted as JSON.
+const applicationCurrentPolicySQL = `SELECT a.policy_token::text,jsonb_build_object(
  'app_key',a.app_key,'application_id',a.id,
  'service_resources',COALESCE((SELECT jsonb_agg(jsonb_build_object('key',x.service_resource_key) ORDER BY x.service_resource_key) FROM application_service_resources x WHERE x.application_id=a.id AND x.service_resource_key=ANY($2::text[])),'[]'::jsonb),
  'endpoints',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',e.id,'service_resource',e.service_resource_key,'method',e.method,'path_template',e.path_template,'enabled',e.enabled) ORDER BY e.id) FROM api_endpoints e JOIN application_service_resources x ON x.service_resource_key=e.service_resource_key WHERE x.application_id=a.id AND e.service_resource_key=ANY($2::text[])),'[]'::jsonb),
  'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'code',r.code,'enabled',r.enabled,'endpoint_ids',COALESCE((SELECT jsonb_agg(b.endpoint_id ORDER BY b.endpoint_id) FROM role_api_endpoint_bindings b WHERE b.role_id=r.id),'[]'::jsonb),'menu_ids',COALESCE((SELECT jsonb_agg(b.menu_id ORDER BY b.menu_id) FROM role_menu_bindings b WHERE b.role_id=r.id),'[]'::jsonb)) ORDER BY r.id) FROM roles r WHERE r.application_id=a.id),'[]'::jsonb),
  'subject_roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',b.subject,'domain',b.domain,'role_id',b.role_id) ORDER BY b.subject,b.domain,b.role_id) FROM subject_role_bindings b WHERE b.application_id=a.id),'[]'::jsonb),
  'menus',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',m.id,'parent_id',m.parent_id,'code',m.code,'name',m.name,'menu_type',m.menu_type,'route',m.route,'component',m.component,'icon',m.icon,'sort_order',m.sort_order,'enabled',m.enabled) ORDER BY m.sort_order,m.id) FROM menus m WHERE m.application_id=a.id),'[]'::jsonb)
- ) FROM applications a WHERE a.id=$1 AND a.enabled`
+ ) FROM applications a WHERE a.id=$1 AND a.enabled AND a.policy_token::text=split_part($3,':',1)`
 
-func (r *RBACV1Repository) BuildRBACSnapshot(ctx context.Context, scope string) (map[string]any, error) {
-	aid, err := r.applicationID(ctx, scope)
+func (r *RBACV1Repository) GetPolicyMetadata(ctx context.Context, scope string) (biz.CurrentPolicy, error) {
+	var p biz.CurrentPolicy
+	if strings.TrimSpace(scope) == "" {
+		return p, biz.ErrInvalidArgument
+	}
+	if err := r.pool.QueryRow(ctx, `SELECT id,policy_token::text FROM applications WHERE app_key=$1 AND enabled`, scope).Scan(&p.ApplicationID, &p.Token); err != nil {
+		return p, mapDBError(err)
+	}
+	keys, err := r.activeServiceKeys(ctx)
 	if err != nil {
-		return nil, err
+		return p, err
 	}
-	activeKeys, err := r.activeServiceKeys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var raw []byte
-	if err = r.pool.QueryRow(ctx, applicationSnapshotSQL, aid, activeKeys).Scan(&raw); err != nil {
-		return nil, mapDBError(err)
-	}
-	var snapshot map[string]any
-	err = json.Unmarshal(raw, &snapshot)
-	return snapshot, err
+	sort.Strings(keys)
+	raw, _ := json.Marshal(keys)
+	digest := sha256.Sum256(raw)
+	p.Token += ":" + hex.EncodeToString(digest[:])
+	p.ServiceKeys = keys
+	return p, nil
 }
 
-func createApplicationRelease(ctx context.Context, tx pgx.Tx, aid uuid.UUID, description, actor string, snapshot map[string]any) (biz.RBACRelease, error) {
-	var v biz.RBACRelease
-	raw, err := json.Marshal(snapshot)
-	if err != nil {
-		return v, err
-	}
-	hash := sha256.Sum256(raw)
-	v = biz.RBACRelease{ID: uuid.New(), ApplicationID: aid, Description: description, PublishedBy: actor, Checksum: hex.EncodeToString(hash[:]), Status: "published"}
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(max(version),0)+1 FROM rbac_releases WHERE application_id=$1`, aid).Scan(&v.Version); err != nil {
-		return v, err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE rbac_releases SET status='superseded' WHERE application_id=$1 AND status='published'`, aid); err != nil {
-		return v, err
-	}
-	if err = tx.QueryRow(ctx, `INSERT INTO rbac_releases(id,application_id,version,status,description,checksum,published_by) VALUES($1,$2,$3,'published',$4,$5,$6) RETURNING published_at`, v.ID, aid, v.Version, description, v.Checksum, actor).Scan(&v.PublishedAt); err != nil {
-		return v, mapDBError(err)
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO rbac_release_snapshots(release_id,snapshot) VALUES($1,$2::jsonb)`, v.ID, raw); err != nil {
-		return v, mapDBError(err)
-	}
-	return v, nil
-}
-func (r *RBACV1Repository) CreateRBACRelease(ctx context.Context, scope, description, actor string, snapshot map[string]any) (biz.RBACRelease, error) {
-	aid, err := r.applicationID(ctx, scope)
-	if err != nil {
-		return biz.RBACRelease{}, err
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return biz.RBACRelease{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT id FROM applications WHERE id=$1 FOR UPDATE`, aid); err != nil {
-		return biz.RBACRelease{}, err
-	}
-	v, err := createApplicationRelease(ctx, tx, aid, description, actor, snapshot)
-	if err != nil {
-		return v, err
-	}
-	return v, tx.Commit(ctx)
-}
-func (r *RBACV1Repository) PublishApplication(ctx context.Context, scope, description, actor string) (biz.RBACRelease, error) {
-	aid, err := r.applicationID(ctx, scope)
-	if err != nil {
-		return biz.RBACRelease{}, err
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return biz.RBACRelease{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT id FROM applications WHERE id=$1 FOR UPDATE`, aid); err != nil {
-		return biz.RBACRelease{}, err
-	}
-	activeKeys, err := r.activeServiceKeys(ctx)
-	if err != nil {
-		return biz.RBACRelease{}, err
-	}
-	var raw []byte
-	if err = tx.QueryRow(ctx, applicationSnapshotSQL, aid, activeKeys).Scan(&raw); err != nil {
-		return biz.RBACRelease{}, err
-	}
-	var snapshot map[string]any
-	if err = json.Unmarshal(raw, &snapshot); err != nil {
-		return biz.RBACRelease{}, err
-	}
-	v, err := createApplicationRelease(ctx, tx, aid, description, actor, snapshot)
-	if err != nil {
-		return v, err
-	}
-	return v, tx.Commit(ctx)
-}
-func (r *RBACV1Repository) ListRBACReleases(ctx context.Context, scope string) ([]biz.RBACRelease, error) {
-	aid, err := r.applicationID(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := r.pool.Query(ctx, `SELECT id,application_id,version,status,description,checksum,published_by,published_at FROM rbac_releases WHERE application_id=$1 ORDER BY version DESC`, aid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []biz.RBACRelease{}
-	for rows.Next() {
-		var v biz.RBACRelease
-		if err = rows.Scan(&v.ID, &v.ApplicationID, &v.Version, &v.Status, &v.Description, &v.Checksum, &v.PublishedBy, &v.PublishedAt); err != nil {
-			return nil, err
+func (r *RBACV1Repository) GetCurrentPolicy(ctx context.Context, p biz.CurrentPolicy) (biz.CurrentPolicy, error) {
+	if r.cache != nil {
+		data, err := r.cache.Load(ctx, p)
+		if err == nil {
+			p.Data = data
+			return p, nil
 		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
-}
-func (r *RBACV1Repository) GetActiveRBACRelease(ctx context.Context, scope string) (biz.RBACRelease, error) {
-	var v biz.RBACRelease
-	aid, err := r.applicationID(ctx, scope)
-	if err != nil {
-		return v, err
+		if ctx.Err() != nil {
+			return p, ctx.Err()
+		}
 	}
 	var raw []byte
-	err = r.pool.QueryRow(ctx, `SELECT r.id,r.application_id,r.version,r.status,r.description,r.checksum,r.published_by,r.published_at,s.snapshot FROM rbac_releases r JOIN rbac_release_snapshots s ON s.release_id=r.id WHERE r.application_id=$1 AND r.status='published' ORDER BY r.version DESC LIMIT 1`, aid).Scan(&v.ID, &v.ApplicationID, &v.Version, &v.Status, &v.Description, &v.Checksum, &v.PublishedBy, &v.PublishedAt, &raw)
-	if err != nil {
-		return v, mapDBError(err)
+	var token string
+	err := r.pool.QueryRow(ctx, applicationCurrentPolicySQL, p.ApplicationID, p.ServiceKeys, p.Token).Scan(&token, &raw)
+	// A save won the race after metadata was read. Retry with fresh metadata.
+	if err == pgx.ErrNoRows {
+		return p, biz.ErrConflict
 	}
-	err = json.Unmarshal(raw, &v.Snapshot)
-	return v, err
+	if err != nil {
+		return p, mapDBError(err)
+	}
+	if err = json.Unmarshal(raw, &p.Data); err != nil {
+		return p, err
+	}
+	if r.cache != nil {
+		if err := r.cache.Store(ctx, p); err != nil {
+			slog.WarnContext(ctx, "current policy cache write failed; using database", "application_id", p.ApplicationID, "error", err)
+		}
+	}
+	return p, nil
 }

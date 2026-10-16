@@ -16,5 +16,5 @@ COPY --from=api-build /out/nexus-authorization /app/nexus-authorization
 COPY src/configs/app.production.yaml /app/configs/app.yaml
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=6 \
-    CMD wget --quiet --spider http://127.0.0.1:8080/healthz || exit 1
+    CMD wget --quiet --spider http://127.0.0.1:8080/api/healthz || exit 1
 ENTRYPOINT ["/app/nexus-authorization"]

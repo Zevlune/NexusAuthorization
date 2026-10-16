@@ -40,7 +40,6 @@ export type Menu = {
 type MenuWire = Omit<Menu, 'menu_type'> & { menu_type: 'directory' | 'menu' | 'button' };
 const normalizeMenu = (item: MenuWire): Menu => ({ ...item, menu_type: item.menu_type === 'button' ? 'button' : 'menu' });
 export type PageResult<T> = { items: T[]; total: number; page: number; page_size: number };
-export type Release = { id: string; version: number; status: string; description: string; published_by: string; published_at: string };
 
 const query = (appKey: string, serviceResource?: string) => {
   const params = new URLSearchParams({ app_key: appKey });
@@ -68,9 +67,7 @@ export const saveRole = (appKey: string, item: Partial<Role>) => request.post<Ro
 export const deleteRole = (appKey: string, id: string) => request.delete(`/v1/rbac-v1/roles/${id}${query(appKey)}`);
 export const listSubjectRoles = (appKey: string) => request.get<{ items: SubjectRole[] }>(`/v1/rbac-v1/subject-roles${query(appKey)}`);
 export const replaceSubjectRoles = (appKey: string, subject: string, domain: string, roleIDs: string[]) => request.put(`/v1/rbac-v1/subject-roles${query(appKey)}`, { subject, domain, role_ids: roleIDs });
-export const publishRBAC = (appKey: string, description: string) => request.post<Release>(`/v1/rbac-v1/releases${query(appKey)}`, { description });
-export const listRBACReleases = (appKey: string) => request.get<{ items: Release[] }>(`/v1/rbac-v1/releases${query(appKey)}`);
-export const simulateRBAC = (appKey: string, input: { service_resource: string; subject: string; domain: string; method: string; path: string }) => request.post(`/v1/rbac-v1/simulate${query(appKey, input.service_resource)}`, input);
+export const simulateRBAC = (appKey: string, input: { service_resource: string; subject: string; domain?: string; method: string; path: string }) => request.post(`/v1/rbac-v1/simulate${query(appKey, input.service_resource)}`, input);
 export const listMenus = async (appKey: string): Promise<{ items: Menu[] }> => {
   const result = await request.get<{ items: MenuWire[] }>(`/v1/rbac-v1/menus${query(appKey)}`);
   return { items: (result.items || []).map(normalizeMenu) };

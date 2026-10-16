@@ -51,7 +51,7 @@ func openAPIDocument() map[string]any {
 			},
 			"security": []map[string][]string{{"cookieAuth": {}}},
 		}
-		if operation.path == "/v1/authorize" {
+		if operation.path == apiPrefix+"/v1/authorize" {
 			definition["security"] = []map[string][]string{{"serviceCredential": {}}}
 		}
 
@@ -61,18 +61,19 @@ func openAPIDocument() map[string]any {
 				parameters = append(parameters, map[string]any{"name": strings.Trim(segment, "{}"), "in": "path", "required": true, "schema": map[string]any{"type": "string"}})
 			}
 		}
-		if strings.HasPrefix(operation.path, "/v1/rbac-v1/") {
+		if strings.HasPrefix(operation.path, apiPrefix+"/v1/rbac-v1/") {
 			parameters = append(parameters, map[string]any{"name": "app_key", "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 		}
-		if strings.HasPrefix(operation.path, "/v1/rbac-v1/endpoints") {
+		if strings.HasPrefix(operation.path, apiPrefix+"/v1/rbac-v1/endpoints") {
 			parameters = append(parameters, map[string]any{"name": "service_resource", "in": "query", "required": operation.method != http.MethodGet, "schema": map[string]any{"type": "string"}})
 		}
-		if operation.path == "/v1/rbac-v1/subject-menus" {
-			for _, name := range []string{"subject", "domain"} {
+		if operation.path == apiPrefix+"/v1/rbac-v1/subject-menus" {
+			for _, name := range []string{"subject"} {
 				parameters = append(parameters, map[string]any{"name": name, "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 			}
+			parameters = append(parameters, map[string]any{"name": "domain", "in": "query", "required": false, "schema": map[string]any{"type": "string"}, "description": "Defaults to the empty default domain when omitted"})
 		}
-		if operation.path == "/v1/users" {
+		if operation.path == apiPrefix+"/v1/users" {
 			parameters = append(parameters,
 				map[string]any{"name": "filter", "in": "query", "schema": map[string]any{"type": "string"}, "description": "NexusAuth SCIM filter, e.g. userName eq \"alice\""},
 				map[string]any{"name": "startIndex", "in": "query", "schema": map[string]any{"type": "integer", "minimum": 1, "default": 1}},
@@ -94,14 +95,16 @@ func openAPIDocument() map[string]any {
 			}
 		}
 
-		if operation.path == "/v1/authorize" {
-			properties := map[string]any{}
-			required := []string{"appKey", "serviceResource", "subject", "domain", "method", "path"}
+		if operation.path == apiPrefix+"/v1/authorize" {
+			properties := map[string]any{
+				"domain": map[string]any{"type": "string", "description": "Defaults to the empty default domain when omitted"},
+			}
+			required := []string{"appKey", "serviceResource", "subject", "method", "path"}
 			for _, name := range required {
 				properties[name] = map[string]any{"type": "string"}
 			}
 			definition["requestBody"] = map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "required": required, "properties": properties, "additionalProperties": false}}}}
-			definition["responses"].(map[string]any)["200"] = map[string]any{"description": "Authorization decision", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "properties": map[string]any{"allowed": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "release_version": map[string]any{"type": "integer"}}}}}}
+			definition["responses"].(map[string]any)["200"] = map[string]any{"description": "Authorization decision", "content": map[string]any{"application/json": map[string]any{"schema": map[string]any{"type": "object", "properties": map[string]any{"allowed": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}}}}}}
 		}
 		pathItem[strings.ToLower(operation.method)] = definition
 	}
@@ -121,26 +124,26 @@ func openAPIDocument() map[string]any {
 }
 
 var openAPIOperations = []openAPIOperation{
-	{http.MethodGet, "/v1/users", "Users", "List NexusAuth SCIM users", false},
-	{http.MethodGet, "/v1/applications", "applications", "List business applications", false},
-	{http.MethodPost, "/v1/applications", "applications", "Create business application", true},
-	{http.MethodPut, "/v1/applications/{key}", "applications", "Update business application", true},
-	{http.MethodGet, "/v1/applications/{key}/service-resources", "applications", "List linked services", false},
-	{http.MethodPut, "/v1/applications/{key}/service-resources", "applications", "Replace linked services", true},
-	{http.MethodGet, "/v1/rbac-v1/menus", "menus", "List application menus", false},
-	{http.MethodPost, "/v1/rbac-v1/menus", "menus", "Save application menu", true},
-	{http.MethodDelete, "/v1/rbac-v1/menus/{id}", "menus", "Delete application menu", false},
-	{http.MethodGet, "/v1/rbac-v1/subject-menus", "menus", "Get published menus for a subject", false},
-	{"GET", "/healthz", "System", "Health check", false},
-	{"GET", "/auth/config", "Authentication", "Get authentication configuration", false},
-	{"GET", "/auth/login", "Authentication", "Start sign-in", false},
-	{"GET", "/auth/me", "Authentication", "Get current user", false},
-	{"POST", "/auth/logout", "Authentication", "Sign out", false},
-	{"POST", "/v1/service-resources", "Service resources", "Create service resource", true}, {"GET", "/v1/service-resources", "Service resources", "List service resources", false}, {"GET", "/v1/service-resources/{key}", "Service resources", "Get service resource", false}, {"PUT", "/v1/service-resources/{key}", "Service resources", "Update service resource", true}, {"DELETE", "/v1/service-resources/{key}", "Service resources", "Delete service resource", false},
-	{"POST", "/v1/authorize", "Runtime authorization", "Authorize a verified service request", true},
-	{"GET", "/v1/rbac-v1/endpoints", "RBAC v1", "List API endpoints", false}, {"POST", "/v1/rbac-v1/endpoints", "RBAC v1", "Create or update an API endpoint", true}, {"POST", "/v1/rbac-v1/endpoints/import-swagger", "RBAC v1", "Import Swagger endpoints", true}, {"DELETE", "/v1/rbac-v1/endpoints/{id}", "RBAC v1", "Delete an API endpoint", false},
-	{"GET", "/v1/rbac-v1/roles", "RBAC v1", "List roles and endpoint grants", false}, {"POST", "/v1/rbac-v1/roles", "RBAC v1", "Create or update a role", true}, {"DELETE", "/v1/rbac-v1/roles/{id}", "RBAC v1", "Delete a role", false},
-	{"GET", "/v1/rbac-v1/subject-roles", "RBAC v1", "List subject role bindings", false}, {"PUT", "/v1/rbac-v1/subject-roles", "RBAC v1", "Replace subject role bindings", true},
-	{"POST", "/v1/rbac-v1/releases", "RBAC v1", "Publish an RBAC release", true}, {"GET", "/v1/rbac-v1/releases", "RBAC v1", "List RBAC releases", false}, {"POST", "/v1/rbac-v1/simulate", "RBAC v1", "Simulate an authorization decision", true},
-	{"POST", "/v1/authorization/api-endpoints", "API endpoints", "Create API endpoint", true}, {"GET", "/v1/authorization/api-endpoints", "API endpoints", "List API endpoints", false}, {"POST", "/v1/authorization/api-endpoints/import-swagger", "API endpoints", "Import Swagger endpoints", true}, {"GET", "/v1/authorization/api-endpoints/{id}", "API endpoints", "Get API endpoint", false}, {"PUT", "/v1/authorization/api-endpoints/{id}", "API endpoints", "Update API endpoint", true}, {"DELETE", "/v1/authorization/api-endpoints/{id}", "API endpoints", "Delete API endpoint", false},
+	{http.MethodGet, apiPrefix + "/v1/users", "Users", "List NexusAuth SCIM users", false},
+	{http.MethodGet, apiPrefix + "/v1/applications", "applications", "List business applications", false},
+	{http.MethodPost, apiPrefix + "/v1/applications", "applications", "Create business application", true},
+	{http.MethodPut, apiPrefix + "/v1/applications/{key}", "applications", "Update business application", true},
+	{http.MethodGet, apiPrefix + "/v1/applications/{key}/service-resources", "applications", "List linked services", false},
+	{http.MethodPut, apiPrefix + "/v1/applications/{key}/service-resources", "applications", "Replace linked services", true},
+	{http.MethodGet, apiPrefix + "/v1/rbac-v1/menus", "menus", "List application menus", false},
+	{http.MethodPost, apiPrefix + "/v1/rbac-v1/menus", "menus", "Save application menu", true},
+	{http.MethodDelete, apiPrefix + "/v1/rbac-v1/menus/{id}", "menus", "Delete application menu", false},
+	{http.MethodGet, apiPrefix + "/v1/rbac-v1/subject-menus", "menus", "Get currently granted menus for a subject", false},
+	{"GET", apiPrefix + "/healthz", "System", "Health check", false},
+	{"GET", apiPrefix + "/auth/config", "Authentication", "Get authentication configuration", false},
+	{"GET", apiPrefix + "/auth/login", "Authentication", "Start sign-in", false},
+	{"GET", apiPrefix + "/auth/me", "Authentication", "Get current user", false},
+	{"POST", apiPrefix + "/auth/logout", "Authentication", "Sign out", false},
+	{"POST", apiPrefix + "/v1/service-resources", "Service resources", "Create service resource", true}, {"GET", apiPrefix + "/v1/service-resources", "Service resources", "List service resources", false}, {"GET", apiPrefix + "/v1/service-resources/{key}", "Service resources", "Get service resource", false}, {"PUT", apiPrefix + "/v1/service-resources/{key}", "Service resources", "Update service resource", true}, {"DELETE", apiPrefix + "/v1/service-resources/{key}", "Service resources", "Delete service resource", false},
+	{"POST", apiPrefix + "/v1/authorize", "Runtime authorization", "Authorize a verified service request", true},
+	{"GET", apiPrefix + "/v1/rbac-v1/endpoints", "RBAC v1", "List API endpoints", false}, {"POST", apiPrefix + "/v1/rbac-v1/endpoints", "RBAC v1", "Create or update an API endpoint", true}, {"POST", apiPrefix + "/v1/rbac-v1/endpoints/import-swagger", "RBAC v1", "Import Swagger endpoints", true}, {"DELETE", apiPrefix + "/v1/rbac-v1/endpoints/{id}", "RBAC v1", "Delete an API endpoint", false},
+	{"GET", apiPrefix + "/v1/rbac-v1/roles", "RBAC v1", "List roles and endpoint grants", false}, {"POST", apiPrefix + "/v1/rbac-v1/roles", "RBAC v1", "Create or update a role", true}, {"DELETE", apiPrefix + "/v1/rbac-v1/roles/{id}", "RBAC v1", "Delete a role", false},
+	{"GET", apiPrefix + "/v1/rbac-v1/subject-roles", "RBAC v1", "List subject role bindings", false}, {"PUT", apiPrefix + "/v1/rbac-v1/subject-roles", "RBAC v1", "Replace subject role bindings", true},
+	{"POST", apiPrefix + "/v1/rbac-v1/simulate", "RBAC v1", "Simulate an authorization decision", true},
+	{"POST", apiPrefix + "/v1/authorization/api-endpoints", "API endpoints", "Create API endpoint", true}, {"GET", apiPrefix + "/v1/authorization/api-endpoints", "API endpoints", "List API endpoints", false}, {"POST", apiPrefix + "/v1/authorization/api-endpoints/import-swagger", "API endpoints", "Import Swagger endpoints", true}, {"GET", apiPrefix + "/v1/authorization/api-endpoints/{id}", "API endpoints", "Get API endpoint", false}, {"PUT", apiPrefix + "/v1/authorization/api-endpoints/{id}", "API endpoints", "Update API endpoint", true}, {"DELETE", apiPrefix + "/v1/authorization/api-endpoints/{id}", "API endpoints", "Delete API endpoint", false},
 }

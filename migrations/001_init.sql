@@ -1,11 +1,10 @@
--- NexusAuthorization first-deployment schema for nexus-authorization.
+-- NexusAuthorization initial schema for the first installation.
 -- Connect to the empty target database before running this file.
--- All schema changes are atomic; no business data or upgrade steps are included.
+-- This file is the complete initial schema; it contains no seed data.
 BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TYPE rbac_release_status AS ENUM ('published', 'superseded');
 CREATE TYPE service_resource_source AS ENUM ('local', 'nexusauth');
 CREATE TYPE endpoint_source AS ENUM ('manual', 'swagger');
 CREATE TYPE menu_type AS ENUM ('directory', 'menu', 'button');
@@ -27,6 +26,7 @@ CREATE TABLE service_resources (
 );
 
 CREATE TABLE applications (
+    policy_token UUID NOT NULL DEFAULT gen_random_uuid(),
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     app_key VARCHAR(128) NOT NULL UNIQUE,
     display_name VARCHAR(200) NOT NULL,
@@ -66,10 +66,10 @@ CREATE TABLE api_endpoints (
     CHECK (left(path_template, 1) = '/')
 );
 
--- Compatibility table for the still-registered /v1/authorization/api-endpoints
+-- Compatibility table for the still-registered /api/v1/authorization/api-endpoints
 -- routes. It is a standalone, service-resource-scoped endpoint registry with
 -- audit columns and soft delete; it is separate from api_endpoints and does not
--- participate in application RBAC publishing or release snapshots.
+-- participate in application RBAC matching.
 CREATE TABLE authorization_api_endpoints (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     service_resource VARCHAR(128) NOT NULL,
@@ -145,32 +145,13 @@ CREATE TABLE subject_role_bindings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
     subject VARCHAR(200) NOT NULL,
-    domain VARCHAR(200) NOT NULL DEFAULT 'global',
+    domain VARCHAR(200) NOT NULL DEFAULT '',
     role_id UUID NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (application_id, subject, domain, role_id),
     FOREIGN KEY (role_id, application_id) REFERENCES roles(id, application_id) ON DELETE CASCADE,
-    CHECK (btrim(subject) <> ''),
-    CHECK (btrim(domain) <> '')
-);
-
-CREATE TABLE rbac_releases (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
-    version BIGINT NOT NULL,
-    status rbac_release_status NOT NULL DEFAULT 'published',
-    description TEXT NOT NULL DEFAULT '',
-    checksum VARCHAR(64) NOT NULL,
-    published_by VARCHAR(200) NOT NULL,
-    published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (application_id, version)
-);
-
-CREATE TABLE rbac_release_snapshots (
-    release_id UUID PRIMARY KEY REFERENCES rbac_releases(id) ON DELETE CASCADE,
-    snapshot JSONB NOT NULL,
-    CHECK (jsonb_typeof(snapshot) = 'object')
+    CHECK (btrim(subject) <> '')
 );
 
 CREATE OR REPLACE FUNCTION prevent_disabling_linked_service_resource()
@@ -270,8 +251,94 @@ CREATE UNIQUE INDEX authorization_api_endpoints_active_route_idx
 CREATE INDEX role_api_endpoint_bindings_endpoint_idx ON role_api_endpoint_bindings(endpoint_id, role_id);
 CREATE INDEX subject_role_bindings_application_lookup_idx ON subject_role_bindings(application_id, subject, domain);
 CREATE INDEX menus_application_enabled_idx ON menus(application_id, enabled, sort_order);
-CREATE INDEX rbac_releases_application_active_idx ON rbac_releases(application_id, version DESC)
-    WHERE status = 'published';
 CREATE INDEX application_service_resources_service_idx ON application_service_resources(service_resource_key, application_id);
+
+-- Internal cache invalidation only: no release history or permission snapshots.
+CREATE OR REPLACE FUNCTION refresh_application_policy_token()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.policy_token := gen_random_uuid();
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER application_policy_token BEFORE UPDATE ON applications
+FOR EACH ROW EXECUTE FUNCTION refresh_application_policy_token();
+
+-- Transition tables allow one invalidation per affected application per statement,
+-- including bulk grants/members, updates that change ownership, and deletes.
+CREATE OR REPLACE FUNCTION invalidate_current_policy()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    changed_sql TEXT;
+    affected_sql TEXT;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        changed_sql := 'SELECT to_jsonb(r) AS row FROM new_rows r';
+    ELSIF TG_OP = 'DELETE' THEN
+        changed_sql := 'SELECT to_jsonb(r) AS row FROM old_rows r';
+    ELSE
+        changed_sql := 'SELECT to_jsonb(r) AS row FROM new_rows r UNION ALL SELECT to_jsonb(r) AS row FROM old_rows r';
+    END IF;
+    IF TG_TABLE_NAME IN ('roles','menus','subject_role_bindings','application_service_resources') THEN
+        affected_sql := 'SELECT (row->>''application_id'')::uuid FROM changed';
+    ELSIF TG_TABLE_NAME IN ('role_api_endpoint_bindings','role_menu_bindings') THEN
+        affected_sql := 'SELECT application_id FROM roles WHERE id IN (SELECT (row->>''role_id'')::uuid FROM changed)';
+    ELSIF TG_TABLE_NAME = 'api_endpoints' THEN
+        affected_sql := 'SELECT application_id FROM application_service_resources WHERE service_resource_key IN (SELECT row->>''service_resource_key'' FROM changed)';
+    ELSE
+        affected_sql := 'SELECT application_id FROM application_service_resources WHERE service_resource_key IN (SELECT row->>''resource_key'' FROM changed)';
+    END IF;
+    EXECUTE 'WITH changed AS (' || changed_sql || ') UPDATE applications SET policy_token=gen_random_uuid() WHERE id IN (' || affected_sql || ')';
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER roles_policy_insert AFTER INSERT ON roles
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER roles_policy_update AFTER UPDATE ON roles
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER roles_policy_delete AFTER DELETE ON roles
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER menus_policy_insert AFTER INSERT ON menus
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER menus_policy_update AFTER UPDATE ON menus
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER menus_policy_delete AFTER DELETE ON menus
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER subject_role_bindings_policy_insert AFTER INSERT ON subject_role_bindings
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER subject_role_bindings_policy_update AFTER UPDATE ON subject_role_bindings
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER subject_role_bindings_policy_delete AFTER DELETE ON subject_role_bindings
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER application_service_resources_policy_insert AFTER INSERT ON application_service_resources
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER application_service_resources_policy_update AFTER UPDATE ON application_service_resources
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER application_service_resources_policy_delete AFTER DELETE ON application_service_resources
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_api_endpoint_bindings_policy_insert AFTER INSERT ON role_api_endpoint_bindings
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_api_endpoint_bindings_policy_update AFTER UPDATE ON role_api_endpoint_bindings
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_api_endpoint_bindings_policy_delete AFTER DELETE ON role_api_endpoint_bindings
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_menu_bindings_policy_insert AFTER INSERT ON role_menu_bindings
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_menu_bindings_policy_update AFTER UPDATE ON role_menu_bindings
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER role_menu_bindings_policy_delete AFTER DELETE ON role_menu_bindings
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER api_endpoints_policy_insert AFTER INSERT ON api_endpoints
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER api_endpoints_policy_update AFTER UPDATE ON api_endpoints
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER api_endpoints_policy_delete AFTER DELETE ON api_endpoints
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER service_resources_policy_insert AFTER INSERT ON service_resources
+REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER service_resources_policy_update AFTER UPDATE ON service_resources
+REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
+CREATE TRIGGER service_resources_policy_delete AFTER DELETE ON service_resources
+REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION invalidate_current_policy();
 
 COMMIT;

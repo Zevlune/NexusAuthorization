@@ -13,7 +13,12 @@ export default defineConfig({
       '^/api(?:/|$)': {
         target: 'http://localhost:8080',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api(?=\/|$)/, ''),
+      },
+      // Vite tests this regex against req.url (query string included), so the
+      // real callback /signin-oidc?code=...&state=... must match too.
+      '^/signin-oidc(?:[/?]|$)': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
       },
     },
   },

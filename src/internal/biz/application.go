@@ -10,7 +10,7 @@ import (
 )
 
 // Application is the permission boundary for menus, roles, subject bindings,
-// and published authorization snapshots.
+// and current authorization rules.
 type Application struct {
 	ID          uuid.UUID `json:"id"`
 	Key         string    `json:"key"`

@@ -12,7 +12,7 @@ import (
 )
 
 // TestAuthorizationAPIEndpointRepositoryIntegration covers the still
-// registered /v1/authorization/api-endpoints compatibility routes by driving
+// registered /api/v1/authorization/api-endpoints compatibility routes by driving
 // their repository against authorization_api_endpoints. Like the other
 // integration tests it reuses NEXUSAUTHORIZATION_TEST_DATABASE_URL and a
 // disposable database initialized only with migrations/001_init.sql, and it

@@ -20,8 +20,7 @@ const mockMenus: DashboardMenu[] = [
   { id: 'roles', route: '/roles', componentPath: '/policy-workbench/index.tsx', name: '角色管理', show: true, iconName: null, parentId: 'rbac' },
   { id: 'role-new', route: '/roles/new', componentPath: '/policy-workbench/index.tsx', name: '新增角色', show: false, iconName: null, parentId: 'roles' },
   { id: 'role-edit', route: '/roles/:roleId/edit', componentPath: '/policy-workbench/index.tsx', name: '编辑角色', show: false, iconName: null, parentId: 'roles' },
-  { id: 'delivery', route: '/delivery', componentPath: null, name: '发布与验证', show: true, iconName: 'history', parentId: null },
-  { id: 'releases', route: '/releases', componentPath: '/policy-workbench/index.tsx', name: '发布版本', show: true, iconName: null, parentId: 'delivery' },
+  { id: 'delivery', route: '/delivery', componentPath: null, name: '权限验证', show: true, iconName: 'history', parentId: null },
   { id: 'simulate', route: '/simulate', componentPath: '/policy-workbench/index.tsx', name: '权限模拟', show: true, iconName: null, parentId: 'delivery' },
 ];
 

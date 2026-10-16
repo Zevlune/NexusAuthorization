@@ -9,6 +9,13 @@ export type SCIMUser = {
   active?: boolean;
 };
 
+/** Human-readable label shared by the role binding drawer and the permission simulator. */
+export const scimUserLabel = (user: SCIMUser): string => {
+  const name = user.name?.formatted || [user.name?.givenName, user.name?.familyName].filter(Boolean).join(' ');
+  const email = (user.emails?.find(item => item.primary) || user.emails?.[0])?.value;
+  return [name && name !== user.userName ? name : '', user.userName, email].filter(Boolean).join(' · ') || user.id;
+};
+
 type SCIMUserName = NonNullable<SCIMUser['name']>;
 type SCIMUserEmail = NonNullable<SCIMUser['emails']>[number];
 type RawRecord = Record<string, unknown>;
