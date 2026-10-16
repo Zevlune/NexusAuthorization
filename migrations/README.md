@@ -1,57 +1,72 @@
-# 首次上线数据库初始化
+# NexusAuthorization 首次初始化数据库
 
-默认数据库名为 `nexus-authorization`。SQL 标识符包含连字符，建库及修改所有者时必须使用双引号。
+当前项目按首次安装交付。空环境只需要执行两步：
+
+1. PostgreSQL 管理员在维护库 `postgres` 中执行 `000_create_database.sql`，创建目标数据库；
+2. 目标数据库 owner 执行 `001_init.sql`，创建完整业务 schema。
+
+当前仓库只维护一套完整初始 schema，不拆分第二套初始化 SQL。第一次安装请使用全新的空库。
 
 | 文件 | 用途 | 执行连接 |
 | --- | --- | --- |
-| `000_create_database.sql` | 首次创建数据库，独立于事务执行 | PostgreSQL 管理员连接维护库 `postgres` |
-| `001_init.sql` | 一次性创建当前完整结构，包含应用地址 `applications.url` | 数据库拥有者连接空库 `nexus-authorization` |
+| `000_create_database.sql` | 创建数据库 `nexus-authorization` | PostgreSQL 管理员连接维护库 `postgres` |
+| `001_init.sql` | 创建完整初始 schema、约束、索引和触发器 | 数据库 owner 连接空库 `nexus-authorization` |
 
-## 外部 PostgreSQL
+## 1. 创建数据库
 
-从仓库根目录执行。管理员连接串中的主机、用户和密码按实际环境填写：
+从仓库根目录执行，管理员连接串中的主机、用户和密码按实际环境填写：
 
 ```sh
 psql 'postgres://postgres:ADMIN_PASSWORD@db.example.com:5432/postgres?sslmode=require' \
   -X -v ON_ERROR_STOP=1 -f migrations/000_create_database.sql
 ```
 
-建库脚本默认将数据库归执行建库的用户所有。生产环境使用独立应用用户时，先由管理员创建该用户并授予它数据库所有权（将 `nexus-authorization` 替换为实际应用用户）：
+建库脚本默认将数据库归执行建库的用户所有。如果应用使用独立数据库账号，先由管理员创建该账号，再将数据库 owner 改为实际账号：
 
 ```sql
 ALTER DATABASE "nexus-authorization" OWNER TO "nexus-authorization";
 ```
 
-将 `.env.example` 复制为 `.env`，设置 `NEXUSAUTHORIZATION_DATABASE_URL`，数据库路径使用 `/nexus-authorization`。数据库用户名可独立设置，无需与库名相同。随后导出配置并初始化：
+数据库名包含连字符，SQL 中必须使用双引号。示例用户名只是占位符，可按实际账号替换。
+
+## 2. 执行初始 schema
+
+使用数据库 owner 连接刚创建的空库，直接执行完整初始化：
 
 ```sh
-set -a
-. ./.env
-set +a
+psql 'postgres://nexus-authorization:DB_PASSWORD@db.example.com:5432/nexus-authorization?sslmode=require' \
+  -X -v ON_ERROR_STOP=1 -f migrations/001_init.sql
+```
+
+也可以通过仓库脚本执行：
+
+```sh
+export NEXUSAUTHORIZATION_DATABASE_URL='postgres://nexus-authorization:DB_PASSWORD@db.example.com:5432/nexus-authorization?sslmode=require'
 sh src/scripts/init-db.sh
 ```
 
-也可以直接执行 SQL：
+`001_init.sql` 自带 `BEGIN` / `COMMIT`，请在同一个数据库连接中完整执行，不要再包一层事务，也不要只执行光标所在的部分。执行失败时应查看第一条错误并修正后重新对空库执行。
 
-```sh
-psql "$NEXUSAUTHORIZATION_DATABASE_URL" -X -v ON_ERROR_STOP=1 \
-  -f migrations/001_init.sql
-```
+初始脚本创建：
 
-`001_init.sql` 自带 `BEGIN` / `COMMIT`，出错时整次初始化回滚。它创建 pgcrypto 扩展、4 个枚举、12 张业务表、约束、4 个触发器及其函数、7 个索引，不插入业务种子数据、不创建迁移记录表。初始化用户需要创建这些对象和扩展的权限。
+- `pgcrypto` 扩展；
+- 服务资源、业务应用、应用服务关联、API、菜单、角色和主体角色绑定表；
+- 兼容目录接口使用的 `authorization_api_endpoints` 表；
+- 应用边界校验、菜单父子关系校验和服务关联保护触发器；
+- 保存后刷新 `applications.policy_token` 的缓存失效触发器；
+- 唯一约束、查询索引和默认空域 `subject_role_bindings.domain = ''`。
 
-12 张表包含供兼容目录接口 `/v1/authorization/api-endpoints*` 使用的 `authorization_api_endpoints`。该表和同为服务目录作用域的 `api_endpoints` 是两套独立数据：它保存 `controller / method / path_template` 以及审计列和 `is_deleted` 软删除标记，不建立指向 `service_resources` 的外键，也不参与应用 RBAC 的角色、菜单、主体绑定和发布快照。仅当需要继续使用该兼容目录接口时才读写它。
+脚本不插入应用、服务、角色、菜单或用户绑定等业务种子数据。初始化完成后，使用 Dashboard 或管理 API 创建第一套业务配置。
 
-## 在 DBeaver 中执行
+## 3. DBeaver 执行方式
 
-1. 管理员连接维护库 `postgres`，开启自动提交，独立执行 `000_create_database.sql`。建库不能放在事务中，也不要与 `001_init.sql` 一起执行。
-2. 新建或切换连接到 `nexus-authorization`，使用数据库拥有者打开完整的 `001_init.sql`。
-3. 使用「执行 SQL 脚本」执行全文，确保开头的 `BEGIN;` 和最后的 `COMMIT;` 在同一连接中执行。不要只执行光标所在语句，也不要单独选中末尾的 `COMMIT;`。
-4. 检查 SQL 脚本执行设置，禁用「每条语句后提交」（After each query）。本文件自己管理事务，选择不额外提交（No commit）；发生错误时停止执行并回滚，不要忽略错误继续执行。函数正文的 `BEGIN ... END` 属于 PL/pgSQL，不能按内部的分号手工拆开执行。
+1. 管理员连接维护库 `postgres`，开启自动提交，单独执行 `000_create_database.sql`。
+2. 新建或切换到 `nexus-authorization` 连接，确认当前用户是数据库 owner。
+3. 使用“执行 SQL 脚本”执行完整的 `001_init.sql`。
+4. 关闭“每条语句后提交”，让脚本自己的顶层事务生效。
+5. 如果发生错误，先查看日志中的第一条错误；不要只执行末尾 `COMMIT`，也不要删除脚本中的事务语句。
 
-PostgreSQL 的 `there is no transaction in progress` 通常是提交或回滚时没有活动事务的警告，不能单凭它判断初始化失败。可能只执行了最后的 `COMMIT`，也可能客户端已经提前结束了事务；如果来自客户端错误处理发出的 `ROLLBACK`，还需查看它前面的第一条错误。脚本自身有一对顶层 `BEGIN` / `COMMIT`。
-
-先看执行日志中的第一条错误，再运行以下只读查询核对连接和表的位置：
+初始化后可用以下查询确认连接和核心表：
 
 ```sql
 SELECT current_database(), current_schema(), current_setting('search_path');
@@ -68,28 +83,42 @@ FROM (VALUES
     ('menus'),
     ('role_api_endpoint_bindings'),
     ('role_menu_bindings'),
-    ('subject_role_bindings'),
-    ('rbac_releases'),
-    ('rbac_release_snapshots')
+    ('subject_role_bindings')
 ) AS expected(table_name)
 ORDER BY expected.table_name;
 ```
 
-默认配置下数据库应为 `nexus-authorization`、schema 为 `public`。第二个查询应返回 12 行且 `actual_table` 均非空；表齐全还不等于整个初始化完整成功，需确认日志无其他错误，并在 DBeaver 刷新后核对 SQL 中的 4 个枚举、4 个触发器、4 个触发器函数和 7 个显式索引（主键及唯一约束还会生成额外索引）。如有缺失或先前报错，先保留第一条错误和查询结果用于排查，不要直接对已有对象的库重跑初始化，也不要删掉事务语句来绕过提示。
+默认配置下数据库应为 `nexus-authorization`、schema 为 `public`，查询应返回 10 行且 `actual_table` 均非空。
 
-## Docker 本地开发
+## 4. 本地开发
+
+开发 Compose 使用空数据卷首次启动时自动执行挂载的 `001_init.sql`：
 
 ```sh
-cp .env.dev.example .env.dev
-docker compose --env-file .env.dev -f docker-compose-dev.yml up -d
+docker compose -f docker-compose-dev.yml up -d
+docker compose -f docker-compose-dev.yml ps
 ```
 
-PostgreSQL 镜像在空数据卷首次启动时，依据 `POSTGRES_DB` 创建 `nexus-authorization` 并且只执行挂载的 `001_init.sql`。此流程不执行 `000_create_database.sql`，也不需要额外运行初始化脚本。
+默认 PostgreSQL 地址为 `localhost:55434`，数据库名为 `nexus-authorization`。已有数据卷不会因修改 `POSTGRES_DB` 自动改名，也不会再次执行初始化 SQL；需要重新初始化本地环境时，请确认数据可删除后再移除开发数据卷。
 
-源码开发连接默认使用 `localhost:55434/nexus-authorization`，与开发 Compose 一致。自定义数据库名或端口时，通过 `NEXUSAUTHORIZATION_DATABASE_URL` 指定完整连接串。
+源码启动时，先让 `NEXUSAUTHORIZATION_DATABASE_URL` 指向已经完成初始化的空库或开发库，再运行：
 
-## 初始化后的使用
+```sh
+cd src
+go run ./cmd/api-server
+```
 
-初始化成功后启动后端和前端，再通过当前 API 或管理页面创建应用、角色、菜单和用户绑定并发布权限版本。服务资源可以来自本地目录或 NexusAuth 远程目录。
+## 5. 初始化后的第一套配置
 
-脚本用于首次上线的空数据库，重复运行会报错且不会覆盖现有数据。已有数据卷不会因修改 `POSTGRES_DB` 自动改名，也不会重新执行初始化 SQL。生产 Compose 不会创建外部数据库。`src/scripts/migrate.sh` 仅兼容旧命令并转调 `init-db.sh`，不再扫描增量 SQL。
+初始化成功后：
+
+1. 启动 API 和 Dashboard；
+2. 登录并创建第一个业务应用；
+3. 关联服务资源；
+4. 维护或导入 API；
+5. 创建角色并授予 API、菜单和按钮；
+6. 分配用户角色；
+7. 使用权限模拟验证允许和拒绝；
+8. 再接入业务服务的 SDK 或 `/api/v1/authorize`。
+
+保存成功后权限立即参与鉴权，没有发布按钮和发布步骤。完整操作见 [用户使用手册](../doc/user-guide.md)，部署见 [运维操作手册](../doc/operations-manual.md)，系统结构见 [系统设计说明](../doc/system-design.md)。

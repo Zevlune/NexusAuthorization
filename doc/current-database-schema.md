@@ -1,18 +1,17 @@
 # 当前数据库结构
 
-整理日期：2026-10-14。
+整理日期：2026-10-15。
 
 [返回当前功能总览](current-system-overview.md) · [完整初始化 SQL](../migrations/001_init.sql)
 
 本文档按 `migrations/001_init.sql` 逐项整理，本次没有对运行中的数据库进行结构比对。该脚本是空数据库的纯初始化脚本：只创建扩展、枚举、表、约束、触发器和索引，不插入种子数据，也不执行升级或替换操作。
 
-文档中的“允许 NULL”以列声明为准；“默认值”是脚本中的 PostgreSQL 表达式或字面量。`updated_at` 只有插入时的 `DEFAULT NOW()`，脚本没有自动更新时间触发器。
+文档中的“允许 NULL”以列声明为准；“默认值”是脚本中的 PostgreSQL 表达式或字面量。`updated_at` 只有插入时的 `DEFAULT NOW()`，脚本没有自动更新时间触发器；唯一的自动更新字段是 `applications.policy_token`。
 
 ## 枚举类型
 
 | 枚举 | 值 | 用途 |
 | --- | --- | --- |
-| `rbac_release_status` | `published`、`superseded` | RBAC 发布版本状态 |
 | `service_resource_source` | `local`、`nexusauth` | 服务资源来源 |
 | `endpoint_source` | `manual`、`swagger` | API 端点登记来源 |
 | `menu_type` | `directory`、`menu`、`button` | 菜单节点类型 |
@@ -50,10 +49,11 @@
 | `description` | `TEXT` | 否 | `''` | 应用描述 |
 | `url` | `VARCHAR(2048)` | 否 | `''` | 可选 HTTP(S) Web 入口地址 |
 | `enabled` | `BOOLEAN` | 否 | `TRUE` | 是否启用 |
+| `policy_token` | `UUID` | 否 | `gen_random_uuid()` | 应用级缓存失效标记；权限数据变更时自动刷新，不是业务版本 |
 | `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
-约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。
+约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。`application_policy_token` 触发器在应用行更新时把 `policy_token` 置为新的随机 UUID；权限表的语句级触发器也会刷新它。标记只用于让本地编译索引和 Redis 当前记录缓存失效，不提供版本序列、历史或回滚。
 
 ### `application_service_resources`
 
@@ -90,7 +90,7 @@
 
 ### `authorization_api_endpoints`
 
-兼容目录接口 `/v1/authorization/api-endpoints*` 使用的服务资源作用域 Endpoint 登记表。它与 `api_endpoints` 是两套独立数据，只服务该兼容路由，不参与应用 RBAC 的角色、菜单、主体绑定和发布快照。
+兼容目录接口 `/api/v1/authorization/api-endpoints*` 使用的服务资源作用域 Endpoint 登记表。它与 `api_endpoints` 是两套独立数据，只服务该兼容路由，不参与应用 RBAC 的角色、菜单、主体绑定和运行时权限记录。
 
 | 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
 | --- | --- | --- | --- | --- |
@@ -185,44 +185,18 @@
 | `id` | `UUID` | 否 | `gen_random_uuid()` | 绑定主键 |
 | `application_id` | `UUID` | 否 | 无 | 所属应用 |
 | `subject` | `VARCHAR(200)` | 否 | 无 | 身份主体 |
-| `domain` | `VARCHAR(200)` | 否 | `'global'` | 身份域 |
+| `domain` | `VARCHAR(200)` | 否 | `''` | 身份域；空串表示默认域 |
 | `role_id` | `UUID` | 否 | 无 | 角色外键 |
 | `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
-约束：主键为 `id`；`application_id` 外键引用 `applications(id)`，`ON DELETE CASCADE`；(`application_id`, `subject`, `domain`, `role_id`) 唯一；(`role_id`, `application_id`) 外键引用 `roles(id, application_id)`，`ON DELETE CASCADE`；`subject` 和 `domain` 必须非空白。
-
-### `rbac_releases`
-
-应用权限快照的发布版本元数据。
-
-| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
-| --- | --- | --- | --- | --- |
-| `id` | `UUID` | 否 | `gen_random_uuid()` | 发布版本主键 |
-| `application_id` | `UUID` | 否 | 无 | 所属应用 |
-| `version` | `BIGINT` | 否 | 无 | 应用内版本号 |
-| `status` | `rbac_release_status` | 否 | `'published'` | 发布状态 |
-| `description` | `TEXT` | 否 | `''` | 版本说明 |
-| `checksum` | `VARCHAR(64)` | 否 | 无 | 快照校验和 |
-| `published_by` | `VARCHAR(200)` | 否 | 无 | 发布者 |
-| `published_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 发布时间 |
-
-约束：主键为 `id`；`application_id` 外键引用 `applications(id)`，`ON DELETE CASCADE`；(`application_id`, `version`) 唯一。脚本没有“每个应用只能有一个 `published` 版本”的唯一约束；`rbac_releases_application_active_idx` 是带 `WHERE status = 'published'` 的普通索引，不是唯一部分索引。
-
-### `rbac_release_snapshots`
-
-发布版本对应的 JSONB 快照；正常发布流程创建后只读，DDL 本身没有禁止直接更新快照的触发器。
-
-| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
-| --- | --- | --- | --- | --- |
-| `release_id` | `UUID` | 否 | 无 | 发布版本主键，同时是快照主键 |
-| `snapshot` | `JSONB` | 否 | 无 | 权限快照对象 |
-
-约束：`release_id` 为主键，并外键引用 `rbac_releases(id)`，`ON DELETE CASCADE`；`snapshot` 必须满足 `jsonb_typeof(snapshot) = 'object'`。
+约束：主键为 `id`；`application_id` 外键引用 `applications(id)`，`ON DELETE CASCADE`；(`application_id`, `subject`, `domain`, `role_id`) 唯一；(`role_id`, `application_id`) 外键引用 `roles(id, application_id)`，`ON DELETE CASCADE`；`subject` 必须非空白。`domain` 为非 NULL 字符串，默认空串表示默认域，不再有非空 CHECK；旧值 `global` 与空串是同一条默认域，写入和查询都会归一为空串，其它具名域仍按值隔离。
 
 ## 数据库触发器
 
-初始化脚本定义 4 个触发器，均为数据库层保障：
+初始化脚本定义 29 个触发器：4 个业务保护触发器、1 个应用标记刷新触发器和 24 个语句级缓存失效触发器。
+
+业务保护触发器：
 
 | 触发器 | 时机 | 作用 |
 | --- | --- | --- |
@@ -231,11 +205,18 @@
 | `role_api_endpoint_application_guard` | `role_api_endpoint_bindings` 插入或更新前、逐行 | 按端点的 `service_resource_key` 检查角色所属应用已关联该服务资源。 |
 | `role_menu_application_guard` | `role_menu_bindings` 插入或更新前、逐行 | 检查角色和菜单属于同一应用。 |
 
-上述触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验，不能归因于这 4 个数据库触发器。
+缓存失效触发器：
+
+| 触发器 / 函数 | 时机 | 作用 |
+| --- | --- | --- |
+| `application_policy_token` | `applications` 更新前、逐行 | 把 `policy_token` 刷新为新的随机 UUID。 |
+| `<table>_policy_insert/update/delete` | `roles`、`menus`、`subject_role_bindings`、`application_service_resources`、`role_api_endpoint_bindings`、`role_menu_bindings`、`api_endpoints`、`service_resources` 的插入/更新/删除后、语句级 | 通用函数 `invalidate_current_policy()` 用事务 transition table 取出受影响行，按应用刷新 `policy_token`；角色授权、API 端点和服务资源变更通过角色或 key 反查关联应用。 |
+
+语句级触发器在一次批量语句里每个受影响应用只更新一次标记，回滚时标记和权限数据一起回滚。`TRUNCATE` 不属于支持的管理操作，不会触发这些失效。上述触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验。
 
 ## 显式索引
 
-PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 7 个索引：
+PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 6 个索引：
 
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
@@ -244,7 +225,6 @@ PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动�
 | `role_api_endpoint_bindings_endpoint_idx` | `role_api_endpoint_bindings` | (`endpoint_id`, `role_id`) | 按端点反查角色 |
 | `subject_role_bindings_application_lookup_idx` | `subject_role_bindings` | (`application_id`, `subject`, `domain`) | 按应用、主体和域查询角色绑定 |
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
-| `rbac_releases_application_active_idx` | `rbac_releases` | (`application_id`, `version DESC`) `WHERE status = 'published'` | 查询应用的已发布版本并按版本倒序；是普通部分索引，不是唯一索引 |
 | `application_service_resources_service_idx` | `application_service_resources` | (`service_resource_key`, `application_id`) | 按服务资源反查应用 |
 
 ## 关系概览
@@ -263,8 +243,6 @@ erDiagram
     menus ||--o{ role_menu_bindings : granted_to
     applications ||--o{ subject_role_bindings : scopes
     roles ||--o{ subject_role_bindings : assigned
-    applications ||--o{ rbac_releases : publishes
-    rbac_releases ||--o| rbac_release_snapshots : contains
     authorization_api_endpoints {
         uuid id PK
         varchar service_resource
@@ -274,11 +252,13 @@ erDiagram
     }
 ```
 
-图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。`authorization_api_endpoints` 不建立数据库外键、不被发布快照引用，因此在上图中是独立节点。
+图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。`authorization_api_endpoints` 不建立数据库外键、不被运行时权限记录引用，因此在上图中是独立节点。
 
 ## 明确不包含的结构
 
 - 初始化脚本不创建用户表；主体以 `subject` 字符串保存在 `subject_role_bindings`，身份来源不由此 schema 管理。
 - 初始化脚本不创建 OAuth 客户端表。
-- 初始化脚本不创建独立的 API 字段权限表；应用 RBAC 的 API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。兼容目录接口的 `authorization_api_endpoints` 是带软删除的独立 Endpoint 登记表，不参与应用 RBAC 发布快照。
-- 初始化脚本不插入任何应用、服务资源、角色、菜单、绑定或发布版本种子数据。
+- 初始化脚本不创建独立的 API 字段权限表；应用 RBAC 的 API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。兼容目录接口的 `authorization_api_endpoints` 是带软删除的独立 Endpoint 登记表，不参与应用 RBAC 运行时权限记录。
+- 初始化脚本不创建发布版本、历史快照或迁移记录表；保存后的权限直接参与运行时鉴权。
+- `subject_role_bindings.domain` 在初始 schema 中就是 `NOT NULL DEFAULT ''`，空字符串表示默认域，具名域按原值隔离。
+- 初始化脚本不插入任何应用、服务资源、角色、菜单或绑定种子数据。

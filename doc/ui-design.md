@@ -35,11 +35,11 @@ Header 的「业务应用」显示当前应用标识，未选择时显示「未�
 - 隐藏页面：`show: false` 的页面仍注册路由，但不进入侧栏，例如「新增角色」「编辑角色」。
 - 侧栏、标签与面包屑都取同一批数据，改动侧栏名称应改这里，而不是页面。
 
-当前可见页面共 7 个：配置总览 `/dashboard`；资源管理分组下的服务资源 `/service-resources`、API 接口 `/api-resources`、菜单与按钮 `/menus`；RBAC 授权分组下的角色管理 `/roles`；发布与验证分组下的发布版本 `/releases`、权限模拟 `/simulate`。
+当前可见页面共 6 个：配置总览 `/dashboard`；资源管理分组下的服务资源 `/service-resources`、API 接口 `/api-resources`、菜单与按钮 `/menus`；RBAC 授权分组下的角色管理 `/roles`；权限验证分组下的权限模拟 `/simulate`。
 
-发布与模拟入口在当前实现中真实存在：`/releases` 与 `/simulate` 是可见菜单项，并分别渲染「发布与版本」和「权限模拟」页面（`dashboard/src/pages/policy-workbench/index.tsx`）。因此文档和验收不应把它们描述为“仅能通过 API 操作”。旧的“用户授权 / 用户角色绑定”独立菜单已不存在，`/bindings` 会重定向到 `/roles`，用户分配在角色管理中进行（`dashboard/src/router/routes.tsx`）。
+权限模拟入口在当前实现中真实存在：`/simulate` 是可见菜单项，渲染「权限模拟」页面（`dashboard/src/pages/policy-workbench/index.tsx`）。发布版本页面、发布菜单和发布 API 已删除，角色、绑定和目录保存后立即生效，不需要发布。旧的“用户授权 / 用户角色绑定”独立菜单已不存在，`/bindings` 会重定向到 `/roles`，用户分配在角色管理中进行（`dashboard/src/router/routes.tsx`）。
 
-页面按 `pathname` 分派（`dashboard/src/pages/policy-workbench/index.tsx`）：`/service-resources`、`/api-resources`、`/menus`、`/roles`、`/releases`、`/simulate`，以 `/roles/` 开头的进入角色编辑器，其余落入配置总览。
+页面按 `pathname` 分派（`dashboard/src/pages/policy-workbench/index.tsx`）：`/service-resources`、`/api-resources`、`/menus`、`/roles`、`/simulate`，以 `/roles/` 开头的进入角色编辑器，其余落入配置总览。
 
 ```mermaid
 flowchart LR
@@ -49,13 +49,11 @@ flowchart LR
   Dash --> Api[API 接口]
   Dash --> Menu[菜单与按钮]
   Dash --> Role[角色管理]
-  Dash --> Rel[发布版本]
   Dash --> Sim[权限模拟]
   Svc -->|关联服务| Role
   Api --> Role
   Menu --> Role
-  Role -->|发布当前配置| Rel
-  Rel --> Sim
+  Role -->|保存即生效| Sim
 ```
 
 ## 选择业务应用页
@@ -80,7 +78,7 @@ flowchart LR
 | 应用描述 | 应用描述 | 选填 |
 | 启用 | 启用应用 | 停用后不可进入，仍可编辑和重新启用 |
 
-创建调用 `POST /v1/applications`，编辑调用 `PUT /v1/applications/{key}`；停用与重新启用通过编辑抽屉中的「启用应用」开关完成，卡片上没有独立的启停按钮，也没有删除应用的入口（`dashboard/src/api/application.ts`）。
+创建调用 `POST /api/v1/applications`，编辑调用 `PUT /api/v1/applications/{key}`；停用与重新启用通过编辑抽屉中的「启用应用」开关完成，卡片上没有独立的启停按钮，也没有删除应用的入口（`dashboard/src/api/application.ts`）。
 
 「进入权限配置」把所选应用写入会话存储（`sessionStorage` 键 `nexus-authorization-application`），随后跳转到 `redirect` 指定的地址或默认 `/dashboard`。当前应用是会话级状态：刷新保留，关闭标签页后失效。
 
@@ -88,7 +86,7 @@ flowchart LR
 
 ### 配置总览
 
-标题「应用权限总览」。上方为四步说明（关联服务 / 配置角色 / 绑定用户 / 发布验证），下方显示当前应用和四个统计：关联服务、API 接口、角色、菜单与按钮。这里只做概览，不提供编辑。
+标题「应用权限总览」。上方为四步说明（关联服务 / 配置角色 / 绑定用户 / 验证权限），其中「验证权限」说明为「保存后立即生效，可模拟请求验证」；下方显示当前应用和四个统计：关联服务、API 接口、角色、菜单与按钮。这里只做概览，不提供编辑。
 
 ### 服务资源
 
@@ -98,7 +96,7 @@ flowchart LR
 - 筛选栏：关键词（服务名称、标识或 Audience）、关联状态下拉（占位「全部服务」，选项「已关联服务」）、「查询」「重置」。
 - 表格列：服务名称 / 标识、Audience、状态（启用 / 停用）、应用关联（已关联 / 未关联）、操作。
 - 行操作按状态变化：已关联且启用可「查看 API」（跳转 `/api-resources?service=<key>`）；本地可写资源可「编辑」「删除」；「删除」在已关联时禁用，提示先取消关联；未关联时显示「关联」，已关联时显示「取消关联」。
-- 「关联 / 取消关联」通过 `PUT /v1/applications/{appKey}/service-resources` 整体替换该应用的服务集合，随后刷新。
+- 「关联 / 取消关联」通过 `PUT /api/v1/applications/{appKey}/service-resources` 整体替换该应用的服务集合，随后刷新。
 - 新建 / 编辑服务使用抽屉，字段：服务名称（必填）、服务标识（必填，创建后不可改）、Audience、描述、启用服务。
 
 关联服务本身只划定应用可用的 API 目录范围，不授予任何角色或用户访问权限；授权发生在角色与用户绑定两步。
@@ -144,20 +142,27 @@ flowchart LR
 - 授权分两个标签页：「菜单与按钮 · N」与「API 接口 · N」。
 - 菜单与按钮页：左侧权限树可展开、搜索、聚焦分支；右侧为当前节点，可切换「允许访问此菜单」，列出子菜单入口，以及「本节点直接按钮」的按钮卡片，并可「选择本节点全部按钮」。勾选按钮会补齐其所有有效祖先。
 - API 接口页：左侧服务列表（显示已授权数 / 总数），右侧支持按接口、模块、方法筛选、「仅看已选」与「全选当前结果」；批量勾选只作用于当前筛选结果。
-- 底部显示「N 个菜单 · N 个按钮 · N 个 API」，「查看已选权限」打开复核抽屉；保存文案「保存角色」；底部提示「保存更新角色配置；发布版本后生效。」。
+- 底部显示「N 个菜单 · N 个按钮 · N 个 API」，「查看已选权限」打开复核抽屉；保存文案「保存角色」；底部提示「保存后角色授权立即生效。」。
 - 存在不可用授权（节点被删或所属服务停用 / 解除关联）时给出警告并要求先移除才能保存；移除后有可撤销提示；未保存修改离开时会弹出确认。
 
-### 发布与版本
+### 保存生效
 
-标题「发布与版本」，操作「发布当前配置」（`dashboard/src/pages/policy-workbench/index.tsx`）。表单填写「版本说明」，发布后列表显示版本（`vN`）、状态（当前发布 / 已替代）、说明与时间。
-
-发布在事务内锁定应用、递增版本号并生成不可变 JSONB 快照。运行时逐次从 PostgreSQL 读取当前已发布快照。完整事务与鉴权语义见后端说明（[应用边界 RBAC 设计](rbac-v1-design.md) 与 [功能与数据模型](current-system-overview.md)）。
+角色编辑器、用户分配抽屉、服务关联、API 与菜单表单保存成功后直接生效：后端在保存事务中刷新应用的缓存失效标记，下一次鉴权读取新配置。没有「发布当前配置」按钮、版本说明、版本列表或历史快照页。完整事务与缓存语义见 [权限生效设计](permission-lifecycle.md) 与 [应用边界 RBAC 设计](rbac-v1-design.md)。
 
 ### 权限模拟
 
-标题「权限模拟」，操作「运行测试」。表单字段：目标服务（仅列出已关联且启用的服务）、Subject、Domain（默认 `global`）、HTTP 方法（GET/POST/PUT/PATCH/DELETE）、Path。结果以键值对展示，布尔值用成功 / 危险标签呈现。
+标题「权限模拟」，操作「运行测试」。桌面布局为两列两行：第一行「目标服务」「Path」，第二行「HTTP 方法」「用户」；窄屏收成单列。
 
-模拟按已发布快照判断，不评估未发布草稿；这是后端语义，前端只调用接口并展示结果。
+- 「目标服务」只列出已关联且启用的服务；「Path」按当前服务的 API 目录选择，可搜索，选项展示 `path_template` 与摘要，不展示其它服务的路径。
+- 「HTTP 方法」联动已选 Path 拥有的方法，同一路径的多个方法去重列出；没有可选路径或尚未选择服务时禁用运行。
+- 用户从 SCIM 目录选择，不使用手输 Subject；选项展示可识别的姓名 / 账号，停用用户不可作为模拟主体。
+- 动态路径含 `{id}` 等 OpenAPI 参数时，在 Path 下方为每个参数提供输入；参数补齐后才允许运行，提交的是替换后的实际路径，并对参数按单段编码。
+- 更换服务清空旧 Path、方法和结果；切换应用清空已选服务、Path、方法和结果；任意输入修改都清空上一次结果。
+- 目录载入、失败、空列表和停用用户要有明确提示并支持重试；加载中或缺参数时不能发起鉴权。
+
+表单没有 Domain 输入，模拟按默认空域判断。结果以键值对展示，布尔值用成功 / 危险标签呈现。
+
+模拟按当前已保存配置判断，与运行时鉴权使用同一套逻辑；这是后端语义，前端只调用接口并展示结果。
 
 ## 授权模型：关联服务与角色授权的区别
 
@@ -169,15 +174,15 @@ flowchart LR
 | 角色授权 | 角色编辑器 | 给角色勾选具体的 API、菜单、按钮 |
 | 用户绑定 | 角色管理的「分配用户」 | 把 subject + domain 绑定到一个或多个角色 |
 
-只有三步叠加并发布后，运行时鉴权才会通过：应用必须已关联该服务，角色必须已授权目标 API，且 subject 在 domain 下拥有启用角色。
+只有三步同时成立时运行时鉴权才会通过：应用必须已关联并启用该服务，角色必须已授权目标 API，且 subject 在 domain 下拥有启用角色。这三步保存后立即生效，不需要发布。
 
 ## 用户绑定与 domain 语义
 
-「分配用户」抽屉通过 `GET /v1/users` 分页读取 NexusAuth SCIM 用户目录，选择框支持按姓名、用户名或邮箱搜索，显示格式为「姓名 · 用户名 · 邮箱」，停用用户带「已停用」。保存时只改动当前角色在该 domain 下的成员：先读取最新绑定，再合并该用户的其它角色，对变更的 subject 调用 `PUT /v1/rbac-v1/subject-roles`（`dashboard/src/pages/policy-workbench/components/role-users.tsx`）。
+「分配用户」抽屉通过 `GET /api/v1/users` 分页读取 NexusAuth SCIM 用户目录，选择框支持按姓名、用户名或邮箱搜索，显示格式为「姓名 · 用户名 · 邮箱」，停用用户带「已停用」。保存时只改动当前角色在该 domain 下的成员：先读取最新绑定，再合并该用户的其它角色，对变更的 subject 调用 `PUT /api/v1/rbac-v1/subject-roles`（`dashboard/src/pages/policy-workbench/components/role-users.tsx`）。
 
-当前抽屉固定使用 domain `global`，界面不提供 Domain 选择。停用用户不能新增分配，但原绑定（含已从目录删除的用户）可以取消。部分用户保存失败时抽屉保持打开并显示失败数量，再次保存只重试未完成的变化。
+当前抽屉写入默认空域（`domain` 为空串），界面不提供 Domain 输入。停用用户不能新增分配，但原绑定（含已从目录删除的用户）可以取消。部分用户保存失败时抽屉保持打开并显示失败数量，再次保存只重试未完成的变化。
 
-后端仍保留 domain 字段用于按租户或组织隔离授权；此入口不修改其它 domain 的既有绑定。后端按 `app_key + subject + domain` 替换绑定集合（见 [NexusAuth SCIM 用户列表](nexusauth-scim-users.md)）。
+后端仍保留 domain 字段用于按租户或组织隔离授权；省略、空白和旧值 `global` 都归一为空默认域，具名域保持独立，此入口不修改其它 domain 的既有绑定。后端按 `app_key + subject + domain` 替换绑定集合（见 [NexusAuth SCIM 用户列表](nexusauth-scim-users.md)）。
 
 ## 登录与退出
 
@@ -221,8 +226,8 @@ sequenceDiagram
 
 - 应用删除；应用地址以外的应用级配置。
 - 用户授权独立菜单 / 独立页面（已合并到角色管理的「分配用户」）。
-- 发布版本的差异对比、回滚 / 恢复历史版本、发布审批，以及未发布草稿的模拟入口。
-- 分配用户抽屉中的 Domain 切换（当前固定 `global`）。
+- 发布版本、版本差异对比、回滚 / 恢复历史版本、发布审批和未发布草稿的模拟入口（当前设计为保存即生效，不提供发布流程）。
+- 分配用户抽屉中的 Domain 切换（当前写入默认空域，不提供输入）。
 - 角色 - 菜单 - API 的运行时权限校验由后端负责；dashboard 侧栏来自前端 mock 导航，不承担权限校验。
 
 ## 内部证据索引

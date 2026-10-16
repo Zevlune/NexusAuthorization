@@ -4,9 +4,9 @@ Go SDK（`sdk/rbac`）要求每次鉴权同时标识受信业务应用和被访�
 
 ## 认证
 
-默认 Compose 不再配置独立的服务凭证，当前 `/v1/authorize` 拒绝业务服务调用。统一 Open API Token 管理与校验尚未接入；下面的 SDK 示例适用于旧服务凭证兼容机制，默认部署需等待统一 Token 校验完成后再接入。
+默认 Compose 不再配置独立的服务凭证，当前 `/api/v1/authorize` 拒绝业务服务调用。统一 Open API Token 管理与校验尚未接入；下面的 SDK 示例适用于旧服务凭证兼容机制，默认部署需等待统一 Token 校验完成后再接入。
 
-`rbac.NewClient(baseURL, credential)` 创建的客户端向 `baseURL + /v1/authorize` 发起 `POST`，并自动附带 `Authorization: Bearer <credential>`。该凭证是权限中心配置的服务到服务凭证（`authorization.service_credential`），不是管理端浏览器会话。HTTP 客户端默认 3 秒超时。
+`rbac.NewClient(baseURL, credential)` 创建的客户端向 `baseURL + /api/v1/authorize` 发起 `POST`，并自动附带 `Authorization: Bearer <credential>`。该凭证是权限中心配置的服务到服务凭证（`authorization.service_credential`），不是管理端浏览器会话。HTTP 客户端默认 3 秒超时。
 
 ## 中间件接入
 
@@ -28,6 +28,8 @@ http.Handle("/api/books", middleware)
 
 `Require(appKey, serviceResource, resolve, next)` 的 `appKey` 和 `serviceResource` 是固定的受信配置值。身份由接入服务负责解析；SDK 不接受用户传入的角色或授权参数。
 
+`rbac.Identity.Domain` 可选：省略、空串和旧值 `global` 都表示默认空域，只有需要按具名域隔离时才填显式值。SDK 不再要求 `Domain` 非空。
+
 ## 直接调用
 
 ```go
@@ -35,25 +37,24 @@ decision, err := client.Check(ctx, rbac.Request{
 	AppKey:          "books",
 	ServiceResource: "book-service",
 	Subject:         "user:1",
-	Domain:          "global",
+	Domain:          "tenant-a", // 可选；省略或留空使用默认域
 	Method:          http.MethodGet,
 	Path:            "/api/books",
 })
 ```
 
-`Check` 在凭证为空或任一请求字段为空时直接返回错误，不发送请求。成功时返回 `Decision`：
+`Check` 在凭证为空或必需字段（`AppKey`、`ServiceResource`、`Subject`、`Method`、`Path`）为空时直接返回错误，不发送请求；`Domain` 可省略，省略或空串按默认域处理。成功时返回 `Decision`：
 
 ```go
 type Decision struct {
 	Allowed        bool
 	Effect         string   // allow / deny
 	Reason         string   // allowed / endpoint_not_found / ...
-	ReleaseVersion int64
 	MatchedRoles   []string
 }
 ```
 
-SDK 校验返回的决策：`Allowed=true` 时 `Effect` 必须为 `allow`、`Reason` 必须为 `allowed`、`ReleaseVersion` 必须大于 0，否则返回错误。非 `200` 响应、响应体解析失败都会返回错误。
+SDK 校验返回的决策：`Allowed=true` 时 `Effect` 必须为 `allow`、`Reason` 必须为 `allowed`，否则返回错误。服务端不再返回发布版本号，SDK 也不再校验 `ReleaseVersion` 字段；升级旧 SDK 时请同步移除该字段和对应校验。非 `200` 响应、响应体解析失败都会返回错误。
 
 ## 失败关闭
 

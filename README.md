@@ -1,6 +1,6 @@
 # NexusAuthorization
 
-基于业务应用划分权限边界的授权中心，支持服务资源、API、菜单、角色、用户授权及版本发布。
+基于业务应用划分权限边界的授权中心，支持服务资源、API、菜单、角色和用户授权；角色、绑定和目录保存后直接生效。
 
 | 目录 / 文件 | 内容 |
 | --- | --- |
@@ -13,11 +13,15 @@
 | `docker-compose-dev.yml` | 本地前后端与 PostgreSQL |
 | `docker-compose.yml` | 前后端连接外部 PostgreSQL |
 
-文档入口：[标准使用手册](doc/user-guide.md) · [文档索引](doc/README.md) · [快速开始](doc/quick-start.md) · [Docker 部署与环境变量](doc/docker-deployment-1.0.2.md)。
+文档入口：[标准使用手册](doc/user-guide.md) · [系统设计](doc/system-design.md) · [运维操作手册](doc/operations-manual.md) · [开发与二次开发](doc/development-guide.md) · [文档索引](doc/README.md) · [快速开始](doc/quick-start.md)。
 
-当前实现与设计的对照、冗余代码清理及验证记录见 [实现对照](doc/implementation-alignment.md)；实际前端操作流程见 [UI 说明](doc/ui-design.md)。
+当前系统设计和实现边界见 [系统设计](doc/system-design.md)；实际前端操作流程见 [UI 说明](doc/ui-design.md)。
 
 NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-users.md)。
+
+支持使用 go-redis 缓存应用当前保存的权限记录。缓存按应用分片，使用固定 key，不按用户或绑定逐条建 key，也没有业务版本或历史快照；保存即生效的事务与撤权规则见 [权限生效设计](doc/permission-lifecycle.md)，Redis key、缓存一致性和启用方式见 [Redis 接入说明](doc/redis-integration.md)。
+
+API 鉴权使用静态路径哈希、参数路径 Trie 和稀疏角色位图，并按应用当前失效标记复用编译索引；数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
 
 ## 首次上线
 
@@ -45,4 +49,4 @@ docker compose -f docker-compose.yml pull
 docker compose -f docker-compose.yml up -d
 ```
 
-`001_init.sql` 自带 `BEGIN` / `COMMIT`，不要再包一层事务。`src/scripts/migrate.sh` 仅作为转调 `init-db.sh` 的兼容入口；首次上线只使用 `init-db.sh`。完整说明见 [数据库初始化](migrations/README.md)。
+`001_init.sql` 是第一次安装使用的完整初始 schema，自带 `BEGIN` / `COMMIT`，不要再包一层事务。第一次安装只使用 `migrations/000_create_database.sql` 和 `migrations/001_init.sql`；完整步骤见 [数据库初始化](migrations/README.md)。
