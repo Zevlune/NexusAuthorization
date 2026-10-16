@@ -22,6 +22,9 @@ type Binding = { id?: string; subject: string; domain: string; role_id: string }
 type PutFailure = { status: number; errorMessage: string };
 type SavedAssignment = { subject: string; domain: string; role_ids: string[] };
 
+// The backend normalizes a blank/missing domain and the legacy "global" alias to the empty default.
+const normalizeDomain = (domain: string) => (domain === 'global' ? '' : domain);
+
 // Reuses the existing mockWorkbench strategy: intercept every /api/** call, answer the handful of
 // endpoints the workbench needs, and keep an in-memory subject-role store for the drawer to read/save.
 async function mockWorkbench(page: Page, initialBindings: Binding[] = []) {
@@ -47,7 +50,7 @@ async function mockWorkbench(page: Page, initialBindings: Binding[] = []) {
           await route.fulfill({ status: failure.status, json: { success: false, errorMessage: failure.errorMessage } });
           return;
         }
-        bindings = bindings.filter(binding => !(binding.subject === body.subject && binding.domain === body.domain));
+        bindings = bindings.filter(binding => !(binding.subject === body.subject && normalizeDomain(binding.domain) === normalizeDomain(body.domain)));
         for (const roleID of body.role_ids) {
           bindings.push({ id: `binding-${body.subject}-${roleID}`, subject: body.subject, domain: body.domain, role_id: roleID });
         }
@@ -118,12 +121,12 @@ test('角色分配用户按 200/页 自动读取完整 SCIM 目录，并显示�
 
   await saveAssignment(drawer);
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: 'nexus-alice', domain: 'global', role_ids: ['reader-role'] });
+  expect(workbench.saved[0]).toEqual({ subject: 'nexus-alice', domain: '', role_ids: ['reader-role'] });
   await expect(page.getByText('用户分配已保存')).toBeVisible();
   await expect(drawer).toBeHidden();
 });
 
-test('移除用户只改本角色 global membership，保留其他角色与其他 domain', async ({ page }) => {
+test('移除用户只改默认域的本角色 membership，保留其他角色与其他 domain', async ({ page }) => {
   const workbench = await mockWorkbench(page, [
     { subject: alice.id, domain: 'global', role_id: 'reader-role' },
     { subject: alice.id, domain: 'global', role_id: 'editor-role' },
@@ -138,13 +141,14 @@ test('移除用户只改本角色 global membership，保留其他角色与其�
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  // Only the reader membership in the global domain is dropped: editor stays, and tenant-a is untouched.
-  expect(workbench.saved[0]).toEqual({ subject: alice.id, domain: 'global', role_ids: ['editor-role'] });
+  // Only the reader membership in the default domain is dropped: editor stays, and tenant-a is untouched.
+  // The legacy "global" rows read as the default domain and are rewritten into the empty default domain.
+  expect(workbench.saved[0]).toEqual({ subject: alice.id, domain: '', role_ids: ['editor-role'] });
   expect(workbench.currentBindings().some(binding => binding.domain === 'tenant-a' && binding.role_id === 'reader-role')).toBe(true);
   await expect(drawer).toBeHidden();
 });
 
-test('新增用户到角色时保留其已有的其他 global 角色', async ({ page }) => {
+test('新增用户到角色时保留其已有的其他默认域角色', async ({ page }) => {
   const workbench = await mockWorkbench(page, [{ subject: alice.id, domain: 'global', role_id: 'editor-role' }]);
   await page.route('**/api/v1/users?**', route => route.fulfill({ json: userDirectory([alice]) }));
 
@@ -155,7 +159,7 @@ test('新增用户到角色时保留其已有的其他 global 角色', async ({ 
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toMatchObject({ subject: alice.id, domain: 'global' });
+  expect(workbench.saved[0]).toMatchObject({ subject: alice.id, domain: '' });
   expectSameIDs(workbench.saved[0].role_ids, ['editor-role', 'reader-role']);
   await expect(drawer).toBeHidden();
 });
@@ -171,7 +175,7 @@ test('目录中已不存在的原绑定用户显示为 原绑定用户（ID）�
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: 'former-user', domain: 'global', role_ids: [] });
+  expect(workbench.saved[0]).toEqual({ subject: 'former-user', domain: '', role_ids: [] });
   await expect(drawer).toBeHidden();
 });
 
@@ -211,7 +215,7 @@ test('停用用户不能新增，但原停用绑定用户可以取消', async ({
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: inactiveBound.id, domain: 'global', role_ids: [] });
+  expect(workbench.saved[0]).toEqual({ subject: inactiveBound.id, domain: '', role_ids: [] });
   expect(workbench.saved.some(item => item.subject === inactiveNew.id)).toBe(false);
   await expect(drawer).toBeHidden();
 });

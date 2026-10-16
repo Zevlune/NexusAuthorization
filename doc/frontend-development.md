@@ -25,7 +25,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 `http://localhost:5274/`。Vite 开发服务器按 `dashboard/vite.config.ts` 把 `^/api(?:/|$)` 代理到 `http://localhost:8080`，并删除 `/api` 前缀：浏览器请求 `/api/auth/me` 时后端收到 `/auth/me`。代理使用 `changeOrigin`，前端 Axios 使用 `withCredentials: true` 携带 cookie。
+浏览器打开 `http://localhost:5274/`。Vite 开发服务器按 `dashboard/vite.config.ts` 把 `^/api(?:/|$)` 代理到 `http://localhost:8080` 并保留 `/api` 前缀：浏览器请求 `/api/auth/me` 时后端收到的同样是 `/api/auth/me`。代理使用 `changeOrigin`，前端 Axios 使用 `withCredentials: true` 携带 cookie。
 
 本地后端应监听 `:8080`，并准备 PostgreSQL、配置文件、服务资源来源和需要的 OIDC / SCIM 配置。前端不保存或注入任何 OIDC client secret、SCIM Token，认证与远端密钥只配置在后端环境。
 
@@ -40,9 +40,9 @@ npm run build
 docker build -t nexusauthorization-dashboard:local .
 ```
 
-镜像使用 Nginx 提供静态文件，容器监听 `80`。Nginx 将 `/api` 和精确的 `/signin-oidc` 转发到 `nexus-authorization:8080`，并对 `/api` 删除前缀；其它路径回退到 `index.html`，支持 React 路由刷新。生产反向代理应使用 HTTPS，并保留 Host、转发协议、客户端地址和 cookie。
+镜像使用 Nginx 提供静态文件，容器监听 `80`。Nginx 将 `/api` 转发到 `nexus-authorization:8080` 并保留前缀，同时把 OIDC 回调 `/signin-oidc` 用单独 location 转发到后端；其它路径回退到 `index.html`，支持 React 路由刷新。生产反向代理应使用 HTTPS，并保留 Host、转发协议、客户端地址和 cookie。
 
-部署配置与镜像标签见 [Docker 部署](docker-deployment-1.0.2.md) 和 [快速开始](quick-start.md)；不要把 OIDC secret 写进 dashboard 构建参数或前端静态资源。
+部署配置和首次启动步骤见 [运维操作手册](operations-manual.md) 与 [快速开始](quick-start.md)；不要把 OIDC secret 写进 dashboard 构建参数或前端静态资源。
 
 ## 应用入口与组件布局
 
@@ -81,13 +81,13 @@ docker build -t nexusauthorization-dashboard:local .
 - `/select-application`：登录后的选择业务应用页。
 - `/select-service-resource`：旧路径，重定向到 `/select-application`。
 - 受保护布局：进入前要求登录（`RequireAuth`）并已选择业务应用（`RequireServiceResource`）。
-- 工作台页面：`/dashboard`、`/service-resources`、`/api-resources`、`/menus`、`/roles`、`/roles/new`、`/roles/:roleId/edit`、`/releases`、`/simulate`。
+- 工作台页面：`/dashboard`、`/service-resources`、`/api-resources`、`/menus`、`/roles`、`/roles/new`、`/roles/:roleId/edit`、`/simulate`。发布页面 `/releases` 已删除。
 - `/bindings`：旧路径，重定向到 `/roles`。
 - `*`：错误页。
 
 登录与回跳逻辑集中在 `dashboard/src/router/auth.tsx`：会话检查用 `checkAuth`（`GET /api/auth/me`），未登录跳转 `/login?redirect=...`，已登录但未选应用跳转 `/select-application?redirect=...`。登录回跳地址读写 `localStorage` 的 `nexus-authorization-login-redirect`；当前业务应用读写 `sessionStorage` 的 `nexus-authorization-application`，并通过 `nexus-authorization-application-change` 事件在组件间同步（`dashboard/src/api/application.ts`）。
 
-后端回调地址是 `/signin-oidc`，不是 dashboard 的 `/auth/callback`。同域反向代理时 `/signin-oidc` 必须直接转发到后端；前端只处理后端回调完成后的页面跳转。
+后端回调地址是 `/signin-oidc`，不是 dashboard 的 `/auth/callback`；它位于 `/api` 前缀之外，由 `/signin-oidc` 代理规则单独转发到后端。前端只处理后端回调完成后的页面跳转。
 
 退出登录从头像下拉发起：清空页签和回跳地址、清除本地登录缓存，再调用 `POST /api/auth/logout` 并跳转后端返回的 `logoutUrl`，失败回退 `/login`（`dashboard/src/layouts/layout/avatar/index.tsx`）。
 
@@ -104,7 +104,7 @@ docker build -t nexusauthorization-dashboard:local .
 - 新增导航或修改标题时改 `getMenuList()` 返回的数据，不要改页面里的硬编码。
 - `componentPath` 采用 `/页面目录/index.tsx` 格式，只能加载 `pages/` 内已打包的页面模块。
 
-dashboard 自身导航与「菜单与按钮」页维护的业务应用菜单是两套数据。业务菜单 CRUD 调用 `/api/v1/rbac-v1/menus`，不会改动 dashboard 的导航；mock 导航也不承担后端权限校验，运行时鉴权由后端按已发布快照判断。
+dashboard 自身导航与「菜单与按钮」页维护的业务应用菜单是两套数据。业务菜单 CRUD 调用 `/api/v1/rbac-v1/menus`，不会改动 dashboard 的导航；mock 导航也不承担后端权限校验，运行时鉴权由后端按当前已保存配置判断，保存提交后立即生效。
 
 ## 页面开发约定
 
@@ -136,13 +136,13 @@ E2E 测试：
 npm run test:e2e
 ```
 
-E2E 用例位于 `src/test/dashboard/e2e/`（如 `workbench-navigation.spec.ts`、`workbench-list-layout.spec.ts`、`menu-workbench.spec.ts`、`role-editor.spec.ts`、`scim-user-binding.spec.ts`）。这些用例使用 mock API，不能当作真实后端、OIDC、SCIM 或数据库验证。2026-10-14 全量运行结果为当前工作台 48 项通过、旧版 23 项失败，详见 [实现对照与验证记录](implementation-alignment.md)。旧的 `nexus-authorization.spec.ts` 断言基于已废弃的 `/select-service-resource`「服务资源」模型，与当前「业务应用」模型不一致，结果不能视为通过；本轮命名同步只改文件名和 fixture 路径，用例与断言未变。
+E2E 用例位于 `src/test/dashboard/e2e/`（如 `workbench-navigation.spec.ts`、`workbench-list-layout.spec.ts`、`menu-workbench.spec.ts`、`role-editor.spec.ts`、`scim-user-binding.spec.ts`）。这些用例使用 mock API，主要验证页面交互和 HTTP 契约；真实后端、OIDC、SCIM 和数据库链路需要按 [运维操作手册](operations-manual.md) 的首次初始化流程单独验收。
 
 ## 相关文件
 
 - [`dashboard/package.json`](../dashboard/package.json)：依赖和脚本。
 - [`dashboard/vite.config.ts`](../dashboard/vite.config.ts)：端口 `5274` 和开发代理 `8080`。
-- [`dashboard/nginx.conf`](../dashboard/nginx.conf)：生产静态文件、`/api` 和 `/signin-oidc` 代理。
+- [`dashboard/nginx.conf`](../dashboard/nginx.conf)：生产静态文件、`/api` 代理，以及 OIDC 回调 `/signin-oidc` 代理。
 - [`dashboard/Dockerfile`](../dashboard/Dockerfile)：要求先生成 `dist/` 的 Nginx 运行时镜像。
 - [`doc/ui-design.md`](ui-design.md)：当前 UI 约束、页面行为与代码证据。
 - [`doc/user-guide.md`](user-guide.md)：面向用户的操作手册。

@@ -31,9 +31,9 @@ docker compose -f docker-compose.yml pull
 docker compose -f docker-compose.yml up -d
 ```
 
-`000_create_database.sql` 由 PostgreSQL 管理员连接维护库 `postgres` 执行一次，不能放进事务。使用独立应用用户时，管理员须先创建该用户并把 `nexus-authorization` 的所有者改为它；`nexus-authorization` 是示例用户名，可按实际环境替换。`001_init.sql` 由库拥有者连接空库执行，自带 `BEGIN` / `COMMIT`，不要再包一层事务。`src/scripts/migrate.sh` 仅作为转调 `init-db.sh` 的兼容入口，首次上线只使用 `init-db.sh`。完整说明见 [数据库初始化](../migrations/README.md)。
+`000_create_database.sql` 由 PostgreSQL 管理员连接维护库 `postgres` 执行一次，不能放进事务。使用独立应用用户时，管理员须先创建该用户并把 `nexus-authorization` 的所有者改为它；`nexus-authorization` 是示例用户名，可按实际环境替换。`001_init.sql` 由库拥有者连接空库执行，自带 `BEGIN` / `COMMIT`，不要再包一层事务。完整说明见 [数据库初始化](../migrations/README.md)。
 
-完整配置见 [Docker 部署](docker-deployment-1.0.2.md)。镜像架构为 Linux amd64，版本为 1.0.2。
+完整配置见 [运维操作手册](operations-manual.md)。
 
 ## 从源代码开发
 
@@ -58,7 +58,7 @@ npm install
 npm run dev
 ```
 
-前端地址 `http://localhost:5274`，开发代理将 `/api` 请求转到 `http://localhost:8080`。直接开发时登录回调地址必须对应可访问的后端 `/signin-oidc`；Cookie 所属 hostname 须与前端一致。
+前端地址 `http://localhost:5274`，开发代理将 `/api` 请求转到 `http://localhost:8080`，并把 OIDC 回调 `/signin-oidc` 单独转发到后端。直接开发时登录回调地址必须对应可访问的后端 `/signin-oidc`；Cookie 所属 hostname 须与前端一致。
 
 ## 配置权限
 
@@ -66,8 +66,8 @@ npm run dev
 2. 进入权限配置，关联允许使用的服务资源。
 3. 创建或导入服务 API，配置菜单及按钮。
 4. 创建角色并分配 API、菜单及按钮权限。
-5. 在角色行点击「分配用户」，通过 SCIM 目录选择用户；当前界面使用固定业务域 `global`，其它域可通过管理 API 配置。
-6. 发布该应用的权限版本，再模拟允许和拒绝结果。
-7. 业务服务使用 SDK 或 `/v1/authorize`，传入应用、服务资源、用户、业务域、方法和路径进行鉴权。
+5. 在角色行点击「分配用户」，通过 SCIM 目录选择用户；当前界面写入默认空域（`domain` 为空串），其它具名域可通过管理 API 配置。
+6. 用「权限模拟」选择目标服务与 Path、HTTP 方法和用户，验证允许和拒绝结果；角色、绑定、菜单和 API 保存后立即生效。
+7. 业务服务使用 SDK 或 `/api/v1/authorize`，传入应用、服务资源、用户、方法和路径进行鉴权；业务域可选，省略即使用默认空域。
 
-未发布的草稿不进入运行时鉴权快照。逐页操作见 [标准使用手册](user-guide.md)，数据关系见 [系统说明](current-system-overview.md)，接入见 [SDK 说明](sdk-application-integration.md)。
+当前实现没有草稿或发布版本，保存成功即参与运行时鉴权。逐页操作见 [标准使用手册](user-guide.md)，数据关系见 [系统说明](current-system-overview.md)，生效与缓存规则见 [权限生效设计](permission-lifecycle.md)，接入见 [SDK 说明](sdk-application-integration.md)。

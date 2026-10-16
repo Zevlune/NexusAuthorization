@@ -83,9 +83,6 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := biz.NewRBACV1Service(r)
-	if _, err := svc.Publish(ctx, appKey, "Remote only", "test"); err != nil {
-		t.Fatal(err)
-	}
 	input := map[string]any{"service_resource": key, "subject": "user", "domain": "global", "method": "GET", "path": "/items"}
 	decision, err := svc.Authorize(ctx, appKey, input)
 	if err != nil || !decision.Allowed {
@@ -119,8 +116,8 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if _, _, err := r.ListApplicationEndpoints(ctx, appKey, "", 1, 100); !errors.Is(err, catalog.err) {
 		t.Fatalf("endpoint fallback: %v", err)
 	}
-	if _, err := svc.Publish(ctx, appKey, "Should fail", "test"); !errors.Is(err, catalog.err) {
-		t.Fatalf("publish fallback: %v", err)
+	if _, err := r.GetPolicyMetadata(ctx, appKey); !errors.Is(err, catalog.err) {
+		t.Fatalf("runtime fallback: %v", err)
 	}
 	catalog.err = nil
 	catalog.resource.IsActive = false
@@ -131,12 +128,9 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if _, err := r.SaveEndpoint(ctx, key, biz.RBACEndpoint{Method: "POST", PathTemplate: "/items", Enabled: true}); !errors.Is(err, biz.ErrConflict) {
 		t.Fatalf("disabled remote accepted: %v", err)
 	}
-	if _, err := svc.Publish(ctx, appKey, "Remote disabled", "test"); err != nil {
-		t.Fatal(err)
-	}
 	decision, err = svc.Authorize(ctx, appKey, input)
 	if err != nil || decision.Allowed {
-		t.Fatalf("disabled remote published: %+v %v", decision, err)
+		t.Fatalf("disabled remote authorized: %+v %v", decision, err)
 	}
 	catalog.resource = nil
 	resources, err = r.ListApplicationServices(ctx, appKey)

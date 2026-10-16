@@ -114,7 +114,7 @@ func TestMiddlewareRequiresSessionOnlyWhenEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabledResponse := httptest.NewRecorder()
-	disabled.Middleware(next).ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/v1/roles", nil))
+	disabled.Middleware(next).ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil))
 	if disabledResponse.Code != http.StatusNoContent {
 		t.Fatalf("disabled auth status = %d", disabledResponse.Code)
 	}
@@ -124,7 +124,7 @@ func TestMiddlewareRequiresSessionOnlyWhenEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabledResponse := httptest.NewRecorder()
-	enabled.Middleware(next).ServeHTTP(enabledResponse, httptest.NewRequest(http.MethodGet, "/v1/roles", nil))
+	enabled.Middleware(next).ServeHTTP(enabledResponse, httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil))
 	if enabledResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("enabled auth status = %d", enabledResponse.Code)
 	}
@@ -157,7 +157,7 @@ func TestMiddlewareAuthenticatesBearerAndAddsUserToContext(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	request := httptest.NewRequest(http.MethodGet, "/v1/roles", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
 	request.Header.Set("Authorization", "bearer valid-access-token")
 	response := httptest.NewRecorder()
 	service.Middleware(next).ServeHTTP(response, request)
@@ -182,7 +182,7 @@ func TestMiddlewareRejectsInvalidBearerWithoutCookieFallback(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v1/roles", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
 	request.AddCookie(cookieRecorder.Result().Cookies()[0])
 	request.Header.Set("Authorization", "Bearer expired-token")
 	response := httptest.NewRecorder()
@@ -203,7 +203,7 @@ func TestMiddlewareRejectsMalformedBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v1/roles", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
 	request.Header.Set("Authorization", "Bearer")
 	response := httptest.NewRecorder()
 	service.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -229,7 +229,7 @@ func TestLogoutUsesNexusAuthIDTokenHint(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	request.AddCookie(loginRecorder.Result().Cookies()[0])
 	logoutRecorder := httptest.NewRecorder()
 	logoutURL, err := service.Logout(logoutRecorder, request)

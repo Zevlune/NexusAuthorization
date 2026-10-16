@@ -73,7 +73,7 @@ func TestNewUsesBackchannelWithoutChangingBrowserEndpoints(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/auth/login", nil)
 	authorizeURL, err := service.Login(recorder, request)
 	if err != nil {
 		t.Fatal(err)

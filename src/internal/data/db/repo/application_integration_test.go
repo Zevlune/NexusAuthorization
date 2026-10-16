@@ -146,13 +146,6 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := biz.NewRBACV1Service(r)
-	release, err := svc.Publish(ctx, appKey, "initial", "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if release.Version != 1 {
-		t.Fatalf("initial version %d", release.Version)
-	}
 	input := map[string]any{"subject": "u", "domain": "d", "service_resource": s1, "method": "GET", "path": "/items/123"}
 	d, err := svc.Authorize(ctx, appKey, input)
 	if err != nil || !d.Allowed {
@@ -164,16 +157,13 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 		t.Fatalf("same path cross service leak %+v %v", d, err)
 	}
 	input["service_resource"] = s1
-	if _, err = svc.Publish(ctx, otherKey, "empty application", "test"); err != nil {
-		t.Fatal(err)
-	}
 	d, err = svc.Authorize(ctx, otherKey, input)
 	if err != nil || d.Allowed {
 		t.Fatalf("cross application leak %+v %v", d, err)
 	}
 	menus, err := svc.SubjectMenus(ctx, appKey, "u", "d")
 	if err != nil || len(menus) != 2 {
-		t.Fatalf("published menus %+v %v", menus, err)
+		t.Fatalf("current menus %+v %v", menus, err)
 	}
 	role.EndpointIDs = append(role.EndpointIDs, e2.ID)
 	if _, err = r.SaveRole(ctx, appKey, role); err != nil {
@@ -181,21 +171,22 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 	}
 	input["service_resource"] = s2
 	d, err = svc.Authorize(ctx, appKey, input)
-	if err != nil || d.Allowed {
-		t.Fatalf("unpublished draft leaked %+v %v", d, err)
+	if err != nil || !d.Allowed {
+		t.Fatalf("saved grant not effective: %+v %v", d, err)
 	}
-	if _, err = svc.Publish(ctx, appKey, "second", "test"); err != nil {
+	role.EndpointIDs = nil
+	if _, err = r.SaveRole(ctx, appKey, role); err != nil {
 		t.Fatal(err)
 	}
 	d, err = svc.Authorize(ctx, appKey, input)
-	if err != nil || !d.Allowed || d.ReleaseVersion != 2 {
-		t.Fatalf("new release not effective %+v %v", d, err)
+	if err != nil || d.Allowed {
+		t.Fatalf("saved revocation not effective: %+v %v", d, err)
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 3)
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, e := svc.Publish(ctx, appKey, "concurrent", "test"); errs <- e }()
+		go func() { defer wg.Done(); _, e := r.SaveRole(ctx, appKey, role); errs <- e }()
 	}
 	wg.Wait()
 	close(errs)
@@ -204,18 +195,9 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	releases, err := r.ListRBACReleases(ctx, appKey)
-	if err != nil || len(releases) != 5 {
-		t.Fatalf("bad release list %+v %v", releases, err)
-	}
-	published := 0
-	for _, v := range releases {
-		if v.Status == "published" {
-			published++
-		}
-	}
-	if published != 1 || releases[0].Version != 5 {
-		t.Fatalf("non atomic publish %+v", releases)
+	d, err = svc.Authorize(ctx, appKey, input)
+	if err != nil || d.Allowed {
+		t.Fatalf("concurrent saves lost revocation: %+v %v", d, err)
 	}
 	endpoints, total, err := r.ListApplicationEndpoints(ctx, appKey, "", 1, 100)
 	if err != nil || total != 2 || len(endpoints) != 2 {

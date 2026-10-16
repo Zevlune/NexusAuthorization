@@ -46,33 +46,91 @@ func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {
 		t.Fatalf("OpenAPI paths missing from document: %#v", document["paths"])
 	}
 	for path := range paths {
-		if path == "/v1/authorization/decisions" || path == "/v1/pdp/decisions" || strings.HasPrefix(path, "/v1/rbac-config") {
+		if path == "/api/v1/authorization/decisions" || path == "/api/v1/pdp/decisions" || strings.HasPrefix(path, "/api/v1/rbac-config") {
 			t.Fatalf("legacy path present in OpenAPI document: %s", path)
 		}
+		if strings.Contains(path, "releases") {
+			t.Fatalf("retired release path present in OpenAPI document: %s", path)
+		}
+	}
+	if strings.Contains(documentResponse.Body.String(), "release_version") {
+		t.Fatal("retired release_version field present in OpenAPI document")
 	}
 	for _, operation := range []struct {
 		path   string
 		method string
 	}{
-		{path: "/v1/applications", method: "get"},
-		{path: "/v1/applications", method: "post"},
-		{path: "/v1/applications/{key}", method: "put"},
-		{path: "/v1/applications/{key}/service-resources", method: "get"},
-		{path: "/v1/applications/{key}/service-resources", method: "put"},
-		{path: "/v1/rbac-v1/menus", method: "get"},
-		{path: "/v1/rbac-v1/menus", method: "post"},
-		{path: "/v1/rbac-v1/menus/{id}", method: "delete"},
-		{path: "/v1/rbac-v1/subject-menus", method: "get"},
-		{path: "/v1/authorization/api-endpoints", method: "post"},
-		{path: "/v1/authorization/api-endpoints", method: "get"},
-		{path: "/v1/authorization/api-endpoints/import-swagger", method: "post"},
-		{path: "/v1/authorization/api-endpoints/{id}", method: "get"},
-		{path: "/v1/authorization/api-endpoints/{id}", method: "put"},
-		{path: "/v1/authorization/api-endpoints/{id}", method: "delete"},
+		{path: "/api/v1/applications", method: "get"},
+		{path: "/api/v1/applications", method: "post"},
+		{path: "/api/v1/applications/{key}", method: "put"},
+		{path: "/api/v1/applications/{key}/service-resources", method: "get"},
+		{path: "/api/v1/applications/{key}/service-resources", method: "put"},
+		{path: "/api/v1/rbac-v1/menus", method: "get"},
+		{path: "/api/v1/rbac-v1/menus", method: "post"},
+		{path: "/api/v1/rbac-v1/menus/{id}", method: "delete"},
+		{path: "/api/v1/rbac-v1/subject-menus", method: "get"},
+		{path: "/api/v1/authorization/api-endpoints", method: "post"},
+		{path: "/api/v1/authorization/api-endpoints", method: "get"},
+		{path: "/api/v1/authorization/api-endpoints/import-swagger", method: "post"},
+		{path: "/api/v1/authorization/api-endpoints/{id}", method: "get"},
+		{path: "/api/v1/authorization/api-endpoints/{id}", method: "put"},
+		{path: "/api/v1/authorization/api-endpoints/{id}", method: "delete"},
 	} {
 		pathItem, ok := paths[operation.path].(map[string]any)
 		if !ok || pathItem[operation.method] == nil {
 			t.Fatalf("OpenAPI operation missing: %s %s", strings.ToUpper(operation.method), operation.path)
+		}
+	}
+
+	// The default domain is optional: authorization must not require it, while
+	// named domains stay available through the retained property.
+	authorize := paths["/api/v1/authorize"].(map[string]any)["post"].(map[string]any)
+	required := authorize["requestBody"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["required"].([]any)
+	for _, name := range required {
+		if name == "domain" {
+			t.Fatal("OpenAPI still lists domain as a required authorization parameter")
+		}
+	}
+	properties := authorize["requestBody"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := properties["domain"]; !ok {
+		t.Fatal("OpenAPI dropped the named-domain property")
+	}
+	menuParameters := paths["/api/v1/rbac-v1/subject-menus"].(map[string]any)["get"].(map[string]any)["parameters"].([]any)
+	domainOptional := false
+	for _, raw := range menuParameters {
+		parameter := raw.(map[string]any)
+		if parameter["name"] == "domain" {
+			if parameter["required"] == true {
+				t.Fatal("subject-menus still requires domain")
+			}
+			domainOptional = true
+		}
+	}
+	if !domainOptional {
+		t.Fatal("subject-menus no longer documents the optional domain filter")
+	}
+}
+
+func TestCanonicalAPIRoutesUseAPIPrefix(t *testing.T) {
+	server := NewServer(NewHandler(nil))
+	for _, testCase := range []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/api/healthz", http.StatusOK},
+		{http.MethodGet, "/healthz", http.StatusNotFound},
+		{http.MethodGet, "/api/auth/config", http.StatusOK},
+		{http.MethodGet, "/auth/config", http.StatusNotFound},
+		// The OIDC callback stays at /signin-oidc, outside the API prefix.
+		{http.MethodGet, "/signin-oidc", http.StatusServiceUnavailable},
+		{http.MethodGet, "/api/signin-oidc", http.StatusNotFound},
+		{http.MethodGet, "/api/swagger/openapi.json", http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(testCase.method, testCase.path, nil))
+		if response.Code != testCase.want {
+			t.Fatalf("%s %s status = %d, want %d", testCase.method, testCase.path, response.Code, testCase.want)
 		}
 	}
 }
@@ -80,7 +138,7 @@ func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {
 func TestApplicationMenuRequiresAppKey(t *testing.T) {
 	server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(&testRBACRepo{})))
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/rbac-v1/menus", nil))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/rbac-v1/menus", nil))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("missing app_key status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -172,17 +230,11 @@ func (r *testRBACRepo) ReplaceSubjectRoles(_ context.Context, scope, subject, do
 	r.roleIDs = append([]uuid.UUID(nil), roleIDs...)
 	return nil
 }
-func (*testRBACRepo) BuildRBACSnapshot(context.Context, string) (map[string]any, error) {
-	return nil, nil
+func (*testRBACRepo) GetPolicyMetadata(context.Context, string) (biz.CurrentPolicy, error) {
+	return biz.CurrentPolicy{}, nil
 }
-func (*testRBACRepo) CreateRBACRelease(context.Context, string, string, string, map[string]any) (biz.RBACRelease, error) {
-	return biz.RBACRelease{}, nil
-}
-func (*testRBACRepo) ListRBACReleases(context.Context, string) ([]biz.RBACRelease, error) {
-	return nil, nil
-}
-func (*testRBACRepo) GetActiveRBACRelease(context.Context, string) (biz.RBACRelease, error) {
-	return biz.RBACRelease{}, nil
+func (*testRBACRepo) GetCurrentPolicy(context.Context, biz.CurrentPolicy) (biz.CurrentPolicy, error) {
+	return biz.CurrentPolicy{}, nil
 }
 
 func (r *testUserRoleRepo) ReplaceRoles(_ context.Context, subject, app string, roleIDs []string) error {
@@ -239,7 +291,7 @@ func (r *testMenuRepo) ListByServiceResource(_ context.Context, serviceResource 
 func TestRoleCreateEndpointIsRetired(t *testing.T) {
 	server := NewServer(NewHandler(nil))
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/roles", strings.NewReader(`{"service_resource":"admin","code":"operator","name":"Operator"}`)))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/roles", strings.NewReader(`{"service_resource":"admin","code":"operator","name":"Operator"}`)))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("retired role create status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -248,7 +300,7 @@ func TestRoleCreateEndpointIsRetired(t *testing.T) {
 func TestRejectsUnknownJSONFields(t *testing.T) {
 	repository := &serviceResourceHandlerRepository{values: map[string]*biz.ServiceResource{}}
 	server := newServiceResourceHandlerServer(t, repository)
-	request := httptest.NewRequest(http.MethodPost, "/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders","other":true}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders","other":true}`))
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -262,11 +314,11 @@ func TestMenuEndpointsAreRetired(t *testing.T) {
 		method string
 		path   string
 	}{
-		{method: http.MethodPost, path: "/v1/menus"},
-		{method: http.MethodGet, path: "/v1/menus/tree?service_resource=admin"},
-		{method: http.MethodPut, path: "/v1/roles/role-1/menus"},
-		{method: http.MethodGet, path: "/v1/roles/role-1/menus"},
-		{method: http.MethodGet, path: "/v1/resources/tree?service_resource=admin"},
+		{method: http.MethodPost, path: "/api/v1/menus"},
+		{method: http.MethodGet, path: "/api/v1/menus/tree?service_resource=admin"},
+		{method: http.MethodPut, path: "/api/v1/roles/role-1/menus"},
+		{method: http.MethodGet, path: "/api/v1/roles/role-1/menus"},
+		{method: http.MethodGet, path: "/api/v1/resources/tree?service_resource=admin"},
 	} {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(route.method, route.path, nil))
@@ -283,7 +335,7 @@ func TestMenuMetadataRoutesAreRetired(t *testing.T) {
 		`{"service_resource":"admin","code":"settings","name":"Settings","type":"menu","api_path":"/v1/settings"}`,
 	} {
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/menus", strings.NewReader(payload)))
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/menus", strings.NewReader(payload)))
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("retired menu metadata route payload %s status = %d body=%s", payload, response.Code, response.Body.String())
 		}
@@ -291,17 +343,27 @@ func TestMenuMetadataRoutesAreRetired(t *testing.T) {
 }
 
 func TestReplaceRBACV1SubjectRoles(t *testing.T) {
-	repository := &testRBACRepo{}
 	roleID := uuid.New()
-	server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(repository)))
-	request := httptest.NewRequest(http.MethodPut, "/v1/rbac-v1/subject-roles?app_key=admin", strings.NewReader(`{"subject":"nexus-user-1","domain":"global","role_ids":["`+roleID.String()+`"]}`))
-	response := httptest.NewRecorder()
-	server.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
-	}
-	if repository.scope != "admin" || repository.subject != "nexus-user-1" || repository.domain != "global" || len(repository.roleIDs) != 1 || repository.roleIDs[0] != roleID {
-		t.Fatalf("assignment = %#v", repository)
+	for _, tc := range []struct {
+		name, body, wantDomain string
+	}{
+		{"legacy global folds to the default", `{"subject":"nexus-user-1","domain":"global","role_ids":["` + roleID.String() + `"]}`, ""},
+		{"missing domain selects the default", `{"subject":"nexus-user-1","role_ids":["` + roleID.String() + `"]}`, ""},
+		{"named domain is preserved", `{"subject":"nexus-user-1","domain":"tenant-a","role_ids":["` + roleID.String() + `"]}`, "tenant-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repository := &testRBACRepo{}
+			server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(repository)))
+			request := httptest.NewRequest(http.MethodPut, "/api/v1/rbac-v1/subject-roles?app_key=admin", strings.NewReader(tc.body))
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+			}
+			if repository.scope != "admin" || repository.subject != "nexus-user-1" || repository.domain != tc.wantDomain || len(repository.roleIDs) != 1 || repository.roleIDs[0] != roleID {
+				t.Fatalf("assignment = %#v", repository)
+			}
+		})
 	}
 }
 
@@ -309,7 +371,7 @@ func TestRoleUpdateAndDeleteEndpointsAreRetired(t *testing.T) {
 	server := NewServer(NewHandler(nil))
 	for _, method := range []string{http.MethodPut, http.MethodDelete} {
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(method, "/v1/roles/role-1", nil))
+		server.ServeHTTP(response, httptest.NewRequest(method, "/api/v1/roles/role-1", nil))
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("retired role %s status = %d body=%s", method, response.Code, response.Body.String())
 		}
@@ -318,7 +380,7 @@ func TestRoleUpdateAndDeleteEndpointsAreRetired(t *testing.T) {
 
 func TestMenuUpdateAndDeleteEndpointsAreRetired(t *testing.T) {
 	server := NewServer(NewHandler(nil))
-	for _, path := range []string{"/v1/menus/123", "/v1/menus/not-a-uuid"} {
+	for _, path := range []string{"/api/v1/menus/123", "/api/v1/menus/not-a-uuid"} {
 		for _, method := range []string{http.MethodPut, http.MethodDelete} {
 			response := httptest.NewRecorder()
 			server.ServeHTTP(response, httptest.NewRequest(method, path, nil))
@@ -345,6 +407,18 @@ func TestLegacyRoutesAreNotFound(t *testing.T) {
 	}
 }
 
+func TestRBACReleaseRoutesAreRetired(t *testing.T) {
+	server := NewServer(NewHandler(nil))
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(method, "/api/v1/rbac-v1/releases", strings.NewReader(`{"description":"legacy"}`))
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("retired release route %s status = %d body=%s", method, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestDevelopmentModeInjectsAuditActor(t *testing.T) {
 	repository := &serviceResourceHandlerRepository{values: map[string]*biz.ServiceResource{}}
 	service, err := biz.NewServiceResourceCatalog(repository, nil, biz.ServiceResourceSourceLocal)
@@ -358,7 +432,7 @@ func TestDevelopmentModeInjectsAuditActor(t *testing.T) {
 	server := NewServer(NewHandler(nil, authenticator).
 		WithServiceResourceCatalog(service).
 		WithServiceResourceService(service))
-	request := httptest.NewRequest(http.MethodPost, "/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders"}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders"}`))
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {

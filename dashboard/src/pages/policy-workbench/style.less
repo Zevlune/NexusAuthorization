@@ -121,3 +121,20 @@
   .role-management-panel table { min-width: 720px; }
   .role-management-footer { flex-wrap: wrap; }
 }
+
+/* Permission simulator: a plain CSS grid keeps the two-column layout past the TDesign md
+   breakpoint (a 951px viewport still collapsed into a single column with Row/Col md={6}). */
+.simulate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 24px; }
+.simulate-field { min-width: 0; }
+.simulate-control { width: 100%; }
+.simulate-params { grid-column: 1 / -1; }
+.simulate-param-list { display: flex; flex-wrap: wrap; gap: 12px; width: 100%; }
+.simulate-param-input { width: 220px; max-width: 100%; }
+.simulate-final-path { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-size: 13px; color: var(--app-text-secondary); }
+.simulate-final-path code { color: var(--app-text); font-size: 13px; overflow-wrap: anywhere; }
+.simulate-directory-alert { margin-bottom: 16px; }
+@media (max-width: 760px) {
+  .simulate-grid { grid-template-columns: minmax(0, 1fr); }
+  .simulate-params { grid-column: auto; }
+  .simulate-param-input { width: 100%; }
+}

@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// Request is one policy evaluation input. AppKey selects the application;
+// ServiceResource, Subject, Method, and Path are required. Domain is optional
+// and empty selects the default domain.
 type Request struct {
 	AppKey          string `json:"appKey"`
 	ServiceResource string `json:"serviceResource"`
@@ -20,23 +23,38 @@ type Request struct {
 	Method          string `json:"method"`
 	Path            string `json:"path"`
 }
+
+// Decision is the authorization service response. Allowed is authoritative;
+// Effect, Reason, and MatchedRoles are diagnostic fields for callers and logs.
 type Decision struct {
-	Allowed        bool     `json:"allowed"`
-	Effect         string   `json:"effect"`
-	Reason         string   `json:"reason"`
-	ReleaseVersion int64    `json:"release_version"`
-	MatchedRoles   []string `json:"matched_roles"`
+	Allowed      bool     `json:"allowed"`
+	Effect       string   `json:"effect"`
+	Reason       string   `json:"reason"`
+	MatchedRoles []string `json:"matched_roles"`
 }
+
+// Client calls the authorization service. URL is the complete /api/v1/authorize
+// endpoint, Credential is the service bearer token, and HTTP may be nil to use
+// a three-second default client.
 type Client struct {
 	URL, Credential string
 	HTTP            *http.Client
 }
 
+// NewClient creates a PEP client for baseURL. The credential is required for
+// Check; a nil or empty URL will fail when a request is attempted.
 func NewClient(baseURL, credential string) *Client {
-	return &Client{URL: strings.TrimRight(baseURL, "/") + "/v1/authorize", Credential: credential, HTTP: &http.Client{Timeout: 3 * time.Second}}
+	return &Client{URL: strings.TrimRight(baseURL, "/") + "/api/v1/authorize", Credential: credential, HTTP: &http.Client{Timeout: 3 * time.Second}}
 }
+
+// Check asks the authorization service whether a request is allowed. It fails
+// closed on client construction, transport, non-200, decode, and malformed
+// allow responses; only an allow decision with effect "allow" and reason
+// "allowed" is accepted.
 func (c *Client) Check(ctx context.Context, request Request) (Decision, error) {
-	if c == nil || c.Credential == "" || request.AppKey == "" || request.ServiceResource == "" || request.Subject == "" || request.Domain == "" || request.Method == "" || request.Path == "" {
+	// Domain is optional: an empty value selects the default domain. Named
+	// domains stay explicit, so the field is retained for tenant isolation.
+	if c == nil || c.Credential == "" || request.AppKey == "" || request.ServiceResource == "" || request.Subject == "" || request.Method == "" || request.Path == "" {
 		return Decision{}, fmt.Errorf("invalid authorization request or missing credential")
 	}
 	body, err := json.Marshal(request)
@@ -65,17 +83,25 @@ func (c *Client) Check(ctx context.Context, request Request) (Decision, error) {
 	if err = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&decision); err != nil {
 		return Decision{}, err
 	}
-	if decision.Allowed && (decision.Effect != "allow" || decision.Reason != "allowed" || decision.ReleaseVersion <= 0) {
+	if decision.Allowed && (decision.Effect != "allow" || decision.Reason != "allowed") {
 		return Decision{}, fmt.Errorf("invalid decision response")
 	}
 	return decision, nil
 }
 
+// Identity is the authenticated subject and optional tenant domain supplied by
+// the host service.
 type Identity struct{ Subject, Domain string }
+
+// IdentityResolver returns the authenticated identity for a request. It must
+// use trusted authentication context and return ok=false when no identity is
+// available.
 type IdentityResolver func(*http.Request) (Identity, bool)
 
-// Require must be installed after authentication; the resolver uses trusted
-// token/session context, never user-supplied role IDs or request query values.
+// Require returns middleware that checks the authenticated identity against the
+// authorization service before calling next. It must be installed after
+// authentication; missing configuration or identity and failed/denied checks
+// all respond with 401 or 403 rather than forwarding the request.
 func (c *Client) Require(appKey, serviceResource string, resolve IdentityResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if appKey == "" || serviceResource == "" || resolve == nil {
@@ -83,7 +109,7 @@ func (c *Client) Require(appKey, serviceResource string, resolve IdentityResolve
 			return
 		}
 		identity, ok := resolve(r)
-		if !ok || identity.Subject == "" || identity.Domain == "" {
+		if !ok || identity.Subject == "" {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}

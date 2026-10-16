@@ -9,6 +9,12 @@ database:
   url: "postgres://postgres:postgres@localhost:55434/nexus-authorization?sslmode=disable"
   max_conns: 10
   min_conns: 2
+# Optional cache for current saved permissions; empty URL disables Redis.
+redis:
+  url: ""
+  key_prefix: "nexusauthorization:dev"
+  cache_ttl: "24h"
+  timeout: "200ms"
 service_resource:
   source: "nexusauth"
   nexusauth_base_url: "http://localhost:5100"
@@ -17,7 +23,7 @@ service_resource:
   api_key: ""
   timeout: "5s"
 authorization:
-  # Legacy service credential; empty keeps /v1/authorize closed until unified Open API token management is integrated.
+  # Legacy service credential; empty keeps /api/v1/authorize closed until unified Open API token management is integrated.
   service_credential: ""
 scim:
   # Optional read-only NexusAuth user directory. Set URL and credential through

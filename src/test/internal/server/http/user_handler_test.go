@@ -30,7 +30,7 @@ func TestListUsersCallsSCIMDirectory(t *testing.T) {
 	directory := &fakeSCIMUserDirectory{}
 	server := NewServer(NewHandler(nil).WithUserDirectory(directory))
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, `/v1/users?filter=userName%20eq%20%22alice%22&startIndex=2&count=20`, nil)
+	request := httptest.NewRequest(http.MethodGet, `/api/v1/users?filter=userName%20eq%20%22alice%22&startIndex=2&count=20`, nil)
 	server.ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
@@ -55,7 +55,7 @@ func TestListUsersRejectsInvalidPagination(t *testing.T) {
 	server := NewServer(NewHandler(nil).WithUserDirectory(&fakeSCIMUserDirectory{}))
 	for _, query := range []string{"startIndex=0", "count=201", "count=abc", "count=1&count=2"} {
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/users?"+query, nil))
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/users?"+query, nil))
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("query %q status = %d body=%s", query, response.Code, response.Body.String())
 		}
@@ -65,7 +65,7 @@ func TestListUsersRejectsInvalidPagination(t *testing.T) {
 func TestListUsersReturnsNotConfigured(t *testing.T) {
 	server := NewServer(NewHandler(nil))
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/users", nil))
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/users", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
 	}

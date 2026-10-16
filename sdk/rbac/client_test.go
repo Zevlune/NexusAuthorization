@@ -24,9 +24,9 @@ func TestMiddlewareFailClosed(t *testing.T) {
 		{"denied", true, `{"allowed":false,"reason":"no_binding"}`, 403},
 		{"malformed", true, `broken`, 403},
 		{"invalid_allow", true, `{"allowed":true}`, 403},
-		{"unpublished_allow", true, `{"allowed":true,"effect":"allow","reason":"allowed","release_version":0}`, 403},
-		{"invalid_effect", true, `{"allowed":true,"effect":"deny","reason":"allowed","release_version":1}`, 403},
-		{"allowed", true, `{"allowed":true,"effect":"allow","reason":"allowed","release_version":1}`, 204},
+		{"saved_allow", true, `{"allowed":true,"effect":"allow","reason":"allowed"}`, 204},
+		{"invalid_effect", true, `{"allowed":true,"effect":"deny","reason":"allowed"}`, 403},
+		{"allowed", true, `{"allowed":true,"effect":"allow","reason":"allowed"}`, 204},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -66,6 +66,9 @@ func TestCheckRequiresApplicationAndService(t *testing.T) {
 
 func TestCheckSendsApplicationAndServiceContext(t *testing.T) {
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/v1/authorize" {
+			t.Fatalf("authorization path = %q, want /api/v1/authorize", request.URL.Path)
+		}
 		var payload Request
 		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request: %v", err)
@@ -80,6 +83,65 @@ func TestCheckSendsApplicationAndServiceContext(t *testing.T) {
 	client.HTTP = &http.Client{Transport: transport}
 	if _, err := client.Check(t.Context(), Request{AppKey: "books", ServiceResource: "book-service", Subject: "user:1", Domain: "global", Method: "GET", Path: "/api/books"}); err != nil {
 		t.Fatalf("Check returned error: %v", err)
+	}
+}
+
+func TestCheckAcceptsEmptyDefaultDomain(t *testing.T) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload Request
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.Domain != "" {
+			t.Fatalf("domain = %q, want the empty default", payload.Domain)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"allowed":true,"effect":"allow","reason":"allowed"}`)), Header: make(http.Header)}, nil
+	})
+	client := NewClient("http://nexus-authorization.test", "secret")
+	client.HTTP = &http.Client{Transport: transport}
+	decision, err := client.Check(t.Context(), Request{AppKey: "books", ServiceResource: "book-service", Subject: "user:1", Method: "GET", Path: "/api/books"})
+	if err != nil {
+		t.Fatalf("Check with the default domain returned error: %v", err)
+	}
+	if !decision.Allowed {
+		t.Fatalf("decision = %+v", decision)
+	}
+}
+
+func TestMiddlewareAllowsEmptyDefaultDomain(t *testing.T) {
+	called := false
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload Request
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if payload.Domain != "" {
+			t.Fatalf("domain = %q, want the empty default", payload.Domain)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"allowed":true,"effect":"allow","reason":"allowed"}`)), Header: make(http.Header)}, nil
+	})
+	client := NewClient("http://nexus-authorization.test", "secret")
+	client.HTTP = &http.Client{Transport: transport}
+	middleware := client.Require("books", "book-service", func(*http.Request) (Identity, bool) {
+		return Identity{Subject: "user:1"}, true
+	}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(204) }))
+	w := httptest.NewRecorder()
+	middleware.ServeHTTP(w, httptest.NewRequest("GET", "/api/books", nil))
+	if w.Code != http.StatusNoContent || !called {
+		t.Fatalf("status = %d, next called = %v", w.Code, called)
+	}
+}
+
+func TestMiddlewareRejectsEmptySubject(t *testing.T) {
+	client := NewClient("http://nexus-authorization.test", "secret")
+	called := false
+	middleware := client.Require("books", "book-service", func(*http.Request) (Identity, bool) {
+		return Identity{Domain: "tenant-a"}, true
+	}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	w := httptest.NewRecorder()
+	middleware.ServeHTTP(w, httptest.NewRequest("GET", "/api/books", nil))
+	if w.Code != http.StatusUnauthorized || called {
+		t.Fatalf("status = %d, next called = %v", w.Code, called)
 	}
 }
 

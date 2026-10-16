@@ -2,11 +2,11 @@
 
 > 文档日期：2026-10-14
 > 目标读者：接入权限中心的业务服务、API Gateway 与前端开发人员
-> 说明：本文按当前工作区代码描述已实现的 HTTP 接口与行为，包含实际字段、分页、错误、认证、发布、鉴权、主体菜单和 SCIM。设计动机见 [应用边界 API RBAC 设计方案](rbac-v1-design.md)，系统全貌见 [当前系统概览](current-system-overview.md)。
+> 说明：本文按当前工作区代码描述已实现的 HTTP 接口与行为，包含实际字段、分页、错误、认证、鉴权、主体菜单、缓存生效和 SCIM。设计动机见 [应用边界 API RBAC 设计方案](rbac-v1-design.md)，系统全貌见 [当前系统概览](current-system-overview.md)。
 
 ## 1. 模型与范围
 
-业务应用（Application）是菜单、角色、主体角色绑定和权限发布的边界。服务资源（ServiceResource）维护共享的 API 目录；一个应用显式关联多个服务资源。运行时鉴权同时指定应用和服务资源：
+业务应用（Application）是菜单、角色和主体角色绑定的边界。服务资源（ServiceResource）维护共享的 API 目录；一个应用显式关联多个服务资源。运行时鉴权同时指定应用和服务资源：
 
 ```text
 Subject + Domain -> Application -> Role -> API Endpoint
@@ -15,16 +15,16 @@ Subject + Domain -> Application -> Role -> API Endpoint
 
 - 角色和菜单属于应用；角色只能授予应用已关联服务中的 API。
 - 菜单直接属于应用，不要求创建 OAuth 客户端。
-- 应用停用立即生效；API、角色、菜单、主体角色绑定的修改必须重新发布才对运行时鉴权生效。
-- 运行时鉴权只读取已发布的不可变快照；`GetActiveRBACRelease` 每次请求都从 PostgreSQL 读取发布行并解码 JSONB 快照，不存在常驻内存快照或原子指针热加载。
+- 应用停用立即生效；API、角色、菜单和主体角色绑定在保存提交后立即生效。
+- 运行时鉴权和模拟每次先从 PostgreSQL 确认启用应用、缓存失效标记和当前服务目录，再复用本地的编译索引；索引缺失时从 Redis 当前记录或 PostgreSQL 当前表加载并编译。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
 
-当前版本不包含显式 `deny`、策略文档、策略审批、数据行级/字段级权限、ABAC、用户组、组织架构、版本回滚接口和发布审批。
+当前版本不包含显式 `deny`、策略文档、策略审批、数据行级/字段级权限、ABAC、用户组、组织架构，也不提供发布版本、历史快照和版本回滚接口。
 
 ## 2. 认证
 
 ### 2.1 管理接口
 
-除 `/v1/authorize` 外的 `/v1/*` 路由受服务器配置的认证中间件（`auth.Middleware`）保护，接受两种身份：
+除 `/api/v1/authorize` 外的 `/api/v1/*` 路由受服务器配置的认证中间件（`auth.Middleware`）保护，接受两种身份：
 
 - 管理端浏览器登录建立的加密会话 Cookie；
 - `Authorization: Bearer <access token>`（由身份平台签发的访问令牌）。
@@ -35,18 +35,18 @@ Subject + Domain -> Application -> Role -> API Endpoint
 {"error":"authentication required"}
 ```
 
-Bearer 令牌非法时额外返回 `WWW-Authenticate: Bearer error="invalid_token"` 与 `{"error":"invalid_token"}`。认证中间件未启用时，`/v1/*` 直接放行，仅用于本地或测试环境。
+Bearer 令牌非法时额外返回 `WWW-Authenticate: Bearer error="invalid_token"` 与 `{"error":"invalid_token"}`。认证中间件未启用时，`/api/v1/*` 直接放行，仅用于本地或测试环境。
 
-身份相关端点：`GET /auth/config`、`GET /auth/login`、`GET /signin-oidc`、`GET /auth/me`、`POST /auth/logout`。`GET /auth/me` 的 `result` 为 `{isAuthenticated: true, user: {sub, name, email, picture, email_verified}}`（可选资料字段可能省略），未登录返回 `401` 与认证错误包裹。该用户投影不包含业务 Domain；Domain 由接入服务的可信上下文提供。
+身份相关端点：`GET /api/auth/config`、`GET /api/auth/login`、`GET /api/auth/me`、`POST /api/auth/logout`。OIDC 回调是唯一不挂在 `/api` 前缀下的端点，固定为 `GET /signin-oidc`。`GET /api/auth/me` 的 `result` 为 `{isAuthenticated: true, user: {sub, name, email, picture, email_verified}}`（可选资料字段可能省略），未登录返回 `401` 与认证错误包裹。该用户投影不包含业务 Domain；Domain 由接入服务的可信上下文提供，可省略并使用空默认域，只有需要按具名域隔离时才显式传入。
 
 ### 2.2 服务到服务鉴权
 
-默认生产和开发 Compose 已移除独立服务凭证配置，因此当前 `POST /v1/authorize` 返回 `401`。统一 Open API Token 管理与校验尚未接入；下面说明的是仍保留的旧服务凭证兼容机制。
+默认生产和开发 Compose 已移除独立服务凭证配置，因此当前 `POST /api/v1/authorize` 返回 `401`。统一 Open API Token 管理与校验尚未接入；下面说明的是仍保留的旧服务凭证兼容机制。
 
-`POST /v1/authorize` 不使用管理端会话，要求请求头携带配置的服务凭证：
+`POST /api/v1/authorize` 不使用管理端会话，要求请求头携带配置的服务凭证：
 
 ```http
-POST /v1/authorize
+POST /api/v1/authorize
 Authorization: Bearer <configured service credential>
 Content-Type: application/json
 ```
@@ -57,7 +57,7 @@ Content-Type: application/json
 
 ### 3.1 成功响应
 
-除 `/v1/authorize` 成功时返回原始决策对象外，管理接口（含 `/v1/users`、模拟接口）使用统一包裹：
+除 `/api/v1/authorize` 成功时返回原始决策对象外，管理接口（含 `/api/v1/users`、模拟接口）使用统一包裹：
 
 ```json
 {
@@ -82,23 +82,23 @@ Content-Type: application/json
 | errorCode | HTTP 状态 | 触发条件 |
 | --- | --- | --- |
 | `INVALID_ARGUMENT` | 400 | 请求字段缺失、格式错误或违反业务前置条件 |
-| `NOT_FOUND` | 404 | 应用、服务、角色、菜单、Endpoint、发布版本不存在或不可用 |
+| `NOT_FOUND` | 404 | 应用、服务、角色、菜单、Endpoint 不存在或不可用 |
 | `ALREADY_EXISTS` | 409 | 唯一约束冲突 |
 | `CONFLICT` | 409 | 跨应用引用、引用停用对象、移除仍被授权引用的服务关联等 |
 | `INTERNAL_ERROR` | 500 | 未分类的服务端错误 |
 
-`/v1/users` 在 SCIM 未配置时返回 `503 SCIM_NOT_CONFIGURED`，上游调用失败时返回 `502 SCIM_UPSTREAM_ERROR`，响应结构同为 `{success,errorCode,errorMessage,result}`。
+`/api/v1/users` 在 SCIM 未配置时返回 `503 SCIM_NOT_CONFIGURED`，上游调用失败时返回 `502 SCIM_UPSTREAM_ERROR`，响应结构同为 `{success,errorCode,errorMessage,result}`。
 
 ## 4. 分页
 
 只有应用范围的 API Endpoint 列表支持分页：
 
-- `GET /v1/rbac-v1/endpoints?app_key=...&page=1&page_size=10`
+- `GET /api/v1/rbac-v1/endpoints?app_key=...&page=1&page_size=10`
 - `page` 从 1 开始，缺省或小于 1 视为 1；
 - `page_size` 缺省为 10，最大 100，超过按 100 处理；
 - `result` 结构为 `{items, total, page, page_size}`。
 
-应用列表、角色列表、主体角色列表、菜单列表和发布列表不分页，均为一次性返回 `{items: [...]}`。
+应用列表、角色列表、主体角色列表和菜单列表不分页，均为一次性返回 `{items: [...]}`。
 
 ## 5. 应用与服务目录
 
@@ -106,9 +106,9 @@ Content-Type: application/json
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/applications` | 返回 `{items: Application[]}`，按显示名称排序 |
-| POST | `/v1/applications` | 创建应用；成功返回 `201` 与 `Application` |
-| PUT | `/v1/applications/{key}` | 更新已有应用；`key` 取自路径且不可修改 |
+| GET | `/api/v1/applications` | 返回 `{items: Application[]}`，按显示名称排序 |
+| POST | `/api/v1/applications` | 创建应用；成功返回 `201` 与 `Application` |
+| PUT | `/api/v1/applications/{key}` | 更新已有应用；`key` 取自路径且不可修改 |
 
 `Application` 字段：
 
@@ -135,14 +135,14 @@ Content-Type: application/json
 
 `url` 可省略或为空；填写时必须是绝对 HTTP(S) 地址，长度不超过 2048，不能携带用户名/密码，也不能包含反斜杠或空白字符。`enabled` 省略时默认 `true`。`PUT` 更新时若省略 `url` / `enabled`，沿用已有值；`key` 不存在返回 `404`。
 
-应用停用后，所有需要查找该应用的接口（包括 `POST /v1/authorize` 和 `/v1/rbac-v1/*`）立即因找不到启用应用而返回 `404`，不需要重新发布。
+应用停用后，所有需要查找该应用的接口（包括 `POST /api/v1/authorize` 和 `/api/v1/rbac-v1/*`）立即因找不到启用应用而返回 `404`，不需要额外操作。
 
 ### 5.2 应用服务关联
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/applications/{key}/service-resources` | 返回 `{items: ServiceResource[]}` |
-| PUT | `/v1/applications/{key}/service-resources` | 以 `{service_resource_keys: string[]}` 原子替换关联 |
+| GET | `/api/v1/applications/{key}/service-resources` | 返回 `{items: ServiceResource[]}` |
+| PUT | `/api/v1/applications/{key}/service-resources` | 以 `{service_resource_keys: string[]}` 原子替换关联 |
 
 `ServiceResource` 字段：`id`、`key`、`name`、`display_name`、`audience`、`description`、`is_active`、`source`、`created_at`。
 
@@ -156,11 +156,11 @@ Content-Type: application/json
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/service-resources` | 返回 `{items: ServiceResource[], writable: bool}` |
-| POST | `/v1/service-resources` | 创建本地服务资源，请求 `key, display_name, audience, description, is_active` |
-| GET | `/v1/service-resources/{key}` | 读取单个服务资源 |
-| PUT | `/v1/service-resources/{key}` | 更新本地服务资源的展示信息与启停 |
-| DELETE | `/v1/service-resources/{key}` | 删除本地服务资源 |
+| GET | `/api/v1/service-resources` | 返回 `{items: ServiceResource[], writable: bool}` |
+| POST | `/api/v1/service-resources` | 创建本地服务资源，请求 `key, display_name, audience, description, is_active` |
+| GET | `/api/v1/service-resources/{key}` | 读取单个服务资源 |
+| PUT | `/api/v1/service-resources/{key}` | 更新本地服务资源的展示信息与启停 |
+| DELETE | `/api/v1/service-resources/{key}` | 删除本地服务资源 |
 
 `source` 为 `local` 时读写本地目录；为 `nexusauth` 时 `List`/`Get` 直接读取远端目录，不写入本地 `service_resources`，也不回退到本地元数据。NexusAuth 资源拒绝写操作。
 
@@ -168,16 +168,16 @@ Content-Type: application/json
 
 ## 6. 应用范围 RBAC 配置
 
-以下 `/v1/rbac-v1/*` 接口都要求 `app_key` 查询参数，作用于该应用。API 目录的写操作另要求 `service_resource`，且该服务必须已关联当前应用并处于启用状态。
+以下 `/api/v1/rbac-v1/*` 接口都要求 `app_key` 查询参数，作用于该应用。API 目录的写操作另要求 `service_resource`，且该服务必须已关联当前应用并处于启用状态。
 
 ### 6.1 API Endpoint
 
 | 方法 | 路径 | 参数 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/v1/rbac-v1/endpoints` | `app_key`，可选 `service_resource`、`page`、`page_size` | 分页返回应用已关联服务中的 API；不带 `service_resource` 时返回全部已关联服务的 API |
-| POST | `/v1/rbac-v1/endpoints` | `app_key`、`service_resource` | 创建或更新 Endpoint；无 `id` 时创建并返回 `201`，有 `id` 时更新并返回 `200` |
-| POST | `/v1/rbac-v1/endpoints/import-swagger` | `app_key`、`service_resource` | 从 `{swagger_url}` 导入，返回 `201` 与 `{total,created,skipped}` |
-| DELETE | `/v1/rbac-v1/endpoints/{id}` | `app_key`、`service_resource` | 删除 Endpoint |
+| GET | `/api/v1/rbac-v1/endpoints` | `app_key`，可选 `service_resource`、`page`、`page_size` | 分页返回应用已关联服务中的 API；不带 `service_resource` 时返回全部已关联服务的 API |
+| POST | `/api/v1/rbac-v1/endpoints` | `app_key`、`service_resource` | 创建或更新 Endpoint；无 `id` 时创建并返回 `201`，有 `id` 时更新并返回 `200` |
+| POST | `/api/v1/rbac-v1/endpoints/import-swagger` | `app_key`、`service_resource` | 从 `{swagger_url}` 导入，返回 `201` 与 `{total,created,skipped}` |
+| DELETE | `/api/v1/rbac-v1/endpoints/{id}` | `app_key`、`service_resource` | 删除 Endpoint |
 
 `RBACEndpoint` 字段：
 
@@ -201,9 +201,9 @@ Content-Type: application/json
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/rbac-v1/roles` | 返回 `{items: RBACRole[]}` |
-| POST | `/v1/rbac-v1/roles` | 创建或更新角色；无 `id` 创建返回 `201`，有 `id` 更新返回 `200` |
-| DELETE | `/v1/rbac-v1/roles/{id}` | 删除角色 |
+| GET | `/api/v1/rbac-v1/roles` | 返回 `{items: RBACRole[]}` |
+| POST | `/api/v1/rbac-v1/roles` | 创建或更新角色；无 `id` 创建返回 `201`，有 `id` 更新返回 `200` |
+| DELETE | `/api/v1/rbac-v1/roles/{id}` | 删除角色 |
 
 `RBACRole` 字段：
 
@@ -226,9 +226,9 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/rbac-v1/menus` | 返回 `{items: ApplicationMenu[]}` |
-| POST | `/v1/rbac-v1/menus` | 创建或更新菜单节点 |
-| DELETE | `/v1/rbac-v1/menus/{id}` | 删除菜单节点 |
+| GET | `/api/v1/rbac-v1/menus` | 返回 `{items: ApplicationMenu[]}` |
+| POST | `/api/v1/rbac-v1/menus` | 创建或更新菜单节点 |
+| DELETE | `/api/v1/rbac-v1/menus/{id}` | 删除菜单节点 |
 
 `ApplicationMenu` 字段：`id`、`application_id`、`parent_id`、`code`、`name`、`menu_type`、`route`、`component`、`icon`、`sort_order`、`enabled`。
 
@@ -241,8 +241,8 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/v1/rbac-v1/subject-roles` | 返回 `{items: SubjectRoleBinding[]}` |
-| PUT | `/v1/rbac-v1/subject-roles` | 替换指定 `subject + domain` 的全部角色 |
+| GET | `/api/v1/rbac-v1/subject-roles` | 返回 `{items: SubjectRoleBinding[]}` |
+| PUT | `/api/v1/rbac-v1/subject-roles` | 替换指定 `subject + domain` 的全部角色；`domain` 省略时替换默认空域 |
 
 `SubjectRoleBinding` 字段：`id`、`application_id`、`subject`、`domain`、`role_id`。
 
@@ -251,58 +251,37 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 ```json
 {
   "subject": "user-001",
-  "domain": "global",
+  "domain": "",
   "role_ids": ["<role-uuid>"]
 }
 ```
 
-`subject`、`domain` 必填；`role_ids` 必须属于当前应用，否则返回 `409`。替换是对该主体/域整组角色的覆盖，不是追加。`domain` 是授权上下文字符串；管理 API 必须显式提供非空值，当前用户分配 UI 固定提交 `global`。
+`subject` 必填，`domain` 可省略；省略或传空白按默认空域处理，旧值 `global` 也归一到同一默认空域。`role_ids` 必须属于当前应用，否则返回 `409`。替换是对该主体/域整组角色的覆盖，不是追加。`domain` 是授权上下文字符串，非空具名值用于按租户或组织进一步隔离，不合并具名域、不扩大权限；当前用户分配 UI 提交空域。
 
-## 7. 发布
+## 7. 保存生效与缓存
 
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/v1/rbac-v1/releases` | 发布当前应用配置；返回 `201` 与 `RBACRelease` |
-| GET | `/v1/rbac-v1/releases` | 返回 `{items: RBACRelease[]}`，按版本倒序 |
+当前没有发布接口、发布版本、历史快照和回滚入口。`POST /api/v1/rbac-v1/releases` 与 `GET /api/v1/rbac-v1/releases` 已从路由和 OpenAPI 文档移除，调用返回 `404`。
 
-发布请求体仅含可选说明：
-
-```json
-{ "description": "2026-10-14 首次发布" }
-```
-
-`description` 为空时使用默认文案。发布流程：
+保存流程：
 
 ```text
-事务开始
--> 查找启用应用
--> SELECT ... FOR UPDATE 锁定应用行
--> 读取当前目录 active service keys
--> 用单条 SQL 构建应用当前状态的 JSONB 快照
--> 计算 SHA-256 checksum
--> 版本号 = 当前应用 max(version) + 1
--> 旧的 published 发布置为 superseded
--> 写入新 published 发布和快照
--> 提交事务
+写入请求（角色 / 授权 / 菜单 / 绑定 / 服务关联 / API / 目录）
+-> 仓储检查与数据库唯一约束、触发器校验
+-> 提交当前表和事务内刷新的 applications.policy_token
+-> 提交后开始的鉴权请求读取新权限
 ```
 
-`RBACRelease` 在列表中字段为 `id`、`application_id`、`version`、`status`、`description`、`checksum`、`published_by`、`published_at`；`published_by` 取当前登录用户的审计标识；未配置认证服务时为 `system`，禁用 OIDC 的开发模式为 `development`。`snapshot` 字段仅在内部读取活动发布时填充，发布/列表响应不返回快照内容。
+- `applications.policy_token` 是随机 UUID 缓存失效标记，在权限数据变更语句中按受影响应用刷新；它不是业务版本，不进入 Redis key，也不在响应中返回。
+- 语句级触发器覆盖角色、角色 API/菜单授权、主体角色绑定、菜单、应用服务关联、API 端点和服务资源；一次批量语句每个受影响应用只刷新一次标记，回滚时标记和权限一起回滚。
+- 每次鉴权先从 PostgreSQL 确认启用应用、失效标记和配置目录中的有效服务集合，再复用本地编译索引；索引缺失时读取 Redis 当前记录或 PostgreSQL 当前表。
+- 写请求不等待 Redis；Redis 不可用或回填失败只影响缓存命中率。缓存标记校验失败时回源当前表，不会用旧记录放行。
+- 提交前已开始读取的在途请求可以完成其已读到的判断；提交后开始的请求使用新权限。
 
-快照内容（键为 `app_key`、`application_id`、`service_resources`、`endpoints`、`roles`、`subject_roles`、`menus`）：
-
-- `service_resources`：当前目录返回 active 服务 key；
-- `endpoints`：这些服务的 Endpoint（`id`、`service_resource`、`method`、`path_template`、`enabled`）；
-- `roles`：应用角色（`id`、`code`、`enabled`、`endpoint_ids`、`menu_ids`）；
-- `subject_roles`：主体绑定（`subject`、`domain`、`role_id`）；
-- `menus`：菜单树（`id`、`parent_id`、`code`、`name`、`menu_type`、`route`、`component`、`icon`、`sort_order`、`enabled`）。
-
-发布不做额外的业务规则校验：唯一性、跨应用引用、服务关联等约束在写入阶段由仓储和数据库唯一约束/触发器保证；发布阶段若遇到应用不存在/停用、远端目录读取失败、快照构建或数据库写入失败，整个发布不会提交。发布对象是整个应用，不是单个用户或单个服务。
-
-当前没有历史版本回滚接口，也没有按旧版本重新发布的入口：`GET /v1/rbac-v1/releases` 只读，历史发布不会被修改或删除。
+事务、单飞、缓存容量、TTL 和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
 
 ## 8. 运行时鉴权
 
-### 8.1 POST /v1/authorize
+### 8.1 POST /api/v1/authorize
 
 请求（服务凭证见 2.2）：
 
@@ -311,17 +290,17 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
   "appKey": "business.portal",
   "serviceResource": "order.service",
   "subject": "user-001",
-  "domain": "global",
+  "domain": "",
   "method": "GET",
   "path": "/api/orders/1001"
 }
 ```
 
-要求 `appKey`、`serviceResource` 非空，正文可解；业务校验要求 `service_resource`、`subject`、`domain`、`method` 非空且 `path` 以 `/` 开头，否则返回 `400`。成功返回 `200` 与决策对象。
+要求 `appKey`、`serviceResource` 非空，正文可解；业务校验要求 `service_resource`、`subject`、`method` 非空且 `path` 以 `/` 开头，否则返回 `400`。`domain` 可省略，省略或传空白按默认空域归一，旧值 `global` 也视作同一默认域。成功返回 `200` 与决策对象。
 
-### 8.2 POST /v1/rbac-v1/simulate
+### 8.2 POST /api/v1/rbac-v1/simulate
 
-管理端模拟接口，`app_key` 由查询参数提供，正文与授权输入一致（`service_resource`、`subject`、`domain`、`method`、`path`），成功时在统一包裹的 `result` 中返回决策对象。模拟读取当前活动发布，不是未发布草稿。
+管理端模拟接口，`app_key` 由查询参数提供，正文与授权输入一致（`service_resource`、`subject`、`method`、`path`，`domain` 可选），成功时在统一包裹的 `result` 中返回决策对象。模拟读取应用当前已保存的配置，与运行时鉴权使用同一套逻辑。
 
 ### 8.3 决策对象与算法
 
@@ -330,7 +309,6 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
   "allowed": true,
   "effect": "allow",
   "reason": "allowed",
-  "release_version": 3,
   "matched_roles": ["order.viewer"]
 }
 ```
@@ -340,18 +318,17 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 | `allowed` | 是否允许 |
 | `effect` | `allow` 或 `deny` |
 | `reason` | 判定原因 |
-| `release_version` | 使用的发布版本号 |
 | `matched_permissions` | 预留字段，当前实现不填充，序列化时省略 |
 | `matched_roles` | 命中的角色编码 |
 
 算法：
 
 ```text
-1. 按 appKey 查找启用应用，读取该应用当前 status=published 的发布并存取 JSONB 快照。
-2. 用 service_resource + method + path 匹配快照中的 Endpoint；固定路径段优先级高于参数段。
-3. 查找 subject + domain 的全部主体角色绑定。
-4. 展开启用角色授予的 Endpoint 集合。
-5. 目标 Endpoint 在集合中 -> ALLOW，否则 DENY。
+1. 按 appKey 查找启用应用、缓存失效标记和配置目录中的有效服务集合。
+2. 复用对应身份的本地编译索引；未命中时从 Redis 当前记录或 PostgreSQL 当前表加载并编译。
+3. 通过 service_resource + method 定位路由集合，使用静态哈希或参数 Trie 匹配 Endpoint，固定路径段更多者优先；同优先级不同 Endpoint 冲突时拒绝。
+4. 通过 subject + 归一化 domain 的哈希键定位用户的启用角色位图；`domain` 省略、空白或旧 `global` 都归一为空默认域。
+5. 用户角色位图与目标 Endpoint 的授权角色位图有交集 -> ALLOW，否则 DENY。
 ```
 
 `reason` 取值：
@@ -369,22 +346,22 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 
 路径参数按单个非空路径段匹配，例如 `/orders/{id}` 不匹配 `/orders/1/items`，也不提供任意深度通配。
 
-应用停用或没有活动发布时，接口返回 `404`，属于错误而不是正常 deny 响应。
+应用不存在或已停用时，接口返回 `404`，属于错误而不是正常 deny 响应。服务未关联、服务未启用、接口不存在或未被授予属于正常 deny 响应。
 
 ## 9. 主体菜单
 
 ```http
-GET /v1/rbac-v1/subject-menus?app_key=business.portal&subject=user-001&domain=global
+GET /api/v1/rbac-v1/subject-menus?app_key=business.portal&subject=user-001
 ```
 
-返回 `{items: ApplicationMenu[]}`，数据来自与运行时鉴权相同的活动发布快照：命中 `subject + domain` 的启用角色所授予的菜单/按钮，并补齐显示所需的启用祖先节点。父节点停用、缺失或存在循环时对应分支不返回。`app_key`、`subject`、`domain` 任一缺失返回 `400`。
+返回 `{items: ApplicationMenu[]}`，数据来自与运行时鉴权相同的当前权限记录：命中 `subject + domain` 的启用角色所授予的菜单/按钮，并补齐显示所需的启用祖先节点。父节点停用、缺失或存在循环时对应分支不返回。`app_key`、`subject` 缺失返回 `400`；`domain` 可省略，省略或空白按默认空域处理，旧值 `global` 同样归一。
 
 前端可基于返回的按钮权限控制操作入口，后端 API 仍须独立鉴权。
 
 ## 10. SCIM 用户
 
 ```http
-GET /v1/users?filter=userName%20eq%20%22alice%22&startIndex=1&count=100
+GET /api/v1/users?filter=userName%20eq%20%22alice%22&startIndex=1&count=100
 ```
 
 权限中心只读代理 NexusAuth 的 SCIM 2.0 Users 接口，不维护本地用户。参数：
@@ -397,10 +374,10 @@ GET /v1/users?filter=userName%20eq%20%22alice%22&startIndex=1&count=100
 
 ## 11. 数据模型
 
-由 `migrations/001_init.sql` 创建的 12 张表（11 张应用 RBAC 及服务目录表，1 张兼容 API 目录表）：
+由 `migrations/001_init.sql` 创建的 10 张表（9 张应用 RBAC 及服务目录表，1 张兼容 API 目录表）：
 
 ```text
-applications(id, app_key UNIQUE, display_name, description, url, enabled, ...)
+applications(id, app_key UNIQUE, display_name, description, url, enabled, policy_token, ...)
 service_resources(id, resource_key UNIQUE, display_name, audience, description, source, external_id, enabled, ...)
 application_service_resources(application_id, service_resource_key, PRIMARY KEY(application_id, service_resource_key))
 api_endpoints(id, service_resource_key, endpoint_key, method, path_template, module, summary, source, enabled, ...)
@@ -409,33 +386,31 @@ menus(id, application_id, parent_id, menu_type, code, name, route, component, ic
 role_api_endpoint_bindings(role_id, endpoint_id, PRIMARY KEY(role_id, endpoint_id))
 role_menu_bindings(role_id, menu_id, PRIMARY KEY(role_id, menu_id))
 subject_role_bindings(id, application_id, subject, domain, role_id, ...)
-rbac_releases(id, application_id, version, status, description, checksum, published_by, published_at, ...)
-rbac_release_snapshots(release_id PRIMARY KEY, snapshot JSONB)
 authorization_api_endpoints(id, service_resource, controller, method, path_template, summary, enabled, is_deleted, ...)
 ```
 
-应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用、角色/主体绑定不跨应用。
+应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用、角色/主体绑定不跨应用，并在 8 张权限表变更时刷新应用的 `policy_token`。`subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`，默认域是空串，具名域按原值隔离。以上结构由首次初始化脚本直接创建。
 
 ## 12. 共享目录遗留路由
 
-服务器仍注册 `/v1/authorization/api-endpoints*` 的服务目录级 Endpoint 路由，并在 handler 路由测试与 OpenAPI 文档中保留：
+服务器仍注册 `/api/v1/authorization/api-endpoints*` 的服务目录级 Endpoint 路由，并在 handler 路由测试与 OpenAPI 文档中保留：
 
 | 方法 | 路径 |
 | --- | --- |
-| GET | `/v1/authorization/api-endpoints` |
-| POST | `/v1/authorization/api-endpoints` |
-| POST | `/v1/authorization/api-endpoints/import-swagger` |
-| GET | `/v1/authorization/api-endpoints/{id}` |
-| PUT | `/v1/authorization/api-endpoints/{id}` |
-| DELETE | `/v1/authorization/api-endpoints/{id}` |
+| GET | `/api/v1/authorization/api-endpoints` |
+| POST | `/api/v1/authorization/api-endpoints` |
+| POST | `/api/v1/authorization/api-endpoints/import-swagger` |
+| GET | `/api/v1/authorization/api-endpoints/{id}` |
+| PUT | `/api/v1/authorization/api-endpoints/{id}` |
+| DELETE | `/api/v1/authorization/api-endpoints/{id}` |
 
-这些路由由 `biz.APIEndpointService` 提供，请求字段为 `service_resource, controller, method, path_template, summary, enabled`，其仓储读写 `authorization_api_endpoints`。它们与 RBAC v1 使用的 `api_endpoints` 表是两套数据：`migrations/001_init.sql` 同时创建这两个表，其中兼容目录保留审计字段与软删除。它们不是新的角色、菜单、主体绑定或发布入口，也不参与运行时发布快照；新工作台使用 `/v1/rbac-v1/*`。
+这些路由由 `biz.APIEndpointService` 提供，请求字段为 `service_resource, controller, method, path_template, summary, enabled`，其仓储读写 `authorization_api_endpoints`。它们与 RBAC v1 使用的 `api_endpoints` 表是两套数据：`migrations/001_init.sql` 同时创建这两个表，其中兼容目录保留审计字段与软删除。它们不是新的角色、菜单或主体绑定入口，也不参与应用 RBAC 的运行时权限记录；新工作台使用 `/api/v1/rbac-v1/*`。
 
 ## 13. 当前未实现
 
 - 显式 `deny` 及 deny 优先级；
 - 权限编码、策略文档、策略审批、审批流；
-- 发布历史回滚接口、按旧版本重新发布、版本差异对比、草稿模拟；
+- 发布版本、历史快照、版本回滚接口、版本差异对比（当前设计不提供，保存即生效）；
 - 数据行级/字段级权限、ABAC 条件、外部条件查询；
 - 用户组、组织架构、用户资料 CRUD；
 - 菜单/按钮与 API 的自动联动授权；

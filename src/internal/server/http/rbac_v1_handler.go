@@ -16,7 +16,7 @@ func rbacPageParams(r *http.Request) (int, int) {
 	return page, pageSize
 }
 
-// AuthorizeRBAC evaluates the active release for a trusted service caller.
+// AuthorizeRBAC evaluates currently saved permissions for a trusted service caller.
 func (h *Handler) AuthorizeRBAC(w http.ResponseWriter, r *http.Request) {
 	fields := strings.Fields(r.Header.Get("Authorization"))
 	if len(fields) != 2 || fields[0] != "Bearer" || h.authorizationServiceCredential == "" || subtle.ConstantTimeCompare([]byte(fields[1]), []byte(h.authorizationServiceCredential)) != 1 {
@@ -53,6 +53,9 @@ func (h *Handler) WithRBACV1Service(service *biz.RBACV1Service) *Handler {
 	return h
 }
 
+// ListRBACV1Endpoints lists the endpoints assigned to an application service.
+// app_key and service_resource are required and the page is bounded by
+// rbacPageParams.
 func (h *Handler) ListRBACV1Endpoints(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -71,6 +74,10 @@ func (h *Handler) ListRBACV1Endpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
+
+// SaveRBACV1Endpoint creates or updates an endpoint for an application service.
+// The service must belong to the application; a missing endpoint id selects
+// 201 Created, otherwise the response is 200 OK.
 func (h *Handler) SaveRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -103,6 +110,9 @@ func (h *Handler) SaveRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, item)
 }
+
+// DeleteRBACV1Endpoint deletes an endpoint from an application service after
+// validating the application/service scope and the path id.
 func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -125,6 +135,10 @@ func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, nil)
 }
+
+// ImportRBACV1Swagger imports Swagger operations into an application service.
+// The body must include swagger_url and the service must belong to the
+// application; successful imports return 201 Created.
 func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -150,6 +164,8 @@ func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, result)
 }
+
+// ListRBACV1Roles lists roles for the application scope supplied by app_key.
 func (h *Handler) ListRBACV1Roles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -167,6 +183,9 @@ func (h *Handler) ListRBACV1Roles(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
+
+// SaveRBACV1Role creates or updates a role in the application scope. It returns
+// 201 Created for a new role and 200 OK for an update.
 func (h *Handler) SaveRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -193,6 +212,9 @@ func (h *Handler) SaveRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, status, item)
 }
+
+// DeleteRBACV1Role deletes a role from the application scope after validating
+// the path id.
 func (h *Handler) DeleteRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -211,6 +233,8 @@ func (h *Handler) DeleteRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nil)
 }
 
+// ListRBACV1SubjectRoles lists subject-to-role bindings for the application
+// scope supplied by app_key.
 func (h *Handler) ListRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -229,42 +253,9 @@ func (h *Handler) ListRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (h *Handler) PublishRBACV1(w http.ResponseWriter, r *http.Request) {
-	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
-		return
-	}
-	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
-	var body struct {
-		Description string `json:"description"`
-	}
-	if scope == "" || decodeJSON(r, &body) != nil {
-		writeError(w, biz.ErrInvalidArgument)
-		return
-	}
-	if strings.TrimSpace(body.Description) == "" {
-		body.Description = "RBAC configuration release"
-	}
-	v, err := h.rbacV1.Publish(r.Context(), scope, body.Description, biz.AuditActorFromContext(h.auditContext(r)).ID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, v)
-}
-func (h *Handler) ListRBACV1Releases(w http.ResponseWriter, r *http.Request) {
-	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
-		return
-	}
-	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
-	items, err := h.rbacV1.Releases(r.Context(), scope)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
-}
+// SimulateRBACV1 evaluates a request body against the application's current
+// saved policy. It does not change stored permissions or their invalidation
+// identity.
 func (h *Handler) SimulateRBACV1(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)
@@ -283,6 +274,9 @@ func (h *Handler) SimulateRBACV1(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
+
+// ReplaceRBACV1SubjectRoles atomically replaces one subject's roles in the
+// application scope. The body carries subject, optional domain, and role_ids.
 func (h *Handler) ReplaceRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, biz.ErrNotFound)

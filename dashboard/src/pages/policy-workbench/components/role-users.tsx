@@ -1,21 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, Drawer, Form, MessagePlugin, Select } from 'tdesign-react';
 import { listSubjectRoles, replaceSubjectRoles, type Role } from '../../../api/rbac-v1';
-import { listAllUsers, type SCIMUser } from '../../../api/user';
+import { listAllUsers, scimUserLabel, type SCIMUser } from '../../../api/user';
 import { getRequestErrorMessage } from '../../nexus-authorization/shared';
 import type { State } from '../shared';
 
-const DOMAIN = 'global';
-
-const userLabel = (user: SCIMUser) => {
-  const name = user.name?.formatted || [user.name?.givenName, user.name?.familyName].filter(Boolean).join(' ');
-  const email = (user.emails?.find(item => item.primary) || user.emails?.[0])?.value;
-  return [name && name !== user.userName ? name : '', user.userName, email].filter(Boolean).join(' · ') || user.id;
-};
+// The default domain is the empty string in the database. Legacy rows still use the "global"
+// alias, which reads as the same default domain; writes always target the empty default domain.
+const DOMAIN = '';
+const isDefaultDomain = (domain: string) => domain === DOMAIN || domain === 'global';
 
 export default function RoleUsers({ state, role, onClose }: { state: State; role: Role; onClose: () => void }) {
   const [originalIDs, setOriginalIDs] = useState(() => new Set(state.bindings
-    .filter(binding => binding.role_id === role.id && binding.domain === DOMAIN)
+    .filter(binding => binding.role_id === role.id && isDefaultDomain(binding.domain))
     .map(binding => binding.subject)));
   const [selectedIDs, setSelectedIDs] = useState<string[]>(() => [...originalIDs]);
   const [users, setUsers] = useState<SCIMUser[]>([]);
@@ -45,7 +42,7 @@ export default function RoleUsers({ state, role, onClose }: { state: State; role
   const userByID = new Map(users.map(user => [user.id, user]));
   const blocked = saving || loading || Boolean(usersError) || state.loading || Boolean(state.loadError);
   const options = users.map(user => ({
-    label: `${userLabel(user)}${user.active === false ? ' · 已停用' : ''}`,
+    label: `${scimUserLabel(user)}${user.active === false ? ' · 已停用' : ''}`,
     value: user.id,
     disabled: (!role.enabled || user.active === false) && !originalIDs.has(user.id),
   }));
@@ -72,7 +69,7 @@ export default function RoleUsers({ state, role, onClose }: { state: State; role
       const currentBindings = (await listSubjectRoles(state.appKey)).items || [];
       const outcomes = await Promise.allSettled(changedSubjects.map(subject => {
         const otherRoles = currentBindings
-          .filter(binding => binding.subject === subject && binding.domain === DOMAIN && binding.role_id !== role.id)
+          .filter(binding => binding.subject === subject && isDefaultDomain(binding.domain) && binding.role_id !== role.id)
           .map(binding => binding.role_id);
         const roleIDs = [...new Set(selected.has(subject) ? [...otherRoles, role.id] : otherRoles)];
         return replaceSubjectRoles(state.appKey, subject, DOMAIN, roleIDs);

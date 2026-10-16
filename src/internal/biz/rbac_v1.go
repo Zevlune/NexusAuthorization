@@ -9,6 +9,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// RBACEndpoint describes one API operation in a shared service resource
+// catalog. The endpoint is referenced by roles, while its catalog record is
+// scoped by ServiceResource rather than by an individual application.
 type RBACEndpoint struct {
 	ID               uuid.UUID  `json:"id"`
 	ServiceResource  string     `json:"service_resource"`
@@ -24,6 +27,8 @@ type RBACEndpoint struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
+// RBACRole is an application-scoped permission role. EndpointIDs and MenuIDs
+// are the grants issued by the role; ID is the role identity returned to clients.
 type RBACRole struct {
 	ID            uuid.UUID   `json:"id"`
 	ApplicationID uuid.UUID   `json:"application_id"`
@@ -35,6 +40,8 @@ type RBACRole struct {
 	MenuIDs       []uuid.UUID `json:"menu_ids"`
 }
 
+// SubjectRoleBinding maps one subject in an optional domain to a role. An empty
+// Domain is the default domain; callers should normalize with NormalizeRBACDomain.
 type SubjectRoleBinding struct {
 	ID            uuid.UUID `json:"id"`
 	ApplicationID uuid.UUID `json:"application_id"`
@@ -43,6 +50,8 @@ type SubjectRoleBinding struct {
 	RoleID        uuid.UUID `json:"role_id"`
 }
 
+// RBACPage is a bounded page of RBAC list results reported alongside its total
+// item count.
 type RBACPage[T any] struct {
 	Items    []T `json:"items"`
 	Total    int `json:"total"`
@@ -50,22 +59,21 @@ type RBACPage[T any] struct {
 	PageSize int `json:"page_size"`
 }
 
-type RBACRelease struct {
-	ID            uuid.UUID      `json:"id"`
+// CurrentPolicy contains current normalized records read consistently from the database.
+// Token is an internal cache invalidation identity, never a published version.
+type CurrentPolicy struct {
 	ApplicationID uuid.UUID      `json:"application_id"`
-	Version       int64          `json:"version"`
-	Status        string         `json:"status"`
-	Description   string         `json:"description"`
-	Checksum      string         `json:"checksum"`
-	PublishedBy   string         `json:"published_by"`
-	PublishedAt   time.Time      `json:"published_at"`
-	Snapshot      map[string]any `json:"snapshot,omitempty"`
+	Token         string         `json:"token"`
+	ServiceKeys   []string       `json:"-"`
+	Data          map[string]any `json:"data,omitempty"`
 }
+
+// RBACDecision is the authorization outcome returned to callers. MatchedRoles
+// is diagnostic only and never widens or narrows the allow/deny result.
 type RBACDecision struct {
 	Allowed            bool     `json:"allowed"`
 	Effect             string   `json:"effect"`
 	Reason             string   `json:"reason"`
-	ReleaseVersion     int64    `json:"release_version"`
 	MatchedPermissions []string `json:"matched_permissions,omitempty"`
 	MatchedRoles       []string `json:"matched_roles,omitempty"`
 }
@@ -81,36 +89,51 @@ type RBACV1Repository interface {
 	DeleteRole(context.Context, string, uuid.UUID) error
 	ListSubjectRoleBindings(context.Context, string) ([]SubjectRoleBinding, error)
 	ReplaceSubjectRoles(context.Context, string, string, string, []uuid.UUID) error
-	BuildRBACSnapshot(context.Context, string) (map[string]any, error)
-	CreateRBACRelease(context.Context, string, string, string, map[string]any) (RBACRelease, error)
-	ListRBACReleases(context.Context, string) ([]RBACRelease, error)
-	GetActiveRBACRelease(context.Context, string) (RBACRelease, error)
+	GetPolicyMetadata(context.Context, string) (CurrentPolicy, error)
+	GetCurrentPolicy(context.Context, CurrentPolicy) (CurrentPolicy, error)
 }
 
-type RBACV1Service struct{ repository RBACV1Repository }
+// RBACV1Service coordinates application, service-resource, role, and binding
+// administration, and authorizes requests against the current compiled policy.
+type RBACV1Service struct {
+	repository RBACV1Repository
+	policies   *rbacPolicyCache
+}
 
+// RBACV1SwaggerImportResult reports the endpoint import counts for a Swagger
+// operation; Skipped counts operations already present for the service.
 type RBACV1SwaggerImportResult struct {
 	Total   int `json:"total"`
 	Created int `json:"created"`
 	Skipped int `json:"skipped"`
 }
 
+// NewRBACV1Service creates the RBAC control-plane service with a bounded
+// per-process cache of compiled current policies.
 func NewRBACV1Service(repository RBACV1Repository) *RBACV1Service {
-	return &RBACV1Service{repository: repository}
+	return &RBACV1Service{repository: repository, policies: newRBACPolicyCache(64)}
 }
 
+// SaveEndpoint creates or updates an endpoint in the service catalog. Method
+// and an absolute PathTemplate are required; the service scope is trimmed.
 func (s *RBACV1Service) SaveEndpoint(ctx context.Context, serviceResource string, value RBACEndpoint) (RBACEndpoint, error) {
 	if strings.TrimSpace(value.Method) == "" || !strings.HasPrefix(strings.TrimSpace(value.PathTemplate), "/") {
 		return RBACEndpoint{}, fmt.Errorf("%w: method and absolute path_template are required", ErrInvalidArgument)
 	}
 	return s.repository.SaveEndpoint(ctx, normalizeRBACScope(serviceResource), value)
 }
+
+// DeleteEndpoint removes an endpoint from the service catalog by id.
 func (s *RBACV1Service) DeleteEndpoint(ctx context.Context, serviceResource string, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: endpoint id is required", ErrInvalidArgument)
 	}
 	return s.repository.DeleteEndpoint(ctx, normalizeRBACScope(serviceResource), id)
 }
+
+// ImportSwagger discovers operations from rawURL and saves only endpoints that
+// are not already present for the service. It returns an error on the first
+// save failure, with counts accumulated so far.
 func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawURL string) (RBACV1SwaggerImportResult, error) {
 	scope := normalizeRBACScope(serviceResource)
 	operations, err := ReadSwaggerEndpoints(ctx, rawURL)
@@ -140,152 +163,67 @@ func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawU
 	}
 	return result, nil
 }
+
+// ListRoles returns the roles configured for the application scope.
 func (s *RBACV1Service) ListRoles(ctx context.Context, serviceResource string) ([]RBACRole, error) {
 	return s.repository.ListRoles(ctx, normalizeRBACScope(serviceResource))
 }
+
+// SaveRole creates or updates a role. Role code and name are required; the
+// application scope and role identity are normalized by the repository.
 func (s *RBACV1Service) SaveRole(ctx context.Context, serviceResource string, value RBACRole) (RBACRole, error) {
 	if strings.TrimSpace(value.Code) == "" || strings.TrimSpace(value.Name) == "" {
 		return RBACRole{}, fmt.Errorf("%w: role code and name are required", ErrInvalidArgument)
 	}
 	return s.repository.SaveRole(ctx, normalizeRBACScope(serviceResource), value)
 }
+
+// DeleteRole removes a role by id.
 func (s *RBACV1Service) DeleteRole(ctx context.Context, serviceResource string, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: role id is required", ErrInvalidArgument)
 	}
 	return s.repository.DeleteRole(ctx, normalizeRBACScope(serviceResource), id)
 }
+
+// ListSubjectRoleBindings returns the subject-to-role bindings for the
+// application scope.
 func (s *RBACV1Service) ListSubjectRoleBindings(ctx context.Context, serviceResource string) ([]SubjectRoleBinding, error) {
 	return s.repository.ListSubjectRoleBindings(ctx, normalizeRBACScope(serviceResource))
 }
+
+// ReplaceSubjectRoles atomically replaces the role set for a subject in a
+// domain. Subject is required; an empty domain selects the default domain.
 func (s *RBACV1Service) ReplaceSubjectRoles(ctx context.Context, serviceResource, subject, domain string, roleIDs []uuid.UUID) error {
-	if strings.TrimSpace(subject) == "" || strings.TrimSpace(domain) == "" {
-		return fmt.Errorf("%w: subject and domain are required", ErrInvalidArgument)
+	if strings.TrimSpace(subject) == "" {
+		return fmt.Errorf("%w: subject is required", ErrInvalidArgument)
 	}
-	return s.repository.ReplaceSubjectRoles(ctx, normalizeRBACScope(serviceResource), strings.TrimSpace(subject), strings.TrimSpace(domain), roleIDs)
+	return s.repository.ReplaceSubjectRoles(ctx, normalizeRBACScope(serviceResource), strings.TrimSpace(subject), NormalizeRBACDomain(domain), roleIDs)
 }
 
-func (s *RBACV1Service) Publish(ctx context.Context, scope, description, actor string) (RBACRelease, error) {
-	if strings.TrimSpace(scope) == "" {
-		return RBACRelease{}, fmt.Errorf("%w: app_key is required", ErrInvalidArgument)
-	}
-	if repo, ok := s.repository.(interface {
-		PublishApplication(context.Context, string, string, string) (RBACRelease, error)
-	}); ok {
-		return repo.PublishApplication(ctx, scope, strings.TrimSpace(description), actor)
-	}
-	snapshot, err := s.repository.BuildRBACSnapshot(ctx, normalizeRBACScope(scope))
-	if err != nil {
-		return RBACRelease{}, err
-	}
-	return s.repository.CreateRBACRelease(ctx, normalizeRBACScope(scope), strings.TrimSpace(description), actor, snapshot)
-}
-func (s *RBACV1Service) Releases(ctx context.Context, scope string) ([]RBACRelease, error) {
-	return s.repository.ListRBACReleases(ctx, normalizeRBACScope(scope))
-}
+// Authorize evaluates an authorization input against the currently saved
+// policy. Scope is the application identity and must be non-empty; input values
+// provide service_resource, subject, method, path, and an optional domain.
 func (s *RBACV1Service) Authorize(ctx context.Context, scope string, input map[string]any) (RBACDecision, error) {
 	if strings.TrimSpace(scope) == "" {
 		return RBACDecision{}, fmt.Errorf("%w: app_key is required", ErrInvalidArgument)
 	}
 	service, _ := input["service_resource"].(string)
 	subject, _ := input["subject"].(string)
-	domain, _ := input["domain"].(string)
 	method, _ := input["method"].(string)
 	path, _ := input["path"].(string)
-	if strings.TrimSpace(service) == "" || strings.TrimSpace(subject) == "" || strings.TrimSpace(domain) == "" || strings.TrimSpace(method) == "" || !strings.HasPrefix(path, "/") {
-		return RBACDecision{}, fmt.Errorf("%w: service_resource, subject, domain, method and absolute path are required", ErrInvalidArgument)
+	if strings.TrimSpace(service) == "" || strings.TrimSpace(subject) == "" || strings.TrimSpace(method) == "" || !strings.HasPrefix(path, "/") {
+		return RBACDecision{}, fmt.Errorf("%w: service_resource, subject, method and absolute path are required", ErrInvalidArgument)
 	}
-	release, err := s.repository.GetActiveRBACRelease(ctx, normalizeRBACScope(scope))
+	policy, err := s.activeCompiledPolicy(ctx, normalizeRBACScope(scope))
 	if err != nil {
 		return RBACDecision{}, err
 	}
-	return evaluateRBACSnapshot(release, input), nil
+	return policy.Authorize(input), nil
 }
 
-func evaluateRBACSnapshot(release RBACRelease, input map[string]any) RBACDecision {
-	d := RBACDecision{Effect: "deny", ReleaseVersion: release.Version, Reason: "denied"}
-	snap := release.Snapshot
-	subject, _ := input["subject"].(string)
-	domain, _ := input["domain"].(string)
-	method, _ := input["method"].(string)
-	path, _ := input["path"].(string)
-	service, _ := input["service_resource"].(string)
-	if service == "" {
-		d.Reason = "service_resource_required"
-		return d
-	}
-	endpoints, _ := snap["endpoints"].([]any)
-
-	var endpointID string
-	bestSpecificity := -1
-	endpointEnabled := false
-	ambiguous := false
-	for _, raw := range endpoints {
-		e, _ := raw.(map[string]any)
-		template, _ := e["path_template"].(string)
-		if e["service_resource"] != service || !strings.EqualFold(fmt.Sprint(e["method"]), method) || !matchesEndpointPath(template, path) {
-			continue
-		}
-		specificity := 0
-		for _, segment := range strings.Split(template, "/") {
-			if !(strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}")) {
-				specificity++
-			}
-		}
-		if specificity > bestSpecificity {
-			bestSpecificity = specificity
-			endpointID = fmt.Sprint(e["id"])
-			endpointEnabled, _ = e["enabled"].(bool)
-			ambiguous = false
-		} else if specificity == bestSpecificity && endpointID != fmt.Sprint(e["id"]) {
-			ambiguous = true
-		}
-	}
-	if ambiguous {
-		d.Reason = "ambiguous_endpoint"
-		return d
-	}
-	if endpointID != "" && !endpointEnabled {
-		d.Reason = "endpoint_disabled"
-		return d
-	}
-
-	if endpointID == "" {
-		d.Reason = "endpoint_not_found"
-		return d
-	}
-	roles, _ := snap["roles"].([]any)
-	bindings, _ := snap["subject_roles"].([]any)
-	roleNames := []string{}
-	ownedEndpoints := map[string]bool{}
-	for _, raw := range bindings {
-		b, _ := raw.(map[string]any)
-		if fmt.Sprint(b["subject"]) != subject || fmt.Sprint(b["domain"]) != domain {
-			continue
-		}
-		for _, rr := range roles {
-			ro, _ := rr.(map[string]any)
-			if fmt.Sprint(ro["id"]) == fmt.Sprint(b["role_id"]) {
-				roleNames = append(roleNames, fmt.Sprint(ro["code"]))
-				if enabled, _ := ro["enabled"].(bool); !enabled {
-					continue
-				}
-				endpointIDs, _ := ro["endpoint_ids"].([]any)
-				for _, rawEndpointID := range endpointIDs {
-					ownedEndpoints[fmt.Sprint(rawEndpointID)] = true
-				}
-			}
-		}
-	}
-	d.MatchedRoles = roleNames
-	if !ownedEndpoints[endpointID] {
-		d.Reason = "endpoint_not_granted"
-		return d
-	}
-	d.Effect = "allow"
-	d.Allowed = true
-	d.Reason = "allowed"
-	return d
+func evaluateCurrentPolicy(policy CurrentPolicy, input map[string]any) RBACDecision {
+	return compileRBACPolicy(policy).Authorize(input)
 }
 
 // matchesEndpointPath recognizes OpenAPI path parameters as exactly one
@@ -317,6 +255,19 @@ func matchesEndpointPath(template, path string) bool {
 }
 
 func normalizeRBACScope(value string) string { return strings.TrimSpace(value) }
+
+// NormalizeRBACDomain canonicalizes a domain selector. The default domain is
+// the empty string; the retired literal "global" is kept as a compatibility
+// alias that folds onto the same default. Named domains are preserved exactly,
+// so normalization never widens isolation between domains.
+func NormalizeRBACDomain(value string) string {
+	domain := strings.TrimSpace(value)
+	if domain == "" || domain == "global" {
+		return ""
+	}
+	return domain
+}
+
 func normalizeRBACPage(page, pageSize int) (int, int) {
 	if page < 1 {
 		page = 1

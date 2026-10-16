@@ -2,13 +2,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, Card, Col, Descriptions, DialogPlugin, Form, Input, Row, Select, Space, Statistic, Steps, Table, Tag, Pagination, Typography, type TableProps } from 'tdesign-react';
 import { AddIcon, DeleteIcon, EditIcon, RefreshIcon, SearchIcon } from 'tdesign-icons-react';
 import { getStoredApplication, listApplicationServiceResources, type ApplicationServiceResource } from '../../api/application';
-import { deleteRole, listAllEndpoints, listMenus, listRBACReleases, listRoles, listSubjectRoles, publishRBAC, simulateRBAC, type Endpoint, type Menu, type Release, type Role, type SubjectRole } from '../../api/rbac-v1';
+import { deleteRole, listAllEndpoints, listMenus, listRoles, listSubjectRoles, type Endpoint, type Menu, type Role, type SubjectRole } from '../../api/rbac-v1';
 import { State, Page, Guard, Empty, fail } from './shared';
 import Services from './components/services';
 import APIs from './components/apis';
 import Menus from './components/menus';
 import RoleUsers from './components/role-users';
 import RoleEditor from './components/role-editor';
+import Simulate from './components/simulate';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { getRequestErrorMessage } from '../nexus-authorization/shared';
 import '../nexus-authorization/style.less';
@@ -56,7 +57,7 @@ const Overview = ({ state }: { state: State }) => {
     { title: '关联服务', content: '选择应用可使用的服务资源' },
     { title: '配置角色', content: '跨服务勾选 API 与菜单' },
     { title: '绑定用户', content: '为用户绑定应用角色' },
-    { title: '发布验证', content: '生成应用权限快照' },
+    { title: '验证权限', content: '保存后立即生效，可模拟请求验证' },
   ]} /></Card>
   <Card className="rbac-card"><Descriptions items={[{ label: '当前应用', content: state.appKey }]} column={1} /><Row gutter={[16, 16]}>
     <Col xs={12} sm={6}><Statistic title="关联服务" value={state.services.length} /></Col>
@@ -136,42 +137,4 @@ const Roles = ({ state }: { state: State }) => {
   </Page></Guard></Space>;
 };
 
-const Releases = ({ state }: { state: State }) => {
-  const [items, setItems] = useState<Release[]>([]);
-  const [description, setDescription] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [publishing, setPublishing] = useState(false);
-  const load = useCallback(async () => { setLoading(true); try { setItems((await listRBACReleases(state.appKey)).items || []); } catch (error) { fail(error, '加载发布版本失败'); } finally { setLoading(false); } }, [state.appKey]);
-  useEffect(() => { void load(); }, [load]);
-  const publish = async () => { if (publishing) return; setPublishing(true); try { await publishRBAC(state.appKey, description || '发布应用权限配置'); await load(); } catch (error) { fail(error, '发布失败'); } finally { setPublishing(false); } };
-  const columns: TableProps<Release>['columns'] = [
-    { colKey: 'version', title: '版本', width: 100, cell: ({ row }) => `v${row.version}` },
-    { colKey: 'status', title: '状态', width: 120, cell: ({ row }) => <Tag theme={row.status === 'published' ? 'success' : 'default'} variant="light-outline">{row.status === 'published' ? '当前发布' : '已替代'}</Tag> },
-    { colKey: 'description', title: '说明', minWidth: 200 },
-    { colKey: 'published_at', title: '时间', minWidth: 200 },
-  ];
-  return <Guard state={state}><Page title="发布与版本" actions={<Button theme="primary" loading={publishing} onClick={() => void publish()}>发布当前配置</Button>}>
-    <Card className="rbac-card"><Form labelAlign="top" colon={false}><Form.FormItem label="版本说明"><><Input value={description} onChange={setDescription} /></></Form.FormItem></Form></Card>
-    <Card className="rbac-card rbac-table-card"><Table<Release> rowKey="id" data={items} columns={columns} loading={loading} hover tableLayout="auto" empty={<Empty text="尚无发布版本" />} /></Card>
-  </Page></Guard>;
-};
-
-const Simulate = ({ state }: { state: State }) => {
-  const [form, setForm] = useState({ service_resource: '', subject: '', domain: 'global', method: 'GET', path: '' });
-  const [result, setResult] = useState<unknown>(null);
-  const [running, setRunning] = useState(false);
-  useEffect(() => { setForm(current => ({ ...current, service_resource: current.service_resource || state.services.find(item => item.isActive)?.key || '' })); }, [state.services]);
-  const run = async () => { if (running) return; setRunning(true); try { setResult(await simulateRBAC(state.appKey, form)); } catch (error) { fail(error, '权限测试失败'); } finally { setRunning(false); } };
-  return <Guard state={state}><Page title="权限模拟" actions={<Button theme="primary" loading={running} onClick={() => void run()}>运行测试</Button>}>
-    <Card className="rbac-card"><Form labelAlign="top" colon={false} onSubmit={() => void run()}><Row gutter={[16, 0]}>
-      <Col xs={12} md={6}><Form.FormItem label="目标服务"><><Select value={form.service_resource} options={state.services.filter(item => item.isActive).map(item => ({ label: `${item.displayName || item.key} · ${item.key}`, value: item.key }))} onChange={value => setForm({ ...form, service_resource: String(value) })} /></></Form.FormItem></Col>
-      <Col xs={12} md={6}><Form.FormItem label="Subject"><><Input value={form.subject} onChange={value => setForm({ ...form, subject: value })} /></></Form.FormItem></Col>
-      <Col xs={12} md={6}><Form.FormItem label="Domain"><><Input value={form.domain} onChange={value => setForm({ ...form, domain: value })} /></></Form.FormItem></Col>
-      <Col xs={12} md={6}><Form.FormItem label="HTTP 方法"><><Select value={form.method} options={['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(value => ({ label: value, value }))} onChange={value => setForm({ ...form, method: String(value) })} /></></Form.FormItem></Col>
-      <Col span={12}><Form.FormItem label="Path"><><Input value={form.path} onChange={value => setForm({ ...form, path: value })} /></></Form.FormItem></Col>
-    </Row></Form></Card>
-    <Card className="rbac-card" title="测试结果">{result && typeof result === 'object' ? <Descriptions column={1} bordered items={Object.entries(result).map(([label, value]) => ({ label, content: typeof value === 'boolean' ? <Tag theme={value ? 'success' : 'danger'}>{String(value)}</Tag> : Array.isArray(value) ? value.join('、') || '-' : String(value ?? '-') }))} /> : <Empty text="输入请求后运行测试" />}</Card>
-  </Page></Guard>;
-};
-
-export default function WorkbenchPage() { const state = useRBAC(); const location = useLocation(); if (location.pathname.startsWith('/roles/')) return <RoleEditor key={`${state.appKey}:${location.pathname}`} state={state} />; switch (location.pathname) { case '/service-resources': return <Services state={state} />; case '/api-resources': return <APIs state={state} />; case '/roles': return <Roles key={state.appKey} state={state} />; case '/menus': return <Menus state={state} />; case '/releases': return <Releases state={state} />; case '/simulate': return <Simulate state={state} />; default: return <Overview state={state} />; } }
+export default function WorkbenchPage() { const state = useRBAC(); const location = useLocation(); if (location.pathname.startsWith('/roles/')) return <RoleEditor key={`${state.appKey}:${location.pathname}`} state={state} />; switch (location.pathname) { case '/service-resources': return <Services state={state} />; case '/api-resources': return <APIs state={state} />; case '/roles': return <Roles key={state.appKey} state={state} />; case '/menus': return <Menus state={state} />; case '/simulate': return <Simulate key={state.appKey} state={state} />; default: return <Overview state={state} />; } }

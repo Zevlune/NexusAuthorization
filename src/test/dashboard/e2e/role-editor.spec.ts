@@ -193,7 +193,7 @@ async function mockRoleEditor(page: Page, options: { roles?: RoleSeed[]; menus?:
       await route.fulfill({ json: { success: true, result: role } });
       return;
     }
-    if (path === '/api/v1/rbac-v1/subject-roles' || path === '/api/v1/rbac-v1/releases') {
+    if (path === '/api/v1/rbac-v1/subject-roles') {
       await route.fulfill({ json: { success: true, result: { items: [] } } });
       return;
     }
@@ -308,6 +308,8 @@ test('菜单与按钮：定位不授权、开关只选本节点、按钮补齐�
   await expect(buttonCard(page, '导出订单')).toBeVisible();
   await page.screenshot({ path: screenshotPath('menus'), fullPage: true, animations: 'disabled' });
 
+  // 新增角色保存入口必须明确提示授权即时生效。
+  await expect(editor(page).locator('.role-editor-save-hint')).toHaveText('保存后角色授权立即生效。');
   await saveButton(page).click();
   await expect(page).toHaveURL(/\/roles$/);
   expect(state.saved).toHaveLength(1);
@@ -403,6 +405,8 @@ test('编辑角色：编码锁定、回显授权、停用 API 授权保留且可
   await expect(endpointCheckbox(page, 'ep-report-publish')).not.toBeChecked();
   await expect(tab(page, /API 接口/)).toHaveText('API 接口 · 1');
 
+  // 编辑角色保存入口必须明确提示授权即时生效。
+  await expect(editor(page).locator('.role-editor-save-hint')).toHaveText('保存后角色授权立即生效。');
   await saveButton(page).click();
   await expect(page).toHaveURL(/\/roles$/);
   expect(state.saved).toHaveLength(1);

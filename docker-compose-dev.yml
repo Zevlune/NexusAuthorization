@@ -23,6 +23,10 @@ services:
     platform: linux/amd64
     environment:
       NEXUSAUTHORIZATION_DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB:-nexus-authorization} user=${POSTGRES_USER:-postgres} password=${POSTGRES_PASSWORD:-postgres} sslmode=disable"
+      NEXUSAUTHORIZATION_REDIS_URL: ${NEXUSAUTHORIZATION_REDIS_URL:-}
+      NEXUSAUTHORIZATION_REDIS_KEY_PREFIX: ${NEXUSAUTHORIZATION_REDIS_KEY_PREFIX:-nexusauthorization:dev}
+      NEXUSAUTHORIZATION_REDIS_CACHE_TTL: ${NEXUSAUTHORIZATION_REDIS_CACHE_TTL:-24h}
+      NEXUSAUTHORIZATION_REDIS_TIMEOUT: ${NEXUSAUTHORIZATION_REDIS_TIMEOUT:-200ms}
       NEXUSAUTHORIZATION_OIDC_ENABLED: '${NEXUSAUTHORIZATION_OIDC_ENABLED:-false}'
       NEXUSAUTHORIZATION_OIDC_AUTHORITY: ${NEXUSAUTHORIZATION_OIDC_AUTHORITY:-http://localhost:5100}
       NEXUSAUTHORIZATION_OIDC_BACKCHANNEL_AUTHORITY: ${NEXUSAUTHORIZATION_OIDC_BACKCHANNEL_AUTHORITY:-}
@@ -47,7 +51,7 @@ services:
         condition: service_healthy
     expose: ['8080']
     healthcheck:
-      test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/healthz']
+      test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/api/healthz']
       interval: 5s
       timeout: 5s
       retries: 30

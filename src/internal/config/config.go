@@ -14,6 +14,7 @@ type Config struct {
 	HTTP            HTTPConfig            `yaml:"http"`
 	Logging         LoggingConfig         `yaml:"logging"`
 	Database        DatabaseConfig        `yaml:"database"`
+	Redis           RedisConfig           `yaml:"redis"`
 	OIDC            OIDCConfig            `yaml:"oidc"`
 	ServiceResource ServiceResourceConfig `yaml:"service_resource"`
 	Authorization   AuthorizationConfig   `yaml:"authorization"`
@@ -143,6 +144,10 @@ func Load(path string) (*Config, error) {
 		cfg.Database.URL = value
 	}
 	applyOIDCEnv(&cfg.OIDC)
+	applyRedisEnv(&cfg.Redis)
+	if err := cfg.Redis.Validate(); err != nil {
+		return nil, err
+	}
 	if value := os.Getenv("NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL"); value != "" {
 		cfg.Authorization.ServiceCredential = value
 	}

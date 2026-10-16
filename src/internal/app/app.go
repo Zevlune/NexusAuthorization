@@ -10,6 +10,7 @@ import (
 	"github.com/luck/nexus-authorization/internal/config"
 	"github.com/luck/nexus-authorization/internal/data/db"
 	"github.com/luck/nexus-authorization/internal/data/db/repo"
+	"github.com/luck/nexus-authorization/internal/data/rediscache"
 )
 
 type Application struct {
@@ -19,6 +20,7 @@ type Application struct {
 	RBACV1           *biz.RBACV1Service
 	Auth             *auth.Service
 	Users            *biz.NexusAuthSCIMClient
+	PolicyCache      *rediscache.PolicyCache
 }
 
 // New 创建权限中心应用，并完成数据库仓储、业务服务和认证服务的装配。
@@ -52,11 +54,22 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 		}
 	}
 	apiEndpoints := biz.NewAPIEndpointService(repo.NewAPIEndpointRepository(pool)).WithServiceResourceCatalog(serviceResources)
+	rbacRepository := repo.NewRBACV1Repository(pool, serviceResources)
+	var policyCache *rediscache.PolicyCache
+	if strings.TrimSpace(cfg.Redis.URL) != "" {
+		policyCache, err = rediscache.New(cfg.Redis)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		rbacRepository.WithPolicyCache(policyCache)
+	}
 	return &Application{
 		Pool:             pool,
 		ServiceResources: serviceResources,
 		APIEndpoints:     apiEndpoints,
-		RBACV1:           biz.NewRBACV1Service(repo.NewRBACV1Repository(pool, serviceResources)),
+		RBACV1:           biz.NewRBACV1Service(rbacRepository),
+		PolicyCache:      policyCache,
 		Auth:             authenticator,
 		Users:            users,
 	}, nil
@@ -80,6 +93,9 @@ func newServiceResourceCatalog(repository biz.ServiceResourceRepository, cfg con
 
 // Close 释放应用持有的数据库连接池。
 func (a *Application) Close() {
+	if a != nil && a.PolicyCache != nil {
+		_ = a.PolicyCache.Close()
+	}
 	if a != nil && a.Pool != nil {
 		a.Pool.Close()
 	}

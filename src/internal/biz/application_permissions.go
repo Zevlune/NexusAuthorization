@@ -91,26 +91,27 @@ func (s *RBACV1Service) DeleteApplicationMenu(ctx context.Context, app string, i
 	return repo.DeleteApplicationMenu(ctx, app, id)
 }
 
-// SubjectMenus reads the same immutable release used by API authorization.
+// SubjectMenus reads currently saved role and member permissions.
 func (s *RBACV1Service) SubjectMenus(ctx context.Context, app, subject, domain string) ([]ApplicationMenu, error) {
-	if strings.TrimSpace(app) == "" || strings.TrimSpace(subject) == "" || strings.TrimSpace(domain) == "" {
+	if strings.TrimSpace(app) == "" || strings.TrimSpace(subject) == "" {
 		return nil, ErrInvalidArgument
 	}
-	release, err := s.repository.GetActiveRBACRelease(ctx, app)
+	policy, err := s.currentPolicy(ctx, app)
 	if err != nil {
 		return nil, err
 	}
-	return subjectMenusFromSnapshot(release.Snapshot, subject, domain), nil
+	return subjectMenusFromPolicy(policy.Data, subject, domain), nil
 }
-func subjectMenusFromSnapshot(snap map[string]any, subject, domain string) []ApplicationMenu {
+func subjectMenusFromPolicy(snap map[string]any, subject, domain string) []ApplicationMenu {
 	bindings, _ := snap["subject_roles"].([]any)
 	roles, _ := snap["roles"].([]any)
 	rawMenus, _ := snap["menus"].([]any)
 	roleIDs := map[string]bool{}
 	grants := map[string]bool{}
+	normalizedDomain := NormalizeRBACDomain(domain)
 	for _, raw := range bindings {
 		b, _ := raw.(map[string]any)
-		if b["subject"] == subject && b["domain"] == domain {
+		if b["subject"] == subject && NormalizeRBACDomain(policyString(b["domain"])) == normalizedDomain {
 			roleIDs[fmt.Sprint(b["role_id"])] = true
 		}
 	}
