@@ -91,14 +91,14 @@ func TestRBACV1AuthorizeDirectRoleEndpoint(t *testing.T) {
 
 func TestRBACV1AuthorizeMatchesOpenAPIPathParameter(t *testing.T) {
 	records := directPolicyData(true, true)
-	records["endpoints"].([]any)[0].(map[string]any)["path_template"] = "/v1/authorization/api-endpoints/{id}"
+	records["endpoints"].([]any)[0].(map[string]any)["path_template"] = "/v1/orders/{id}"
 	service := NewRBACV1Service(&rbacV1FakeRepository{active: CurrentPolicy{Data: records}})
 
-	allowed, err := service.Authorize(context.Background(), "test", map[string]any{"subject": "user-1", "domain": "tenant-a", "service_resource": "order-service", "method": "GET", "path": "/v1/authorization/api-endpoints/1"})
+	allowed, err := service.Authorize(context.Background(), "test", map[string]any{"subject": "user-1", "domain": "tenant-a", "service_resource": "order-service", "method": "GET", "path": "/v1/orders/1"})
 	if err != nil || !allowed.Allowed {
 		t.Fatalf("parameterized endpoint should allow: decision=%+v err=%v", allowed, err)
 	}
-	nested, err := service.Authorize(context.Background(), "test", map[string]any{"subject": "user-1", "domain": "tenant-a", "service_resource": "order-service", "method": "GET", "path": "/v1/authorization/api-endpoints/1/extra"})
+	nested, err := service.Authorize(context.Background(), "test", map[string]any{"subject": "user-1", "domain": "tenant-a", "service_resource": "order-service", "method": "GET", "path": "/v1/orders/1/extra"})
 	if err != nil || nested.Allowed || nested.Reason != "endpoint_not_found" {
 		t.Fatalf("template must not match multiple path segments: decision=%+v err=%v", nested, err)
 	}

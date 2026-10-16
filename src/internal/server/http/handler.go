@@ -15,7 +15,6 @@ import (
 type Handler struct {
 	serviceResources               biz.ServiceResourceCatalog
 	serviceResourceService         *biz.ServiceResourceService
-	apiEndpoints                   *biz.APIEndpointService
 	rbacV1                         *biz.RBACV1Service
 	authorizationServiceCredential string
 	auth                           *auth.Service
@@ -30,9 +29,6 @@ func (h *Handler) WithAuthorizationServiceCredential(credential string) *Handler
 // WithServiceResourceCatalog 注入只读服务资源目录，供服务资源查询接口使用。
 func (h *Handler) WithServiceResourceCatalog(catalog biz.ServiceResourceCatalog) *Handler {
 	h.serviceResources = catalog
-	if h.apiEndpoints != nil {
-		h.apiEndpoints.WithServiceResourceCatalog(catalog)
-	}
 	return h
 }
 

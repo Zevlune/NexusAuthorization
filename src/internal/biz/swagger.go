@@ -19,6 +19,11 @@ import (
 
 const maxSwaggerDocumentSize = 8 << 20
 
+const (
+	swaggerControllerMaxLength = 200
+	swaggerPathMaxLength       = 500
+)
+
 // SwaggerEndpoint is an import projection, not an authorization grant.
 type SwaggerEndpoint struct {
 	Method  string `json:"method"`
@@ -132,7 +137,7 @@ func parseSwaggerOperations(body []byte) ([]swaggerEndpointOperation, error) {
 	operations := make([]swaggerEndpointOperation, 0)
 	for route, item := range document.Paths {
 		for method, operation := range item.operations() {
-			if operation == nil || !isAPIEndpointHTTPMethod(method) {
+			if operation == nil || !isSwaggerHTTPMethod(method) {
 				continue
 			}
 			controller := swaggerController(*operation, document.Info.Title)
@@ -162,8 +167,28 @@ func parseSwaggerOperations(body []byte) ([]swaggerEndpointOperation, error) {
 }
 
 func validateSwaggerOperation(controller, method, pathTemplate string) error {
-	value := &APIEndpoint{Controller: controller, Method: method, PathTemplate: pathTemplate}
-	return normalizeAPIEndpoint(value)
+	controller = strings.TrimSpace(controller)
+	if controller == "" || len([]rune(controller)) > swaggerControllerMaxLength {
+		return fmt.Errorf("%w: controller must be 1-%d characters", ErrInvalidArgument, swaggerControllerMaxLength)
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if !isSwaggerHTTPMethod(method) {
+		return fmt.Errorf("%w: unsupported HTTP method %q", ErrInvalidArgument, method)
+	}
+	pathTemplate = strings.TrimSpace(pathTemplate)
+	if pathTemplate == "" || len([]rune(pathTemplate)) > swaggerPathMaxLength || !strings.HasPrefix(pathTemplate, "/") {
+		return fmt.Errorf("%w: path_template must be an absolute route path", ErrInvalidArgument)
+	}
+	return nil
+}
+
+func isSwaggerHTTPMethod(value string) bool {
+	switch value {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE":
+		return true
+	default:
+		return false
+	}
 }
 
 func fetchSwaggerDocument(ctx context.Context, rawURL string) ([]byte, error) {
@@ -329,8 +354,8 @@ func sanitizeSwaggerController(value string) string {
 	if value == "" {
 		return "default"
 	}
-	if len([]rune(value)) > apiEndpointControllerMaxLength {
-		return string([]rune(value)[:apiEndpointControllerMaxLength])
+	if len([]rune(value)) > swaggerControllerMaxLength {
+		return string([]rune(value)[:swaggerControllerMaxLength])
 	}
 	return value
 }

@@ -123,51 +123,6 @@ export type UpdateMenuRequest = {
   enabled: boolean;
 };
 
-export type APIEndpoint = {
-  id: string;
-  serviceResource: string;
-  controller: string;
-  method: string;
-  pathTemplate: string;
-  summary: string;
-  enabled: boolean;
-  createdById?: string;
-  createdByName?: string;
-  createdAt?: string;
-  updatedById?: string;
-  updatedByName?: string;
-  updatedAt?: string;
-};
-
-export type CreateAPIEndpointRequest = {
-  service_resource: string;
-  controller: string;
-  method: string;
-  path_template: string;
-  summary?: string;
-  enabled?: boolean;
-};
-
-export type UpdateAPIEndpointRequest = {
-  controller: string;
-  method: string;
-  path_template: string;
-  summary: string;
-  enabled: boolean;
-};
-
-export type ImportSwaggerAPIEndpointsRequest = {
-  service_resource: string;
-  swagger_url: string;
-};
-
-export type ImportSwaggerAPIEndpointsResult = {
-  total: number;
-  created: number;
-  skipped: number;
-};
-
-
 type RawRecord = Record<string, unknown>;
 
 const rawString = (record: RawRecord, ...keys: string[]): string => {
@@ -288,26 +243,6 @@ const normalizeMenuHTTPMethod = (value: string): MenuHTTPMethod | '' => {
   }
 };
 
-const normalizeAPIEndpoint = (value: unknown): APIEndpoint => {
-  const record = (value && typeof value === 'object' ? value : {}) as RawRecord;
-  return {
-    id: rawString(record, 'id', 'ID'),
-    serviceResource: rawString(record, 'service_resource', 'serviceResource', 'ServiceResource'),
-    controller: rawString(record, 'controller', 'Controller'),
-    method: rawString(record, 'method', 'Method').toUpperCase(),
-    pathTemplate: rawString(record, 'path_template', 'pathTemplate', 'PathTemplate'),
-    summary: rawString(record, 'summary', 'Summary'),
-    enabled: rawBoolean(record, 'enabled', 'Enabled'),
-    createdById: rawString(record, 'created_by_id', 'createdById', 'CreatedByID') || undefined,
-    createdByName: rawString(record, 'created_by_name', 'createdByName', 'CreatedByName') || undefined,
-    createdAt: rawDate(record, 'created_at', 'createdAt', 'CreatedAt'),
-    updatedById: rawString(record, 'updated_by_id', 'updatedById', 'UpdatedByID') || undefined,
-    updatedByName: rawString(record, 'updated_by_name', 'updatedByName', 'UpdatedByName') || undefined,
-    updatedAt: rawDate(record, 'updated_at', 'updatedAt', 'UpdatedAt'),
-  };
-};
-
-
 const readItems = (value: unknown): unknown[] => {
   if (Array.isArray(value)) {
     return value;
@@ -415,44 +350,6 @@ export const deleteMenu = async (menuID: string): Promise<void> => {
   await request.delete<unknown>(`/v1/menus/${encodeURIComponent(menuID)}`);
   dispatchMenuChange();
 };
-
-export const listAPIEndpoints = async (serviceResource: string): Promise<APIEndpoint[]> => {
-  const response = await request.get<unknown>(
-    `/v1/authorization/api-endpoints?service_resource=${encodeURIComponent(serviceResource.trim())}`,
-  );
-  return readItems(response).map(normalizeAPIEndpoint);
-};
-
-export const createAPIEndpoint = async (payload: CreateAPIEndpointRequest): Promise<APIEndpoint> => {
-  const response = await request.post<unknown>('/v1/authorization/api-endpoints', payload);
-  return normalizeAPIEndpoint(readItem(response));
-};
-
-export const updateAPIEndpoint = async (endpointID: string, payload: UpdateAPIEndpointRequest): Promise<APIEndpoint> => {
-  const response = await request.put<unknown>(
-    `/v1/authorization/api-endpoints/${encodeURIComponent(endpointID)}`,
-    payload,
-  );
-  return normalizeAPIEndpoint(readItem(response));
-};
-
-export const deleteAPIEndpoint = async (endpointID: string): Promise<void> => {
-  await request.delete<unknown>(`/v1/authorization/api-endpoints/${encodeURIComponent(endpointID)}`);
-};
-
-export const importSwaggerAPIEndpoints = async (
-  payload: ImportSwaggerAPIEndpointsRequest,
-): Promise<ImportSwaggerAPIEndpointsResult> => {
-  const response = await request.post<unknown>('/v1/authorization/api-endpoints/import-swagger', payload);
-  const item = readItem(response);
-  const record = (item && typeof item === 'object' ? item : {}) as RawRecord;
-  return {
-    total: rawNumber(record, 'total', 'Total'),
-    created: rawNumber(record, 'created', 'Created'),
-    skipped: rawNumber(record, 'skipped', 'Skipped'),
-  };
-};
-
 
 export const getUserRoleIDs = async (userID: string, serviceResource: string): Promise<string[]> => {
   const response = await request.get<unknown>(

@@ -69,12 +69,10 @@ func TestSwaggerUIAndOpenAPIDocument(t *testing.T) {
 		{path: "/api/v1/rbac-v1/menus", method: "post"},
 		{path: "/api/v1/rbac-v1/menus/{id}", method: "delete"},
 		{path: "/api/v1/rbac-v1/subject-menus", method: "get"},
-		{path: "/api/v1/authorization/api-endpoints", method: "post"},
-		{path: "/api/v1/authorization/api-endpoints", method: "get"},
-		{path: "/api/v1/authorization/api-endpoints/import-swagger", method: "post"},
-		{path: "/api/v1/authorization/api-endpoints/{id}", method: "get"},
-		{path: "/api/v1/authorization/api-endpoints/{id}", method: "put"},
-		{path: "/api/v1/authorization/api-endpoints/{id}", method: "delete"},
+		{path: "/api/v1/rbac-v1/endpoints", method: "get"},
+		{path: "/api/v1/rbac-v1/endpoints", method: "post"},
+		{path: "/api/v1/rbac-v1/endpoints/import-swagger", method: "post"},
+		{path: "/api/v1/rbac-v1/endpoints/{id}", method: "delete"},
 	} {
 		pathItem, ok := paths[operation.path].(map[string]any)
 		if !ok || pathItem[operation.method] == nil {

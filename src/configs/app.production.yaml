@@ -8,7 +8,7 @@ database:
   url: ""
   max_conns: 10
   min_conns: 2
-# Optional cache for current saved permissions; empty URL disables Redis.
+# Required runtime store for service API authorization.
 redis:
   url: ""
   key_prefix: "nexusauthorization:prod"

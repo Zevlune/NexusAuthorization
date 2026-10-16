@@ -16,7 +16,7 @@ Subject + Domain -> Application -> Role -> API Endpoint
 - 角色和菜单属于应用；角色只能授予应用已关联服务中的 API。
 - 菜单直接属于应用，不要求创建 OAuth 客户端。
 - 应用停用立即生效；API、角色、菜单和主体角色绑定在保存提交后立即生效。
-- 运行时鉴权和模拟每次先从 PostgreSQL 确认启用应用、缓存失效标记和当前服务目录，再复用本地的编译索引；索引缺失时从 Redis 当前记录或 PostgreSQL 当前表加载并编译。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
+- 运行时鉴权和模拟直接以 Redis 为授权来源：每个「应用 key＋主体＋服务＋归一化 domain」读取一条 `SubjectAPIPolicy` 记录，不读取数据库、不回源；Redis 未配置、记录缺失或不 ready 时直接拒绝。菜单和全策略适配器走独立的 current-policy 路径，读取当前规范化业务表并在进程内编译。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
 
 当前版本不包含显式 `deny`、策略文档、策略审批、数据行级/字段级权限、ABAC、用户组、组织架构，也不提供发布版本、历史快照和版本回滚接口。
 
@@ -267,17 +267,19 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 ```text
 写入请求（角色 / 授权 / 菜单 / 绑定 / 服务关联 / API / 目录）
 -> 仓储检查与数据库唯一约束、触发器校验
--> 提交当前表和事务内刷新的 applications.policy_token
+-> 提交当前业务表
+-> 控制面把受影响应用置为 state=updating，删除旧记录、分批写入新记录
+-> 全部写完后置为 state=ready
 -> 提交后开始的鉴权请求读取新权限
 ```
 
-- `applications.policy_token` 是随机 UUID 缓存失效标记，在权限数据变更语句中按受影响应用刷新；它不是业务版本，不进入 Redis key，也不在响应中返回。
-- 语句级触发器覆盖角色、角色 API/菜单授权、主体角色绑定、菜单、应用服务关联、API 端点和服务资源；一次批量语句每个受影响应用只刷新一次标记，回滚时标记和权限一起回滚。
-- 每次鉴权先从 PostgreSQL 确认启用应用、失效标记和配置目录中的有效服务集合，再复用本地编译索引；索引缺失时读取 Redis 当前记录或 PostgreSQL 当前表。
-- 写请求不等待 Redis；Redis 不可用或回填失败只影响缓存命中率。缓存标记校验失败时回源当前表，不会用旧记录放行。
-- 提交前已开始读取的在途请求可以完成其已读到的判断；提交后开始的请求使用新权限。
+- 服务 API 授权直接以 Redis 为准：每个「应用 key＋主体＋服务＋归一化 domain」的 `SubjectAPIPolicy` 是普通 JSON，无版本号、不设 TTL；保存的业务表写入与 Redis 重建由控制面顺序执行，数据库不保存任何缓存标记。
+- 受影响应用在重建期间 `state=updating`，并发鉴权直接拒绝；删除先于写入、闸门最后打开，不会读到半写集合。任何一步失败都保持 `updating`，下一次重建重试。
+- 角色 API/菜单授权、主体角色绑定、应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用；纯菜单保存只影响 current-policy 路径。
+- 鉴权（含权限模拟）只读 Redis，不读取数据库、不回源；Redis 未配置、记录缺失、`state=updating`、损坏或超时都拒绝。
+- 提交前已开始读取的在途请求可以完成其已读到的判断；提交并重建后开始的请求使用新权限。
 
-事务、单飞、缓存容量、TTL 和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
+菜单 current-policy 路径读取当前规范化业务表并计算内容摘要，在进程内编译，不依赖服务 API Redis 记录；Redis 未配置时菜单仍可用。事务、单飞、缓存容量和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
 
 ## 8. 运行时鉴权
 
@@ -324,11 +326,11 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 算法：
 
 ```text
-1. 按 appKey 查找启用应用、缓存失效标记和配置目录中的有效服务集合。
-2. 复用对应身份的本地编译索引；未命中时从 Redis 当前记录或 PostgreSQL 当前表加载并编译。
+1. 用 appKey、服务、subject 和归一化 domain 直接从 Redis 读取该身份的 SubjectAPIPolicy 记录（Lua 原子读取 state + record）。
+2. Redis 未配置、应用未 ready、记录缺失或读取出错 -> 拒绝；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
 3. 通过 service_resource + method 定位路由集合，使用静态哈希或参数 Trie 匹配 Endpoint，固定路径段更多者优先；同优先级不同 Endpoint 冲突时拒绝。
-4. 通过 subject + 归一化 domain 的哈希键定位用户的启用角色位图；`domain` 省略、空白或旧 `global` 都归一为空默认域。
-5. 用户角色位图与目标 Endpoint 的授权角色位图有交集 -> ALLOW，否则 DENY。
+4. 记录已按 subject + 归一化 domain 聚合；`domain` 省略、空白或旧 `global` 都归一为空默认域。
+5. 目标 Endpoint 在该用户的 API 授权并集内且服务启用 -> ALLOW，否则 DENY。
 ```
 
 `reason` 取值：
@@ -374,10 +376,10 @@ GET /api/v1/users?filter=userName%20eq%20%22alice%22&startIndex=1&count=100
 
 ## 11. 数据模型
 
-由 `migrations/001_init.sql` 创建的 10 张表（9 张应用 RBAC 及服务目录表，1 张兼容 API 目录表）：
+由 `migrations/001_init.sql` 创建的 9 张应用 RBAC 及服务目录表：
 
 ```text
-applications(id, app_key UNIQUE, display_name, description, url, enabled, policy_token, ...)
+applications(id, app_key UNIQUE, display_name, description, url, enabled, ...)
 service_resources(id, resource_key UNIQUE, display_name, audience, description, source, external_id, enabled, ...)
 application_service_resources(application_id, service_resource_key, PRIMARY KEY(application_id, service_resource_key))
 api_endpoints(id, service_resource_key, endpoint_key, method, path_template, module, summary, source, enabled, ...)
@@ -386,27 +388,11 @@ menus(id, application_id, parent_id, menu_type, code, name, route, component, ic
 role_api_endpoint_bindings(role_id, endpoint_id, PRIMARY KEY(role_id, endpoint_id))
 role_menu_bindings(role_id, menu_id, PRIMARY KEY(role_id, menu_id))
 subject_role_bindings(id, application_id, subject, domain, role_id, ...)
-authorization_api_endpoints(id, service_resource, controller, method, path_template, summary, enabled, is_deleted, ...)
 ```
 
-应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用、角色/主体绑定不跨应用，并在 8 张权限表变更时刷新应用的 `policy_token`。`subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`，默认域是空串，具名域按原值隔离。以上结构由首次初始化脚本直接创建。
+应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用，并保护服务资源启停与服务关联解除。数据库不保存 `policy_token`、角色/服务 revision 或发布历史；服务 API 授权直接以 Redis 为准。`subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`，默认域是空串，具名域按原值隔离。以上结构由首次初始化脚本直接创建。
 
-## 12. 共享目录遗留路由
-
-服务器仍注册 `/api/v1/authorization/api-endpoints*` 的服务目录级 Endpoint 路由，并在 handler 路由测试与 OpenAPI 文档中保留：
-
-| 方法 | 路径 |
-| --- | --- |
-| GET | `/api/v1/authorization/api-endpoints` |
-| POST | `/api/v1/authorization/api-endpoints` |
-| POST | `/api/v1/authorization/api-endpoints/import-swagger` |
-| GET | `/api/v1/authorization/api-endpoints/{id}` |
-| PUT | `/api/v1/authorization/api-endpoints/{id}` |
-| DELETE | `/api/v1/authorization/api-endpoints/{id}` |
-
-这些路由由 `biz.APIEndpointService` 提供，请求字段为 `service_resource, controller, method, path_template, summary, enabled`，其仓储读写 `authorization_api_endpoints`。它们与 RBAC v1 使用的 `api_endpoints` 表是两套数据：`migrations/001_init.sql` 同时创建这两个表，其中兼容目录保留审计字段与软删除。它们不是新的角色、菜单或主体绑定入口，也不参与应用 RBAC 的运行时权限记录；新工作台使用 `/api/v1/rbac-v1/*`。
-
-## 13. 当前未实现
+## 12. 当前未实现
 
 - 显式 `deny` 及 deny 优先级；
 - 权限编码、策略文档、策略审批、审批流；

@@ -13,7 +13,10 @@ import (
 
 const serviceResourceColumns = `id, resource_key, source, external_id, display_name, audience, description, enabled, created_at, updated_at`
 
-type ServiceResourceRepository struct{ pool *pgxpool.Pool }
+type ServiceResourceRepository struct {
+	pool           *pgxpool.Pool
+	subjectAPISync func(context.Context, string) error
+}
 
 var _ biz.ServiceResourceRepository = (*ServiceResourceRepository)(nil)
 var _ biz.ServiceResourceSourceRepository = (*ServiceResourceRepository)(nil)
@@ -22,12 +25,28 @@ func NewServiceResourceRepository(pool *pgxpool.Pool) *ServiceResourceRepository
 	return &ServiceResourceRepository{pool: pool}
 }
 
+// WithSubjectAPISync wires direct Redis publication for service-status
+// changes. The callback is optional for isolated repository tests.
+func (r *ServiceResourceRepository) WithSubjectAPISync(sync func(context.Context, string) error) *ServiceResourceRepository {
+	r.subjectAPISync = sync
+	return r
+}
+
 func (r *ServiceResourceRepository) Create(ctx context.Context, input *biz.ServiceResource) (*biz.ServiceResource, error) {
 	if input == nil || strings.TrimSpace(input.Key) == "" || strings.TrimSpace(input.DisplayName) == "" {
 		return nil, fmt.Errorf("%w: key and display_name are required", biz.ErrInvalidArgument)
 	}
-	return r.scan(r.pool.QueryRow(ctx, `INSERT INTO service_resources(resource_key,display_name,audience,description,source,enabled) VALUES($1,$2,$3,$4,'local',$5) RETURNING `+serviceResourceColumns,
+	value, err := r.scan(r.pool.QueryRow(ctx, `INSERT INTO service_resources(resource_key,display_name,audience,description,source,enabled) VALUES($1,$2,$3,$4,'local',$5) RETURNING `+serviceResourceColumns,
 		strings.TrimSpace(input.Key), strings.TrimSpace(input.DisplayName), strings.TrimSpace(input.Audience), strings.TrimSpace(input.Description), input.IsActive))
+	if err != nil {
+		return nil, err
+	}
+	if r.subjectAPISync != nil {
+		if err := r.subjectAPISync(ctx, value.Key); err != nil {
+			return nil, err
+		}
+	}
+	return value, nil
 }
 
 func (r *ServiceResourceRepository) Get(ctx context.Context, key string) (*biz.ServiceResource, error) {
@@ -81,8 +100,17 @@ func (r *ServiceResourceRepository) Update(ctx context.Context, input *biz.Servi
 	if input == nil || strings.TrimSpace(input.Key) == "" || strings.TrimSpace(input.DisplayName) == "" {
 		return nil, fmt.Errorf("%w: key and display_name are required", biz.ErrInvalidArgument)
 	}
-	return r.scan(r.pool.QueryRow(ctx, `UPDATE service_resources SET display_name=$2,audience=$3,description=$4,enabled=$5,updated_at=NOW() WHERE resource_key=$1 AND source='local' RETURNING `+serviceResourceColumns,
+	value, err := r.scan(r.pool.QueryRow(ctx, `UPDATE service_resources SET display_name=$2,audience=$3,description=$4,enabled=$5,updated_at=NOW() WHERE resource_key=$1 AND source='local' RETURNING `+serviceResourceColumns,
 		strings.TrimSpace(input.Key), strings.TrimSpace(input.DisplayName), strings.TrimSpace(input.Audience), strings.TrimSpace(input.Description), input.IsActive))
+	if err != nil {
+		return nil, err
+	}
+	if r.subjectAPISync != nil {
+		if err := r.subjectAPISync(ctx, value.Key); err != nil {
+			return nil, err
+		}
+	}
+	return value, nil
 }
 
 func (r *ServiceResourceRepository) SoftDelete(ctx context.Context, key string) error {
@@ -92,6 +120,11 @@ func (r *ServiceResourceRepository) SoftDelete(ctx context.Context, key string) 
 	}
 	if tag.RowsAffected() == 0 {
 		return biz.ErrNotFound
+	}
+	if r.subjectAPISync != nil {
+		if err := r.subjectAPISync(ctx, strings.TrimSpace(key)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

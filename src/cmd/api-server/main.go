@@ -52,7 +52,6 @@ func run() int {
 			httpserver.NewHandler(application.Auth).
 				WithServiceResourceCatalog(application.ServiceResources).
 				WithServiceResourceService(application.ServiceResources).
-				WithAPIEndpointService(application.APIEndpoints).
 				WithRBACV1Service(application.RBACV1).
 				WithUserDirectory(application.Users).
 				WithAuthorizationServiceCredential(cfg.Authorization.ServiceCredential),

@@ -22,7 +22,7 @@
 | 按钮 | 菜单页面内的操作权限节点 | `orders:create`：创建订单 |
 | 角色 | 组合应用的菜单/按钮和已关联服务 API | 订单管理员 |
 | 主体与域 | 标识被授权的身份及其授权上下文 | `subject=user-001`，`domain=''`（默认域，可省略） |
-| 失效标记 | 数据库事务内更新的缓存身份 | `applications.policy_token` |
+| 服务 API 授权记录 | 保存业务表后重建、鉴权只读的 Redis 记录 | `PREFIX:rbac:api:app:<app_key>:user:...:service:...:domain:...` |
 
 应用与服务是多对多：一个应用可关联多个服务，同一服务可被多个应用复用。API 属于服务，角色和菜单属于应用。关联服务不会自动给用户或角色授予 API 权限。
 
@@ -92,7 +92,7 @@ flowchart LR
 - 保存/导入期间显示加载状态并防止重复提交；失败后保留表单并展示错误。
 - 删除接口前需要确认。
 
-API 是共享目录。某个应用编辑服务的 API 元数据，会修改这条共享接口定义；各应用仍需分别配置角色授权。共享接口的启用、路径或删除变更会通过数据库触发器使所有关联应用的缓存失效。导入目前逐条保存，不是整批原子事务；中途失败时，已成功写入的接口可能保留，重试通过已存在路径的跳过逻辑继续处理。
+API 是共享目录。某个应用编辑服务的 API 元数据，会修改这条共享接口定义；各应用仍需分别配置角色授权。共享接口的启用、路径或删除变更会触发所有关联应用的服务 API Redis 记录重建。导入目前逐条保存，不是整批原子事务；中途失败时，已成功写入的接口可能保留，重试通过已存在路径的跳过逻辑继续处理。
 
 ### 2.4 菜单与按钮
 
@@ -133,11 +133,11 @@ API 授权与菜单/按钮授权是两组独立绑定。目前没有“按钮绑
 
 ### 2.7 权限模拟与保存生效
 
-- 权限模拟调用与运行时相同的授权逻辑，读取应用当前已保存的服务关联、接口、角色、主体绑定和菜单树，不读取草稿或历史版本。
-- 管理保存只提交数据库当前表和缓存失效标记，没有发布按钮、版本说明、版本历史或 JSONB 快照表。
-- 数据库触发器在语句级把受影响应用的 `applications.policy_token` 刷新为新的随机 UUID；该标记只是缓存身份，不提供版本序列、回滚或发布操作。
-- 每次鉴权先读取启用应用、失效标记和当前服务目录，再查本地编译索引；本地未命中时读 Redis 当前记录或 PostgreSQL 当前表。详细规则见 [权限生效设计](permission-lifecycle.md)。
-- 配置目录为远程模式时，服务目录读取发生在请求路径；目录读取失败会返回错误并拒绝放行，而不是使用无法验证的旧缓存。
+- 权限模拟与运行时鉴权走同一 Redis 路径，读取应用当前已保存的服务关联、接口、角色、主体绑定和菜单树，不读取草稿或历史版本。
+- 管理保存只提交数据库当前表，随后重建受影响应用的 Redis 服务 API 记录；没有发布按钮、版本说明、版本历史或 JSONB 快照表。
+- 数据库不保存任何缓存标记；`applications` 没有 `policy_token`，也没有角色/服务 revision 表，只保留四条业务保护触发器。
+- 每次服务 API 鉴权直接读取 Redis 中该「应用 key＋主体＋服务＋归一化 domain」的记录，不读取数据库；Redis 未配置、记录缺失或不 ready 时直接拒绝。详细规则见 [权限生效设计](permission-lifecycle.md)。
+- 菜单 current-policy 路径读取当前业务表并在进程内编译；配置目录为远程模式时，服务目录读取发生在请求路径，目录读取失败会返回错误并拒绝放行。
 
 应用停用会立即阻止该应用的鉴权请求；撤销角色、删除接口或解除服务关联在保存提交后同样立即生效。
 
@@ -186,7 +186,7 @@ Content-Type: application/json
 }
 ```
 
-判断原因包括 `allowed`、`service_resource_required`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。每次鉴权先从 PostgreSQL 确认启用应用、失效标记和当前服务目录，再复用对应身份的进程内编译索引。索引缺失时从 Redis 当前记录或 PostgreSQL 当前表加载并构建；匹配采用哈希、路径 Trie 和稀疏角色位图，详见 [鉴权匹配与性能](authorization-matching.md) 与 [Redis 接入说明](redis-integration.md)。响应不包含发布版本号；请求缺少必要字段、凭证不符或应用不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
+判断原因包括 `allowed`、`service_resource_required`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。每次服务 API 鉴权直接从 Redis 读取该「应用 key＋主体＋服务＋归一化 domain」的记录，再复用对应内容的进程内编译索引；Redis 未配置、记录缺失或不 ready 时直接拒绝，不回源数据库。匹配采用哈希、路径 Trie 和稀疏角色位图，详见 [鉴权匹配与性能](authorization-matching.md) 与 [Redis 接入说明](redis-integration.md)。响应不包含发布版本号；请求缺少必要字段、凭证不符或应用不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
 
 Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource, resolve, next)`。身份解析由接入服务负责；身份无效返回 401，鉴权错误或拒绝返回 403；SDK 请求默认有 3 秒超时。
 
@@ -205,11 +205,11 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 保存角色及授权 | `roles`、`role_api_endpoint_bindings`、`role_menu_bindings` | 为主体分配角色 |
 | 保存主体角色集合 | `subject_role_bindings` | 模拟/运行时验证 |
 
-建议操作顺序：创建应用 → 关联服务 → 导入 API 与配置菜单按钮 → 配置角色授权 → 分配用户角色 → 模拟并验证实际服务请求。每次保存提交后权限立即生效；上述权限表写入会通过数据库触发器刷新应用的缓存失效标记。
+建议操作顺序：创建应用 → 关联服务 → 导入 API 与配置菜单按钮 → 配置角色授权 → 分配用户角色 → 模拟并验证实际服务请求。每次保存提交后权限立即生效；上述权限表写入会触发受影响应用的服务 API Redis 记录重建。
 
 ## 5. 表结构总览
 
-共 **10 张表（9 张应用 RBAC 及服务目录表、1 张兼容 API 目录表）、3 个枚举、29 个数据库触发器、6 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键。触发器由 4 个业务保护/失效触发器、1 个应用标记刷新触发器和 24 个语句级失效触发器（8 张权限表各插入/更新/删除一次）组成。
+共 **9 张应用 RBAC 及服务目录表、3 个枚举、4 个业务保护触发器、6 个显式索引**。完整字段见 [数据库结构文档](current-database-schema.md)。服务资源关联和 API 端点通过 `service_resource_key VARCHAR(128)` 与当前目录逻辑关联，不建立指向 `service_resources` 的数据库外键。触发器只有 4 个业务保护触发器，没有应用标记刷新或语句级缓存失效触发器。
 
 | 表 | 含义 | 主键 / 关键关系 |
 | --- | --- | --- |
@@ -222,9 +222,8 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | `role_api_endpoint_bindings` | 角色授权 API | 复合主键 `(role_id, endpoint_id)` |
 | `role_menu_bindings` | 角色授权菜单/按钮 | 复合主键 `(role_id, menu_id)` |
 | `subject_role_bindings` | 应用内主体域角色绑定 | UUID `id`；应用/主体/域/角色组合唯一 |
-| `authorization_api_endpoints` | 兼容服务范围 API 目录 | UUID `id`；有效记录的服务/方法/路径唯一，保留审计与软删 |
 
-这 10 张表由 `001_init.sql` 创建；脚本无业务种子数据，可选应用地址 `applications.url` 已包含在初始 schema 中。第一次安装使用空库执行 `001_init.sql`，其中 `subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器，唯一自动更新的时间字段是应用 `policy_token`。
+这 9 张表由 `001_init.sql` 创建；脚本无业务种子数据，可选应用地址 `applications.url` 已包含在初始 schema 中。第一次安装使用空库执行 `001_init.sql`；其中 `subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`。字段 `updated_at` 的更新由写入代码负责，DDL 未设置自动更新时间触发器。
 
 ### 删除与停用语义
 
@@ -237,7 +236,7 @@ Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource,
 | 菜单/按钮 | 物理删除，子节点存在时被复合外键阻止 | `enabled=false`，保存提交后立即生效 |
 | 主体角色绑定 | `PUT` 替换时按 `subject + domain` 删除旧集合 | 无独立停用字段 |
 
-RBAC v1 这些表没有 `is_deleted` 软删标记；唯一的软删语义在遗留的 `authorization_api_endpoints.is_deleted`。当前没有发布版本、历史回滚或快照表，也没有 `GET /api/v1/rbac-v1/releases` 路由。
+RBAC v1 这些表没有 `is_deleted` 软删标记；当前没有发布版本、历史回滚或快照表，也没有 `GET /api/v1/rbac-v1/releases` 路由。
 
 ## 6. 当前主要接口
 
@@ -261,7 +260,6 @@ RBAC v1 这些表没有 `is_deleted` 软删标记；唯一的软删语义在遗�
 
 管理路由通过服务器配置的认证中间件保护；仅登录校验不能视为已实现“权限中心管理员分权”。当前没有在上述管理路由逐操作套用应用 RBAC 的管理权限矩阵。
 
-服务器另外保留 `/api/v1/authorization/api-endpoints*` 的服务目录级接口路由，仍注册在路由表和 OpenAPI 文档中，并有 handler 路由测试覆盖；当前新工作台使用 `/api/v1/rbac-v1/*` 的应用上下文接口。这些目录路由由 `biz.APIEndpointService` 提供，读写 `authorization_api_endpoints` 表，与 RBAC v1 的 `api_endpoints` 表不是同一份数据（已纳入首次初始化 SQL），不应被描述为新的角色、菜单或用户绑定流程。
 
 ## 7. 已实现边界与待补能力
 
@@ -281,7 +279,7 @@ RBAC v1 这些表没有 `is_deleted` 软删标记；唯一的软删语义在遗�
 
 还需区分规则所在层级：按钮必须是叶子、按钮不能作为父节点、不能把有子节点的菜单改为按钮，这些后端已经拒绝，数据库复合外键保证父子同应用，但“按钮必须挂在菜单下”仍主要由前端表单约束，不能说成数据库已完整保障。
 
-共享 API 的普通修改会立即影响所有关联应用，因为接口目录与授权由数据库触发器联动失效。撤销角色、删除接口或解除服务关联在保存提交后立即生效；应用整体停用同样立即阻止该应用的鉴权请求。这一选择意味着共享接口的启用/删除需要评估所有关联应用的影响范围。
+共享 API 的普通修改会立即影响所有关联应用，因为接口目录变更会触发所有关联应用的服务 API Redis 记录重建。撤销角色、删除接口或解除服务关联在保存提交并重建后立即生效；应用整体停用会重建记录并把相关记录标记为 `service_active=false`。这一选择意味着共享接口的启用/删除需要评估所有关联应用的影响范围。
 
 ## 8. 代码依据
 
@@ -292,6 +290,6 @@ RBAC v1 这些表没有 `is_deleted` 软删标记；唯一的软删语义在遗�
 | 后端路由与管理接口 | `src/internal/server/http/routes.go`、`rbac_v1_handler.go`、`application_handler.go`、`application_permissions_handler.go` |
 | 应用与服务关联 | `src/internal/biz/application.go`、`src/internal/data/db/repo/application_repo.go` |
 | 服务资源目录与 NexusAuth 读取 | `src/internal/biz/service_resource.go`、`src/internal/data/db/repo/service_resource_repo.go` |
-| Swagger、当前权限与 API 鉴权 | `src/internal/biz/swagger.go`、`src/internal/biz/rbac_v1.go`、`src/internal/biz/rbac_policy.go`、`src/internal/biz/rbac_policy_cache.go`、`src/internal/data/db/repo/rbac_v1_repo.go` |
+| Swagger、当前权限与 API 鉴权 | `src/internal/biz/swagger.go`、`src/internal/biz/rbac_v1.go`、`src/internal/biz/rbac_policy.go`、`src/internal/biz/rbac_policy_cache.go`、`src/internal/biz/subject_api_authorization.go`、`src/internal/data/db/repo/current_policy_repo.go`、`src/internal/data/db/repo/subject_api_repo.go`、`src/internal/data/rediscache/subject_api.go` |
 | 菜单层级与主体菜单 | `src/internal/biz/application_permissions.go`、`src/internal/data/db/repo/application_permissions_repo.go` |
 | Go 服务 SDK | `sdk/rbac/client.go` |

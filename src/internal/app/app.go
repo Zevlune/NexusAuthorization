@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,7 +17,6 @@ import (
 type Application struct {
 	Pool             *pgxpool.Pool
 	ServiceResources *biz.ServiceResourceService
-	APIEndpoints     *biz.APIEndpointService
 	RBACV1           *biz.RBACV1Service
 	Auth             *auth.Service
 	Users            *biz.NexusAuthSCIMClient
@@ -28,6 +28,10 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 	pool, err := db.NewPool(ctx, cfg.Database)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(cfg.Redis.URL) == "" {
+		pool.Close()
+		return nil, fmt.Errorf("redis.url is required for runtime service API authorization")
 	}
 	serviceResourceRepository := repo.NewServiceResourceRepository(pool)
 	serviceResources, err := newServiceResourceCatalog(serviceResourceRepository, cfg.ServiceResource)
@@ -53,7 +57,6 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 			return nil, err
 		}
 	}
-	apiEndpoints := biz.NewAPIEndpointService(repo.NewAPIEndpointRepository(pool)).WithServiceResourceCatalog(serviceResources)
 	rbacRepository := repo.NewRBACV1Repository(pool, serviceResources)
 	var policyCache *rediscache.PolicyCache
 	if strings.TrimSpace(cfg.Redis.URL) != "" {
@@ -64,10 +67,10 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 		}
 		rbacRepository.WithPolicyCache(policyCache)
 	}
+	serviceResourceRepository.WithSubjectAPISync(rbacRepository.RefreshSubjectAPIForService)
 	return &Application{
 		Pool:             pool,
 		ServiceResources: serviceResources,
-		APIEndpoints:     apiEndpoints,
 		RBACV1:           biz.NewRBACV1Service(rbacRepository),
 		PolicyCache:      policyCache,
 		Auth:             authenticator,

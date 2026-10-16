@@ -10,7 +10,7 @@
 - Node.js 与 npm；
 - PostgreSQL 16；
 - Docker Compose；
-- 可选 Redis；
+- Redis（运行时服务 API 鉴权需要；菜单 current-policy 路径不依赖）；
 - 可选 Playwright 浏览器运行环境。
 
 仓库主要目录：
@@ -22,7 +22,7 @@
 | `src/internal/auth` | OIDC 配置、会话和认证中间件 |
 | `src/internal/biz` | 领域模型、授权规则、目录适配和策略编译 |
 | `src/internal/data/db/repo` | PostgreSQL 仓储和事务 |
-| `src/internal/data/rediscache` | Redis 当前策略缓存 |
+| `src/internal/data/rediscache` | Redis 服务 API 授权记录、`state` 闸门与批量替换 |
 | `src/internal/server/http` | 路由、请求解析和响应映射 |
 | `dashboard/src` | React 页面、路由、API 和样式 |
 | `sdk/rbac` | 业务服务 Go SDK |
@@ -115,7 +115,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 1. HTTP Handler 只负责读取路径/查询/JSON、调用业务服务和映射错误；
 2. `internal/biz` 负责校验、领域规则、授权决策和外部目录接口；
 3. Repository 负责 SQL、事务、行映射和数据库约束协作；
-4. Redis 层只负责当前策略缓存，不改变权限事实来源；
+4. Redis 层保存服务 API 授权记录，控制面在保存业务表后同步重建，不保存业务版本；
 5. Dashboard API 统一走 `dashboard/src/api/request.ts`，页面不自行创建 Axios 实例；
 6. SDK 保持失败关闭，并且禁止把用户可控输入当作 app/service/subject 的可信来源。
 
@@ -129,13 +129,13 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 - Repository 查询和事务；
 - `CurrentPolicy` 数据装载；
 - `compiledRBACPolicy` 的编译和匹配；
-- `policy_token` 失效触发器；
+- 保存后 Redis 服务 API 记录重建；
 - `/api/v1/rbac-v1/simulate` 输入和结果；
 - `/api/v1/authorize` 请求字段及 SDK；
 - 管理端 API、表单、回显和错误处理；
 - 单元测试、集成测试和文档。
 
-策略匹配的关键代码在 `src/internal/biz/rbac_policy.go`，业务操作在 `src/internal/biz/rbac_v1.go`，数据库策略装载在 `src/internal/data/db/repo/rbac_v1_repo.go`。先阅读 [系统设计](system-design.md) 和 [鉴权匹配与性能](authorization-matching.md)，再修改实现。
+策略匹配的关键代码在 `src/internal/biz/rbac_policy.go`，业务操作在 `src/internal/biz/rbac_v1.go`，服务 API 聚合与编译在 `src/internal/biz/subject_api_authorization.go`，数据库读取在 `src/internal/data/db/repo/current_policy_repo.go` 和 `src/internal/data/db/repo/subject_api_repo.go`。先阅读 [系统设计](system-design.md) 和 [鉴权匹配与性能](authorization-matching.md)，再修改实现。
 
 ## 6. 新增管理能力的步骤
 
@@ -150,7 +150,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 7. 使用全新的空 PostgreSQL 数据库执行 `001_init.sql` 验证结构；
 8. 执行 Go、SDK、前端构建和 lint。
 
-初始化 SQL 是当前系统的完整初始结构。修改表结构时直接更新这份脚本，并在独立空库上完整执行验证；不要把临时 SQL 直接用于目标环境后结束，必须回写仓库和文档。
+初始化 SQL 是当前系统的完整初始结构。修改表结构时直接更新这份脚本，并在独立空库上完整执行验证；不要把临时 SQL 直接用于目标环境后结束，必须回写仓库和文档。数据库结构变更按首次上线流程处理：删除旧数据库后，在独立空库中重新执行完整的 `migrations/001_init.sql`。
 
 ## 7. SDK 二次开发
 
@@ -212,7 +212,7 @@ docker build -t nexusauthorization-dashboard:local .
 4. 角色是否启用、是否授权该 API、主体是否绑定该角色；
 5. domain 是否和绑定记录一致；
 6. 实际 path 是否符合固定/参数路径规则；
-7. `policy_token` 是否在保存后刷新，Redis 是否使用了正确环境前缀；
+7. Redis 服务 API 记录是否在保存后重建成功、应用 `state` 是否为 `ready`，以及是否使用了正确环境前缀；
 8. 用 `/api/v1/rbac-v1/simulate` 复现同一组输入。
 
 若页面无法登录，先用 `/api/healthz` 和 `/api/auth/config` 区分进程问题、反向代理问题与 OIDC 配置问题。若服务目录或 SCIM 失败，直接检查外部 URL、凭证和超时，不要修改权限表来绕过依赖故障。

@@ -56,7 +56,11 @@ set +a
 sh src/scripts/init-db.sh
 ```
 
-`001_init.sql` 自带事务。空库只执行一次；不要把 `000_create_database.sql` 和 `001_init.sql` 放进同一事务，也不要对已经存在业务数据的库重复执行完整初始化。
+`001_init.sql` 自带事务，只对全新空库执行一次；不要把 `000_create_database.sql` 和 `001_init.sql` 放进同一事务，也不要对已经存在业务数据的库重复执行完整初始化。
+
+数据库初始化按首次上线流程处理：删除旧数据库后，使用数据库 owner 在全新空库执行 `migrations/001_init.sql`。完整说明见 [数据库初始化](../migrations/README.md)。
+
+
 
 ## 3. Docker Compose 首次部署
 
@@ -91,9 +95,9 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL` | nexusauth 模式 | 远程服务目录地址 |
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY` | nexusauth 模式 | 服务目录读取凭证 |
 | `NEXUSAUTHORIZATION_SCIM_*` | 需要分配用户 | NexusAuth SCIM 地址、只读凭证和超时 |
-| `NEXUSAUTHORIZATION_REDIS_URL` | 可选 | 为空时使用 PostgreSQL-only 模式 |
+| `NEXUSAUTHORIZATION_REDIS_URL` | 需要运行时服务 API 鉴权 | 服务 API 鉴权直接读取 Redis；为空时应用启动失败 |
 | `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 多环境必须使用不同前缀 |
-| `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 使用 Redis | 当前策略记录 TTL，默认 24h |
+| `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 使用 Redis | 配置层保留的当前记录缓存 TTL，默认 24h；服务 API 授权记录不设 TTL |
 | `NEXUSAUTHORIZATION_REDIS_TIMEOUT` | 使用 Redis | Redis 操作超时，默认 200ms |
 
 配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
@@ -110,7 +114,7 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 6. 用权限模拟验证一次允许和一次拒绝；
 7. 删除测试角色和测试应用，确认清理规则符合预期。
 
-数据库只由 PostgreSQL 作为权限事实来源。Redis 是可选缓存，首次部署可以先保持 `NEXUSAUTHORIZATION_REDIS_URL` 为空，待基础链路稳定后再启用。
+业务配置由 PostgreSQL 保存；运行时服务 API 鉴权直接读取 Redis。要启动并验证业务服务实际鉴权，必须设置 `NEXUSAUTHORIZATION_REDIS_URL`，并确认保存业务表后 Redis 记录重建成功；为空时应用启动失败。菜单 current-policy 路径本身不读取服务 API Redis 记录，但应用仍要求配置 Redis。
 
 ## 6. 日常操作
 
@@ -139,7 +143,7 @@ docker compose -f docker-compose.yml ps
 - PostgreSQL 全库，包括 schema、触发器、函数和权限数据；
 - `/app/data` 中的 OIDC 会话密钥和运行时数据；
 - Compose 文件、环境变量模板和实际镜像版本；
-- Redis 不作为主备份来源，它可以清空并由 PostgreSQL 重建。
+- Redis 不作为主备份来源，它可以清空并由 PostgreSQL 重建；服务 API 授权记录会在下一次保存命中受影响应用时整体重建。
 
 示例：
 
@@ -148,7 +152,7 @@ pg_dump "$NEXUSAUTHORIZATION_DATABASE_URL" \
   --format=custom --file=nexus-authorization-$(date +%Y%m%d).dump
 ```
 
-恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。恢复后首次请求会按 `policy_token` 重新编译策略，Redis 中的旧记录可以删除。
+恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。恢复后 Redis 可能为空或残留旧记录：保存命中受影响应用的业务表（例如重新保存应用）即可让该应用整体重建；也可以清空对应前缀后重建。菜单 current-policy 路径直接读取数据库，不依赖这些记录。
 
 ## 8. 故障排查
 
@@ -159,7 +163,8 @@ pg_dump "$NEXUSAUTHORIZATION_DATABASE_URL" \
 | 登录回调失败 | OIDC redirect URI 是否逐字符匹配、HTTPS/cookie、authority 是否可达、client secret |
 | 服务资源列表失败 | `source`、远程 URL、API key、远程 TLS 和超时 |
 | 分配用户失败 | SCIM URL、只读凭证、上游分页响应和 `NEXUSAUTHORIZATION_SCIM_TIMEOUT` |
-| 权限保存成功但鉴权旧结果 | 检查事务是否提交、`policy_token` 是否变化、Redis key 前缀、数据库日志；清理 Redis 后重试 |
+| 权限保存成功但鉴权旧结果 | 检查事务是否提交、Redis 重建是否成功、应用 `state` 是否为 `ready`、key 前缀和数据库日志；重新保存可整体重建 |
+| 运行时鉴权全部拒绝 | `NEXUSAUTHORIZATION_REDIS_URL` 是否配置、应用 `state` 是否为 `ready`、记录是否存在、key 前缀是否正确；恢复或清空后需重建 Redis 记录 |
 | 取消服务关联冲突 | 先从所有角色移除该服务的 API 授权，再取消关联 |
 | 运行时接口返回 401 | 当前版本是否配置了 `authorization.service_credential`；管理端 OIDC cookie 不能代替服务凭证 |
 | 运行时接口返回拒绝 | 核对 app、service、subject、domain、method、实际 path 和角色绑定，先用权限模拟复现 |

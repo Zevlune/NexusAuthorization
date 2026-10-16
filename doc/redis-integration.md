@@ -1,45 +1,69 @@
-# Redis 当前权限缓存
+# Redis 服务 API 授权
 
-使用 `github.com/redis/go-redis/v9` 缓存当前保存的权限记录。Redis 是可选缓存，PostgreSQL 的当前规范化权限表为权威数据源；没有发布版本、历史快照或按业务版本命名的 key。保存生效与事务规则见 [权限生效设计](permission-lifecycle.md)。
+使用 `github.com/redis/go-redis/v9`。运行时服务 API 鉴权直接以 Redis 为授权来源：管理端保存业务表后，由服务同步重建受影响的 Redis 记录；鉴权请求只读这些记录，不读取数据库，也不回源。数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。保存生效与撤权规则见 [权限生效设计](permission-lifecycle.md)。
+
+菜单和全策略适配器是独立域，走自己的 current-policy 路径：每次请求在一条 MVCC 语句里读取当前规范化业务表并编译，不读取本页描述的服务 API Redis 记录，也不依赖这些记录是否 ready。因此 Redis 记录只服务服务 API 鉴权入口。
 
 ## key 标准与大小
 
-```text
-PREFIX:rbac:current:app:{APPLICATION_UUID}:manifest
-PREFIX:rbac:current:app:{APPLICATION_UUID}:part:PART
-```
+### 授权记录
 
-`PART` 从 0 开始，UUID 外的花括号为实际 hash tag。PREFIX 用于环境隔离，例如 `nexusauthorization:prod`。前缀不能含空白、花括号或尾部冒号。当前使用 standalone Client，未配置 Sentinel/Cluster 客户端。
-
-逻辑查询身份仍为应用＋服务＋domain＋用户，其中 `domain` 使用归一化后的值（省略、空白或旧 `global` 都是空默认域，具名域保持独立）。进程索引分别定位服务路由和身份。物理 Redis key 按应用分片缓存当前记录，不按用户或绑定逐条建 key，也不为每个用户保存一份完整接口集合。缓存中没有用户×接口矩阵。
-
-当前记录按字节分片，每个 String 最多 **256 KiB**，包括 32 字节的内部失效标记 SHA-256 头；每片有效 JSON 字节最多 **262,112**。一整个大角色的接口列表或大成员列表同样会拆片。小清单含 `format`、应用 UUID、当前失效标记、内容 SHA-256、总字节数和片数；通常几百字节，读取时上限 4 KiB。
-
-设 S 为当前记录 JSON 字节数，完整新写入的 key 数为：
+每个「应用 key + 主体 + 服务 + 归一化 domain」是一条 Redis String：
 
 ```text
-1 + ceil(S / 262112)
+PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:user:<QUERY_ESCAPE(subject)>:service:<QUERY_ESCAPE(service)>:domain:<QUERY_ESCAPE(normalized domain)>
 ```
 
-10 万成员绑定＋2 万角色接口授权的测试约 6.86 MB，使用 27 片＋1 清单，共 28 个 key。保存和重试复用这些 key，失效标记不进入 key。数据缩小时旧多余分片不再读取，按 TTL 清理，因此实际 key 数短期受最近未过期的最大缓存大小影响。单应用缓存内容上限 512 MiB，最多 2,050 个有效 key；超出限制直接使用数据库，不阻止保存或鉴权。
+应用 key、主体、服务和 domain 各自经 `url.QueryEscape` 编码，避免与结构分隔符冲突。空（默认）domain 保留字面空尾；旧 `global` 归一到同一空默认域，具名域各自独立。作用域选择器是应用 key，不是应用 UUID。
 
-这些是当前数据的缓存页，不写入持久化快照表，也不保留可选择的历史权限。
+值是普通 `SubjectAPIPolicy` JSON，没有信封、版本号或 checksum，读取后原样反序列化。内容字段：
 
-## 保存与读取
+- `application_key`、`application_id`、`subject`、`domain`、`service_resource`、`service_active`：本次聚合的身份；读取时与请求身份逐字段校验，不一致即拒绝。
+- `apis`：该用户在该服务上由启用角色授予的去重 API 并集。
+- `catalog`：该服务的完整 Catalog，保留未授权与 disabled 路由，避免路由回退越权。
+- `roles`：命中的角色编码。
 
-1. 管理保存仅提交数据库权限及事务触发器更新的失效标记，无需等待 Redis 写入。
-2. 鉴权每次读取数据库标记、启用状态和当前服务目录。先检查本地只读索引；命中直接匹配。
-3. 本地未命中时读取 Redis 清单及分片。清单和每片标记必须与本次权威元数据一致，并验证片数、字节数、内容 SHA-256 和应用身份。
-4. 任一验证失败、Redis 超时/不可用或缓存过期，整份回源当前数据库表，然后尝试回填。回填失败只影响缓存命中率。
-5. 数据库与缓存的标记过期竞态会重读最新数据；不会把新成员与旧权限混成一次决策。
+单条记录上限 **16 MiB**，写入超过上限直接报错。记录**不设 TTL**，永不过期；新鲜度由下面每个应用的写入闸门控制，而不是靠过期时间。
 
-分片每批最多 16 个，通过 pipeline 读写，一批载荷最多 4 MiB。全部写完再写完成清单。相同标记的并发回填写相同内容；不同标记的并发或迟到回填可能造成缓存未命中，但不能通过最新数据库标记校验而让旧授权生效。下一次回源修复即可，不依靠 Redis 删除成功实现撤权。
+### 应用辅助 key
 
-清单 TTL 默认 24 小时，分片多保留 1 分钟。`timeout` 限制每批网络操作，完整读写另有 30 秒上限并受调用方 deadline 约束。缓存命中不续期。旧应用发布缓存命名空间不再读取，残留 key 按原 TTL 到期，不用全库 SCAN 或 FLUSHDB。
+```text
+PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:state
+PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:members
+```
+
+- `state` 是应用写入闸门，取值为 `ready` 或 `updating`，同样不设 TTL。应用从未发布时该 key 不存在。
+- `members` 是该应用全部授权记录 key 的集合（SET），供批量替换时找出并删除被取代的旧记录。
+
+`PREFIX` 由配置的 `key_prefix` 提供，用于环境隔离，例如 `nexusauthorization:prod`。前缀不能含空白、花括号或以冒号结尾。当前使用 standalone Client，未配置 Sentinel/Cluster 客户端。
+
+## 读取语义
+
+鉴权入口（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）每次请求都直接从 Redis 读取该「应用 key + 主体 + 服务 + 归一化 domain」的记录，不经过数据库，也没有回源路径。一次 Lua 脚本在同一步内读取应用的 `state` 与记录：
+
+1. `state = ready` 且记录存在：校验记录身份与请求一致、JSON 合法且不超过 16 MiB，再按内容哈希复用进程内已编译索引（上限 1024，同一内容并发加载用 30 秒 singleflight 合并），匹配 `service_resource + method + path`。
+2. `state = ready` 但该身份没有记录：普通未命中，拒绝。
+3. 应用从未发布（`state` 不存在）：未命中，拒绝。
+4. `state = updating`：应用正在批量替换，直接拒绝，不返回可能半写的记录。
+5. Redis 未配置、连接失败、超时、记录损坏或身份不匹配：报错并拒绝。
+
+这些情形都不会读取数据库放行。Redis 未配置或不可用时，服务 API 鉴权没有可读授权，因此直接拒绝；这是设计要求。菜单路径不受影响，见下。
+
+## 写入与重建
+
+管理端保存业务表后，控制面在同一进程内重建受影响应用的 Redis 记录，而不是异步等待：
+
+1. 先把受影响应用置为 `updating`（`BlockSubjectAPIApplications`），使并发鉴权在替换期间被拒绝。
+2. 读取旧 `members`，删除本次不再存在的记录，再分批写入新记录（写授权记录并 `SADD members`）。每批最多 64 条，受配置的 `timeout` 限制，整个替换受 30 秒 deadline 约束。
+3. 全部写完后才把 `state` 置为 `ready`。任何一步失败都保持 `updating`，使下一次重建从干净状态重试，期间鉴权持续拒绝。
+
+删除先于写入，且闸门只在全部记录落盘后才打开，因此已离开的用户不会在闸门重开后仍被寻址。触发重建的写操作包括：保存应用、替换应用服务关联、保存/删除角色、替换主体角色、保存/删除 API 端点、创建/更新/删除服务资源。服务目录变更会重建所有关联该服务的应用。
+
+菜单 token 不参与服务 API 记录；纯菜单保存不改变服务 API 记录。菜单与全策略适配器仍按应用读取当前规范化业务表并在进程内编译，属于独立的 current-policy 域。
 
 ## 配置
 
-不设置 URL 即仅使用数据库和本地编译索引：
+Redis 是服务 API 鉴权的运行时依赖：`redis.url` 为空时应用启动失败，避免业务配置已经保存但服务 API 授权记录没有生成。菜单 current-policy 路径仍按数据库工作，但不会绕过这个启动约束。
 
 ```yaml
 redis:
@@ -56,16 +80,16 @@ export NEXUSAUTHORIZATION_REDIS_CACHE_TTL='24h'
 export NEXUSAUTHORIZATION_REDIS_TIMEOUT='200ms'
 ```
 
-旧 `snapshot_ttl` / `NEXUSAUTHORIZATION_REDIS_SNAPSHOT_TTL` 已移除，改用上面的缓存 TTL 配置。环境 URL 显式为空可禁用 YAML URL；支持 redis://、rediss://、用户名、密码和 DB 编号，凭据特殊字符需 URL 编码。TTL/timeout 至少 1ms。启动不强制 PING，Redis 故障可回源；数据库或服务目录不可用则返回错误并拒绝放行。
+`key_prefix` 决定 key 的 `PREFIX`。`timeout` 限制单次 Redis 网络操作（默认 200 ms，至少 1 ms），同时约束重建的每一批与鉴权读取。`cache_ttl` 是配置层保留的当前记录缓存 TTL，默认 24h；本页描述的服务 API 授权记录写入时不设 TTL，不受该值影响。旧 `snapshot_ttl` / `NEXUSAUTHORIZATION_REDIS_SNAPSHOT_TTL` 已移除。支持 redis://、rediss://、用户名、密码和 DB 编号，凭据特殊字符需 URL 编码。应用启动时要求 `redis.url` 非空，但不会在启动阶段强制 PING；连接失败会在实际重建或鉴权时暴露。
 
 ## 验证
 
-miniredis 测试覆盖当前数据读写、应用隔离、保存失效、旧回填、混合标记、损坏/缺片、分批失败、并发重试、大小限制、TTL 和取消。数据库集成测试验证保存即生效、Redis 中断期间撤权、事务回滚、直接 SQL 修改 API 失效、用户移除、缓存修复和应用禁用。
+miniredis 测试覆盖服务 API 记录的读写、应用与身份隔离、闸门 `updating` 拒绝、批量替换的删除先于写入、旧记录清理、大小上限、取消和错误路径。数据库集成测试验证保存业务表后重建 Redis、撤权生效、应用禁用和服务目录变更触发重建。
 
 ```sh
 cd src
 go test -race ./...
 # 测试库必须独立，先执行 001_init.sql；没有设置时数据库集成测试跳过。
 NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/nexusauthorization_test?sslmode=disable' \
-  go test ./internal/data/db/repo -run 'TestRedisCurrentPolicyImmediateSaveIntegration|TestApplicationPermissionIntegration' -count=1
+  go test ./internal/data/db/repo -run 'TestSubjectAPI|TestRedis' -count=1
 ```

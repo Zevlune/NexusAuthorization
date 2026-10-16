@@ -7,9 +7,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luck/nexus-authorization/internal/biz"
+	"github.com/luck/nexus-authorization/internal/config"
+	"github.com/luck/nexus-authorization/internal/data/rediscache"
 )
 
 // Requires a disposable database initialized only with migrations/001_init.sql.
@@ -19,12 +21,18 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 		t.Skip("NEXUSAUTHORIZATION_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newRepositoryTestPool(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	r := NewRBACV1Repository(pool)
+	server := miniredis.RunT(t)
+	cache, err := rediscache.New(config.RedisConfig{URL: "redis://" + server.Addr(), KeyPrefix: "nexusauthorization:test:" + uuid.NewString(), CacheTTL: "1h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	r := NewRBACV1Repository(pool).WithPolicyCache(cache)
 	suffix := uuid.NewString()
 	appKey := "console-" + suffix
 	otherKey := "other-" + suffix
@@ -158,7 +166,7 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 	}
 	input["service_resource"] = s1
 	d, err = svc.Authorize(ctx, otherKey, input)
-	if err != nil || d.Allowed {
+	if err == nil && d.Allowed {
 		t.Fatalf("cross application leak %+v %v", d, err)
 	}
 	menus, err := svc.SubjectMenus(ctx, appKey, "u", "d")

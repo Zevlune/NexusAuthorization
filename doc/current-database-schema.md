@@ -1,12 +1,14 @@
 # 当前数据库结构
 
-整理日期：2026-10-15。
+整理日期：2026-10-16。
+
+应用对象全部位于 PostgreSQL 的 `nexusauthorization` schema；应用连接池固定使用 `search_path=nexusauthorization`。本文中的类型、表、触发器和索引名称均指该 schema 下的对象。
 
 [返回当前功能总览](current-system-overview.md) · [完整初始化 SQL](../migrations/001_init.sql)
 
 本文档按 `migrations/001_init.sql` 逐项整理，本次没有对运行中的数据库进行结构比对。该脚本是空数据库的纯初始化脚本：只创建扩展、枚举、表、约束、触发器和索引，不插入种子数据，也不执行升级或替换操作。
 
-文档中的“允许 NULL”以列声明为准；“默认值”是脚本中的 PostgreSQL 表达式或字面量。`updated_at` 只有插入时的 `DEFAULT NOW()`，脚本没有自动更新时间触发器；唯一的自动更新字段是 `applications.policy_token`。
+文档中的“允许 NULL”以列声明为准；“默认值”是脚本中的 PostgreSQL 表达式或字面量。`updated_at` 只有插入时的 `DEFAULT NOW()`，脚本没有自动更新时间触发器。
 
 ## 枚举类型
 
@@ -49,11 +51,10 @@
 | `description` | `TEXT` | 否 | `''` | 应用描述 |
 | `url` | `VARCHAR(2048)` | 否 | `''` | 可选 HTTP(S) Web 入口地址 |
 | `enabled` | `BOOLEAN` | 否 | `TRUE` | 是否启用 |
-| `policy_token` | `UUID` | 否 | `gen_random_uuid()` | 应用级缓存失效标记；权限数据变更时自动刷新，不是业务版本 |
 | `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
-约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。`application_policy_token` 触发器在应用行更新时把 `policy_token` 置为新的随机 UUID；权限表的语句级触发器也会刷新它。标记只用于让本地编译索引和 Redis 当前记录缓存失效，不提供版本序列、历史或回滚。
+约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。应用表没有缓存标记列；运行时服务 API 授权由控制面在保存业务表后重建 Redis 记录，数据库只保存业务配置。
 
 ### `application_service_resources`
 
@@ -87,29 +88,6 @@
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
 约束：主键为 `id`；(`service_resource_key`, `endpoint_key`) 唯一；(`service_resource_key`, `method`, `path_template`) 唯一；`endpoint_key` 非空白；`method = upper(method)`；`left(path_template, 1) = '/'`。创建、查询和更新 API 前由当前服务资源目录校验 key 存在且启用；数据库不建立服务资源外键。
-
-### `authorization_api_endpoints`
-
-兼容目录接口 `/api/v1/authorization/api-endpoints*` 使用的服务资源作用域 Endpoint 登记表。它与 `api_endpoints` 是两套独立数据，只服务该兼容路由，不参与应用 RBAC 的角色、菜单、主体绑定和运行时权限记录。
-
-| 字段 | 实际 PostgreSQL 类型（长度） | 允许 NULL | 默认值 | 含义 |
-| --- | --- | --- | --- | --- |
-| `id` | `UUID` | 否 | `gen_random_uuid()` | Endpoint 主键 |
-| `service_resource` | `VARCHAR(128)` | 否 | 无 | 所属服务资源业务键；由当前服务资源目录校验，不是数据库外键 |
-| `controller` | `VARCHAR(200)` | 否 | 无 | 控制器或模块名 |
-| `method` | `VARCHAR(16)` | 否 | 无 | HTTP 方法，必须大写 |
-| `path_template` | `VARCHAR(500)` | 否 | 无 | 路径模板，必须以 `/` 开头 |
-| `summary` | `TEXT` | 否 | `''` | API 摘要 |
-| `enabled` | `BOOLEAN` | 否 | `TRUE` | 是否启用 |
-| `created_by_id` | `VARCHAR(200)` | 否 | `'system'` | 创建人标识 |
-| `created_by_name` | `VARCHAR(200)` | 否 | `'system'` | 创建人名称 |
-| `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
-| `updated_by_id` | `VARCHAR(200)` | 否 | `'system'` | 最近更新人标识 |
-| `updated_by_name` | `VARCHAR(200)` | 否 | `'system'` | 最近更新人名称 |
-| `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护，仓储写入时置为 `NOW()` |
-| `is_deleted` | `BOOLEAN` | 否 | `FALSE` | 软删除标记；仓储查询过滤 `is_deleted = FALSE` |
-
-约束：主键为 `id`；`service_resource` 和 `controller` 必须非空白；`method = upper(method)`；`left(path_template, 1) = '/'`。`authorization_api_endpoints_active_route_idx` 是 (`service_resource`, `method`, `path_template`) 上的唯一部分索引，条件为 `WHERE is_deleted = FALSE`：未软删除的同一服务资源方法路径不得重复，软删除后同一路由可以重新登记。审计值由写入请求上下文提供，缺省为 `system`。
 
 ### `roles`
 
@@ -194,7 +172,7 @@
 
 ## 数据库触发器
 
-初始化脚本定义 29 个触发器：4 个业务保护触发器、1 个应用标记刷新触发器和 24 个语句级缓存失效触发器。
+初始化脚本只定义 4 个业务保护触发器。它不创建应用标记刷新触发器或语句级缓存失效触发器。
 
 业务保护触发器：
 
@@ -205,14 +183,7 @@
 | `role_api_endpoint_application_guard` | `role_api_endpoint_bindings` 插入或更新前、逐行 | 按端点的 `service_resource_key` 检查角色所属应用已关联该服务资源。 |
 | `role_menu_application_guard` | `role_menu_bindings` 插入或更新前、逐行 | 检查角色和菜单属于同一应用。 |
 
-缓存失效触发器：
-
-| 触发器 / 函数 | 时机 | 作用 |
-| --- | --- | --- |
-| `application_policy_token` | `applications` 更新前、逐行 | 把 `policy_token` 刷新为新的随机 UUID。 |
-| `<table>_policy_insert/update/delete` | `roles`、`menus`、`subject_role_bindings`、`application_service_resources`、`role_api_endpoint_bindings`、`role_menu_bindings`、`api_endpoints`、`service_resources` 的插入/更新/删除后、语句级 | 通用函数 `invalidate_current_policy()` 用事务 transition table 取出受影响行，按应用刷新 `policy_token`；角色授权、API 端点和服务资源变更通过角色或 key 反查关联应用。 |
-
-语句级触发器在一次批量语句里每个受影响应用只更新一次标记，回滚时标记和权限数据一起回滚。`TRUNCATE` 不属于支持的管理操作，不会触发这些失效。上述触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验。
+这些触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验。缓存一致性不依赖数据库触发器：控制面在保存 `roles`、`role_api_endpoint_bindings`、`subject_role_bindings`、`menus`、`role_menu_bindings`、`application_service_resources`、`api_endpoints` 和 `service_resources` 后重建受影响应用的服务 API Redis 记录。
 
 ## 显式索引
 
@@ -221,7 +192,6 @@ PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动�
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
 | `api_endpoints_scope_enabled_idx` | `api_endpoints` | (`service_resource_key`, `enabled`) | 按服务资源和启用状态查询端点 |
-| `authorization_api_endpoints_active_route_idx` | `authorization_api_endpoints` | (`service_resource`, `method`, `path_template`) `WHERE is_deleted = FALSE` | 唯一部分索引：未软删除的同一服务资源方法路径不得重复，软删除后允许重新登记 |
 | `role_api_endpoint_bindings_endpoint_idx` | `role_api_endpoint_bindings` | (`endpoint_id`, `role_id`) | 按端点反查角色 |
 | `subject_role_bindings_application_lookup_idx` | `subject_role_bindings` | (`application_id`, `subject`, `domain`) | 按应用、主体和域查询角色绑定 |
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
@@ -243,22 +213,16 @@ erDiagram
     menus ||--o{ role_menu_bindings : granted_to
     applications ||--o{ subject_role_bindings : scopes
     roles ||--o{ subject_role_bindings : assigned
-    authorization_api_endpoints {
-        uuid id PK
-        varchar service_resource
-        varchar method
-        varchar path_template
-        boolean is_deleted
-    }
 ```
 
-图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。`authorization_api_endpoints` 不建立数据库外键、不被运行时权限记录引用，因此在上图中是独立节点。
+图中的 `configured_service_catalog` 是配置选择的资源来源（local 本地表或 NexusAuth 远程接口），不是新增数据库表。它与应用关联和 API 端点之间是业务上的 key 关联；`application_service_resources` 与 `api_endpoints` 均不对 `service_resources` 建立数据库外键。
 
 ## 明确不包含的结构
 
 - 初始化脚本不创建用户表；主体以 `subject` 字符串保存在 `subject_role_bindings`，身份来源不由此 schema 管理。
 - 初始化脚本不创建 OAuth 客户端表。
-- 初始化脚本不创建独立的 API 字段权限表；应用 RBAC 的 API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。兼容目录接口的 `authorization_api_endpoints` 是带软删除的独立 Endpoint 登记表，不参与应用 RBAC 运行时权限记录。
+- 初始化脚本不创建独立的 API 字段权限表；应用 RBAC 的 API 端点在 `api_endpoints`，角色授权通过 `role_api_endpoint_bindings` 表示。
 - 初始化脚本不创建发布版本、历史快照或迁移记录表；保存后的权限直接参与运行时鉴权。
+- 初始化脚本不创建 `applications.policy_token`、`role_api_policy_tokens`、`service_api_policy_tokens` 或缓存失效触发器；运行时服务 API 授权直接以 Redis 为准，数据库只保存业务配置。
 - `subject_role_bindings.domain` 在初始 schema 中就是 `NOT NULL DEFAULT ''`，空字符串表示默认域，具名域按原值隔离。
 - 初始化脚本不插入任何应用、服务资源、角色、菜单或绑定种子数据。

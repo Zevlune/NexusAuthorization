@@ -23,7 +23,7 @@ func TestApplicationMenuButtonRulesIntegration(t *testing.T) {
 		t.Skip("NEXUSAUTHORIZATION_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newRepositoryTestPool(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestApplicationMenuButtonConcurrencyIntegration(t *testing.T) {
 		t.Skip("NEXUSAUTHORIZATION_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := newRepositoryTestPool(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

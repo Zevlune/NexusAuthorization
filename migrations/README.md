@@ -1,16 +1,16 @@
-# NexusAuthorization 首次初始化数据库
+# NexusAuthorization 数据库初始化
 
-当前项目按首次安装交付。空环境只需要执行两步：
+当前项目按首次安装交付。全新空环境只需要执行两步：
 
 1. PostgreSQL 管理员在维护库 `postgres` 中执行 `000_create_database.sql`，创建目标数据库；
-2. 目标数据库 owner 执行 `001_init.sql`，创建完整业务 schema。
+2. 目标数据库 owner 执行 `001_init.sql`，创建 `nexusauthorization` schema 和完整业务结构。
 
-当前仓库只维护一套完整初始 schema，不拆分第二套初始化 SQL。第一次安装请使用全新的空库。
+仓库只维护一套完整初始 schema，不拆分第二套初始化 SQL。第一次安装请使用全新的空库。
 
 | 文件 | 用途 | 执行连接 |
 | --- | --- | --- |
 | `000_create_database.sql` | 创建数据库 `nexus-authorization` | PostgreSQL 管理员连接维护库 `postgres` |
-| `001_init.sql` | 创建完整初始 schema、约束、索引和触发器 | 数据库 owner 连接空库 `nexus-authorization` |
+| `001_init.sql` | 创建 `nexusauthorization` schema、完整初始结构、约束、索引和业务保护触发器 | 数据库 owner 连接空库 `nexus-authorization` |
 
 ## 1. 创建数据库
 
@@ -29,7 +29,7 @@ ALTER DATABASE "nexus-authorization" OWNER TO "nexus-authorization";
 
 数据库名包含连字符，SQL 中必须使用双引号。示例用户名只是占位符，可按实际账号替换。
 
-## 2. 执行初始 schema
+## 2. 全新空库执行初始 schema
 
 使用数据库 owner 连接刚创建的空库，直接执行完整初始化：
 
@@ -45,16 +45,17 @@ export NEXUSAUTHORIZATION_DATABASE_URL='postgres://nexus-authorization:DB_PASSWO
 sh src/scripts/init-db.sh
 ```
 
-`001_init.sql` 自带 `BEGIN` / `COMMIT`，请在同一个数据库连接中完整执行，不要再包一层事务，也不要只执行光标所在的部分。执行失败时应查看第一条错误并修正后重新对空库执行。
+`001_init.sql` 自带 `BEGIN` / `COMMIT`，请在同一个数据库连接中完整执行，不要再包一层事务，也不要只执行光标所在的部分。脚本会创建并使用 `nexusauthorization` schema，应用连接池也固定使用该 schema。执行失败时应查看第一条错误并修正后重新对空库执行。
 
 初始脚本创建：
 
 - `pgcrypto` 扩展；
 - 服务资源、业务应用、应用服务关联、API、菜单、角色和主体角色绑定表；
-- 兼容目录接口使用的 `authorization_api_endpoints` 表；
-- 应用边界校验、菜单父子关系校验和服务关联保护触发器；
-- 保存后刷新 `applications.policy_token` 的缓存失效触发器；
+- API 端点、角色、菜单和主体角色绑定表；
+- 应用边界校验、菜单父子关系校验和服务关联保护四条业务保护触发器；
 - 唯一约束、查询索引和默认空域 `subject_role_bindings.domain = ''`。
+
+`001_init.sql` 只创建业务表和四条业务保护触发器。它**不创建** `applications.policy_token`、`role_api_policy_tokens`、`service_api_policy_tokens`，也不创建任何缓存失效触发器、发布版本、历史快照或迁移记录表。运行时服务 API 授权直接以 Redis 为准，数据库只保存业务配置。
 
 脚本不插入应用、服务、角色、菜单或用户绑定等业务种子数据。初始化完成后，使用 Dashboard 或管理 API 创建第一套业务配置。
 
@@ -72,13 +73,12 @@ sh src/scripts/init-db.sh
 SELECT current_database(), current_schema(), current_setting('search_path');
 
 SELECT expected.table_name,
-       to_regclass(format('public.%I', expected.table_name)) AS actual_table
+       to_regclass(format('nexusauthorization.%I', expected.table_name)) AS actual_table
 FROM (VALUES
     ('service_resources'),
     ('applications'),
     ('application_service_resources'),
     ('api_endpoints'),
-    ('authorization_api_endpoints'),
     ('roles'),
     ('menus'),
     ('role_api_endpoint_bindings'),
@@ -88,7 +88,7 @@ FROM (VALUES
 ORDER BY expected.table_name;
 ```
 
-默认配置下数据库应为 `nexus-authorization`、schema 为 `public`，查询应返回 10 行且 `actual_table` 均非空。
+默认配置下数据库应为 `nexus-authorization`、应用 schema 为 `nexusauthorization`，查询应返回 9 行且 `actual_table` 均非空。`current_schema()` 只有在当前会话的 `search_path` 已设置为该 schema 时才会显示 `nexusauthorization`；直接使用管理员会话时以 `to_regclass` 查询结果为准。
 
 ## 4. 本地开发
 
@@ -121,4 +121,4 @@ go run ./cmd/api-server
 7. 使用权限模拟验证允许和拒绝；
 8. 再接入业务服务的 SDK 或 `/api/v1/authorize`。
 
-保存成功后权限立即参与鉴权，没有发布按钮和发布步骤。完整操作见 [用户使用手册](../doc/user-guide.md)，部署见 [运维操作手册](../doc/operations-manual.md)，系统结构见 [系统设计说明](../doc/system-design.md)。
+保存成功后权限立即参与鉴权，没有发布按钮和发布步骤。服务 API 鉴权直接读取 Redis 记录，需要在配置中设置 `NEXUSAUTHORIZATION_REDIS_URL`；菜单 current-policy 路径不依赖 Redis。完整操作见 [用户使用手册](../doc/user-guide.md)，部署见 [运维操作手册](../doc/operations-manual.md)，系统结构见 [系统设计说明](../doc/system-design.md)。

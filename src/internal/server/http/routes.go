@@ -58,12 +58,5 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.Handle("GET "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.GetServiceResource)))
 	mux.Handle("PUT "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.UpdateServiceResource)))
 	mux.Handle("DELETE "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.DeleteServiceResource)))
-	mux.Handle("POST "+apiPrefix+"/v1/authorization/api-endpoints/import-swagger", protect(http.HandlerFunc(handler.ImportSwaggerAPIEndpoints)))
-	mux.Handle("POST "+apiPrefix+"/v1/authorization/api-endpoints", protect(http.HandlerFunc(handler.CreateAuthorizationAPIEndpoint)))
-	mux.Handle("GET "+apiPrefix+"/v1/authorization/api-endpoints", protect(http.HandlerFunc(handler.ListAuthorizationAPIEndpoints)))
-	mux.Handle("GET "+apiPrefix+"/v1/authorization/api-endpoints/{id}", protect(http.HandlerFunc(handler.GetAuthorizationAPIEndpoint)))
-	mux.Handle("PUT "+apiPrefix+"/v1/authorization/api-endpoints/{id}", protect(http.HandlerFunc(handler.UpdateAuthorizationAPIEndpoint)))
-	mux.Handle("DELETE "+apiPrefix+"/v1/authorization/api-endpoints/{id}", protect(http.HandlerFunc(handler.DeleteAuthorizationAPIEndpoint)))
-
 	return mux
 }

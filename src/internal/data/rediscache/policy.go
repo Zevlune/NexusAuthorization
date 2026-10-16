@@ -1,5 +1,6 @@
-// Package rediscache caches current permission records using go-redis.
-// PostgreSQL tokens ensure saves immediately invalidate stale cached records.
+// Package rediscache stores current permission records using go-redis.
+// Service API records are published directly and are read without a database
+// fallback; the legacy current-policy methods remain for menu adapters.
 package rediscache
 
 import (

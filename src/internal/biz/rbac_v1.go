@@ -96,8 +96,9 @@ type RBACV1Repository interface {
 // RBACV1Service coordinates application, service-resource, role, and binding
 // administration, and authorizes requests against the current compiled policy.
 type RBACV1Service struct {
-	repository RBACV1Repository
-	policies   *rbacPolicyCache
+	repository  RBACV1Repository
+	policies    *rbacPolicyCache
+	subjectAPIs *subjectAPICache
 }
 
 // RBACV1SwaggerImportResult reports the endpoint import counts for a Swagger
@@ -111,7 +112,7 @@ type RBACV1SwaggerImportResult struct {
 // NewRBACV1Service creates the RBAC control-plane service with a bounded
 // per-process cache of compiled current policies.
 func NewRBACV1Service(repository RBACV1Repository) *RBACV1Service {
-	return &RBACV1Service{repository: repository, policies: newRBACPolicyCache(64)}
+	return &RBACV1Service{repository: repository, policies: newRBACPolicyCache(64), subjectAPIs: newSubjectAPICache(1024)}
 }
 
 // SaveEndpoint creates or updates an endpoint in the service catalog. Method
@@ -214,6 +215,9 @@ func (s *RBACV1Service) Authorize(ctx context.Context, scope string, input map[s
 	path, _ := input["path"].(string)
 	if strings.TrimSpace(service) == "" || strings.TrimSpace(subject) == "" || strings.TrimSpace(method) == "" || !strings.HasPrefix(path, "/") {
 		return RBACDecision{}, fmt.Errorf("%w: service_resource, subject, method and absolute path are required", ErrInvalidArgument)
+	}
+	if repository, ok := s.repository.(SubjectAPIRepository); ok {
+		return s.authorizeSubjectAPI(ctx, scope, input, repository)
 	}
 	policy, err := s.activeCompiledPolicy(ctx, normalizeRBACScope(scope))
 	if err != nil {

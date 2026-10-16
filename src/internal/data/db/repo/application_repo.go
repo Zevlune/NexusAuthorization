@@ -53,7 +53,13 @@ func (r *RBACV1Repository) SaveApplication(ctx context.Context, value biz.Applic
 	if value.ID == uuid.Nil {
 		err := r.pool.QueryRow(ctx, `INSERT INTO applications(app_key,display_name,description,enabled,url) VALUES($1,$2,$3,$4,$5) RETURNING `+applicationColumns,
 			value.Key, value.DisplayName, value.Description, value.Enabled, value.URL).Scan(&value.ID, &value.Key, &value.DisplayName, &value.Description, &value.Enabled, &value.URL)
-		return value, mapDBError(err)
+		if err != nil {
+			return value, mapDBError(err)
+		}
+		if err := r.refreshSubjectAPIApplication(ctx, value.Key); err != nil {
+			return value, err
+		}
+		return value, nil
 	}
 
 	tx, err := r.pool.Begin(ctx)
@@ -71,6 +77,9 @@ func (r *RBACV1Repository) SaveApplication(ctx context.Context, value biz.Applic
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return value, mapDBError(err)
+	}
+	if err := r.refreshSubjectAPIApplication(ctx, value.Key); err != nil {
+		return value, err
 	}
 	return value, nil
 }
@@ -186,5 +195,8 @@ func (r *RBACV1Repository) ReplaceApplicationServices(ctx context.Context, key s
 			return mapDBError(err)
 		}
 	}
-	return mapDBError(tx.Commit(ctx))
+	if err := mapDBError(tx.Commit(ctx)); err != nil {
+		return err
+	}
+	return r.refreshSubjectAPIApplication(ctx, key)
 }

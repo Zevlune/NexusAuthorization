@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RedisConfig enables the current permission cache when URL is set.
+// RedisConfig configures the Redis runtime store for service API authorization.
 type RedisConfig struct {
 	URL       string `yaml:"url"`
 	KeyPrefix string `yaml:"key_prefix"`

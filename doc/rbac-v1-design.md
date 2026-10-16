@@ -35,7 +35,6 @@ Application
 | API Endpoint | 描述服务中的 method、path、摘要、来源和启停状态 | 通过 `service_resource_key` 逻辑归属；角色只能引用其应用已关联服务中的接口 |
 | Role | 应用内可分配的 API 和菜单访问能力 | 角色不跨应用；用户不会直接绑定 API |
 | SubjectRoleBinding | 表示 subject 在 domain 下拥有的应用角色 | 角色必须属于同一应用 |
-| Policy Token | 应用级缓存失效标记 | `applications.policy_token`；权限数据变更时由触发器刷新，只作缓存身份，不提供版本或回滚 |
 
 ## 3. RDS 数据模型
 
@@ -133,7 +132,7 @@ role_menu_bindings
 
 `role_api_endpoint_bindings` 只允许角色授予其应用已关联服务中的 API。`role_menu_bindings` 只允许角色和菜单属于同一应用；菜单父子关系也必须属于同一应用。
 
-### 3.3 用户绑定与缓存失效
+### 3.3 用户绑定
 
 ```text
 subject_role_bindings
@@ -147,9 +146,9 @@ subject_role_bindings
 UNIQUE(application_id, subject, domain, role_id)
 ```
 
-应用表另有 `policy_token UUID NOT NULL DEFAULT gen_random_uuid()`。应用行更新时由 `application_policy_token` 触发器刷新；角色、角色 API/菜单授权、主体角色绑定、菜单、应用服务关联、API 端点和服务资源的写操作由 8 张表上的语句级触发器调用 `invalidate_current_policy()`，按受影响应用把该标记刷新为新随机 UUID。该标记只是让本地编译索引和 Redis 当前记录缓存失效的身份，不是业务版本，也不提供版本序列、历史、回滚或发布操作。
+数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。表上只保留四条业务保护触发器；缓存一致性由控制面在保存业务表后重建 Redis 记录实现。
 
-运行时鉴权读取当前可编辑表，不读取草稿或历史快照。每次鉴权先从 PostgreSQL 确认启用应用、标记和配置目录中的有效服务集合，再复用对应身份和目录摘要的本地编译索引；索引缺失时通过 go-redis 当前记录缓存或 PostgreSQL 当前表加载并编译。匹配数据结构见 [鉴权匹配与性能](authorization-matching.md)，生效与回源规则见 [权限生效设计](permission-lifecycle.md)，缓存实现见 [Redis 接入说明](redis-integration.md)。
+运行时服务 API 鉴权读取 Redis 中该「应用 key＋主体＋服务＋归一化 domain」的记录，不读取数据库、不回源；Redis 未配置、记录缺失或不 ready 时直接拒绝。菜单和全策略适配器走独立的 current-policy 路径，在一条 MVCC 语句里读取当前可编辑表并在进程内编译。两条路径都只使用当前数据，不读取草稿、历史快照或发布版本。匹配数据结构见 [鉴权匹配与性能](authorization-matching.md)，生效规则见 [权限生效设计](permission-lifecycle.md)，缓存实现见 [Redis 接入说明](redis-integration.md)。
 
 ## 4. 管理 API
 
@@ -212,7 +211,7 @@ flowchart LR
 - 菜单父子关系属于同一应用（数据库复合外键）；
 - 按钮不能作为父节点、不能有子节点，菜单树不存在循环。
 
-写入成功后不生成任何版本或快照：事务提交权限数据和新的失效标记，提交前已开始读取的在途请求可以完成其已读到的判断。批量授权插入使用 `INSERT ... SELECT unnest(...)` 等语句，配合语句级触发器使每个受影响应用在一次语句内只刷新一次标记。应用不存在或已停用、写入约束不满足时整个事务回滚，标记与权限一起回滚。当前没有历史版本、快照表或回滚入口。
+写入成功后不生成任何版本或快照：事务提交业务表，随后由控制面重建受影响应用的 Redis 记录，提交前已开始读取的在途请求可以完成其已读到的判断。应用不存在或已停用、写入约束不满足时整个事务回滚，不重建 Redis。当前没有历史版本、快照表或回滚入口。
 
 ## 7. 运行时鉴权
 
@@ -229,9 +228,9 @@ flowchart LR
 }
 ```
 
-鉴权先按 `appKey` 查找启用应用并读取当前标记与目录摘要，再按 `serviceResource`、method 和 path 匹配 API，最后检查该应用中 subject 在 domain 下的启用角色是否授予了目标 API。`domain` 可省略，省略、空白和旧值 `global` 都归一为空默认域，具名域保持独立。应用不存在或已停用返回 `404` 错误；服务未关联、服务未启用、API 不存在或未被授予时返回正常 deny 决策（`allowed=false`）。
+鉴权用 `appKey`、`serviceResource`、subject 和归一化 domain 直接从 Redis 读取该身份的 `SubjectAPIPolicy` 记录，再按 method 和 path 匹配 API；记录已聚合该用户在该服务上的启用角色授权。`domain` 可省略，省略、空白和旧值 `global` 都归一为空默认域，具名域保持独立。Redis 未配置、应用未发布、记录缺失或读取失败时返回错误并拒绝；记录中 `service_active=false`、API 不存在或未被授予时返回正常 deny 决策（`allowed=false`）。
 
-应用启用状态在每次请求即时校验；API、角色、菜单和主体角色绑定在保存提交后立即参与判断。响应不包含发布版本号。
+应用停用会触发重建并把受影响记录标记为 `service_active=false`；API、角色、菜单和主体角色绑定在保存提交并重建后立即参与判断。响应不包含发布版本号。
 
 运行时 SDK 已要求调用方同时提供应用和服务上下文，这是 breaking change。请参阅 [SDK application integration](sdk-application-integration.md)；`Client.Check` 的 `Request` 需要 `AppKey` 和 `ServiceResource`，`Client.Require` 需要同时传入两个固定的受信配置值，不能从用户输入读取。
 
@@ -249,7 +248,7 @@ ALTER DATABASE "nexus-authorization" OWNER TO "nexus-authorization";
 sh src/scripts/init-db.sh
 ```
 
-`init-db.sh` 只执行 `migrations/001_init.sql`。该脚本自带 `BEGIN` / `COMMIT`，创建完整初始 schema 和 `applications.url`，不插入业务种子数据，也不创建 `schema_migrations`；不要再包一层事务。完整说明见 [数据库初始化](../migrations/README.md)。
+`init-db.sh` 只执行 `migrations/001_init.sql`。该脚本自带 `BEGIN` / `COMMIT`，创建 `nexusauthorization` schema、完整初始结构和 `applications.url`，不插入业务种子数据，也不创建 `schema_migrations`；不要再包一层事务。数据库初始化按首次上线流程处理：删除旧数据库后，在空库执行 `migrations/001_init.sql`。完整说明见 [数据库初始化](../migrations/README.md)。
 
 按服务资源隔离的旧角色、菜单、用户绑定和模拟路由已退役，避免并存两套不一致的授权入口。共享服务资源目录、API 目录维护和 OIDC/NexusAuth 认证配置继续保留。第一次安装的完整结构和保存即生效语义都由 `migrations/001_init.sql` 直接创建。
 

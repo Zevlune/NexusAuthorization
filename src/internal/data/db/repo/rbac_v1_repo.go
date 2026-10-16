@@ -2,16 +2,10 @@ package repo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"log/slog"
-	"sort"
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luck/nexus-authorization/internal/biz"
 )
@@ -24,7 +18,9 @@ type RBACV1Repository struct {
 	cache   RBACPolicyCache
 }
 
-// RBACPolicyCache stores only current permission records, validated against database tokens.
+// RBACPolicyCache stores the current-policy adapter data used by menu and
+// full-policy callers. Service API authorization uses the SubjectAPICache
+// methods in subject_api_repo.go instead.
 type RBACPolicyCache interface {
 	Load(context.Context, biz.CurrentPolicy) (map[string]any, error)
 	Store(context.Context, biz.CurrentPolicy) error
@@ -113,7 +109,13 @@ func (r *RBACV1Repository) SaveEndpoint(ctx context.Context, key string, value b
 	} else {
 		err = r.pool.QueryRow(ctx, `UPDATE api_endpoints SET method=$3,path_template=$4,module=$5,summary=$6,enabled=$7,updated_at=NOW() WHERE id=$1 AND service_resource_key=$2 RETURNING id,service_resource_key,endpoint_key,method,path_template,module,summary,source,enabled,last_discovered_at,created_at,updated_at`, value.ID, scope, value.Method, value.PathTemplate, value.Module, value.Summary, value.Enabled).Scan(&value.ID, &value.ServiceResource, &value.EndpointKey, &value.Method, &value.PathTemplate, &value.Module, &value.Summary, &value.Source, &value.Enabled, &value.LastDiscoveredAt, &value.CreatedAt, &value.UpdatedAt)
 	}
-	return value, mapDBError(err)
+	if err != nil {
+		return value, mapDBError(err)
+	}
+	if err := r.RefreshSubjectAPIForService(ctx, scope); err != nil {
+		return value, err
+	}
+	return value, nil
 }
 func (r *RBACV1Repository) DeleteEndpoint(ctx context.Context, key string, id uuid.UUID) error {
 	scope, err := r.resourceKey(ctx, key)
@@ -127,7 +129,7 @@ func (r *RBACV1Repository) DeleteEndpoint(ctx context.Context, key string, id uu
 	if tag.RowsAffected() == 0 {
 		return biz.ErrNotFound
 	}
-	return nil
+	return r.RefreshSubjectAPIForService(ctx, scope)
 }
 
 func (r *RBACV1Repository) ListRoles(ctx context.Context, key string) ([]biz.RBACRole, error) {
@@ -182,10 +184,12 @@ func (r *RBACV1Repository) SaveRole(ctx context.Context, key string, value biz.R
 	if endpointCount != len(value.EndpointIDs) {
 		return value, fmt.Errorf("%w: an endpoint belongs to an unlinked or disabled service", biz.ErrConflict)
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM role_api_endpoint_bindings WHERE role_id=$1`, value.ID); err != nil {
+	// Preserve unchanged API grants. Saving only menu grants must not rotate
+	// service API revisions or rebuild unrelated users' API caches.
+	if _, err = tx.Exec(ctx, `DELETE FROM role_api_endpoint_bindings WHERE role_id=$1 AND NOT (endpoint_id=ANY(COALESCE($2::uuid[],'{}'::uuid[])))`, value.ID, value.EndpointIDs); err != nil {
 		return value, mapDBError(err)
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO role_api_endpoint_bindings(role_id,endpoint_id) SELECT $1,unnest($2::uuid[])`, value.ID, value.EndpointIDs); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO role_api_endpoint_bindings(role_id,endpoint_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING`, value.ID, value.EndpointIDs); err != nil {
 		return value, mapDBError(err)
 	}
 	var menuCount int
@@ -204,6 +208,9 @@ func (r *RBACV1Repository) SaveRole(ctx context.Context, key string, value biz.R
 	if err = tx.Commit(ctx); err != nil {
 		return value, mapDBError(err)
 	}
+	if err := r.refreshSubjectAPIApplication(ctx, key); err != nil {
+		return value, err
+	}
 	return value, nil
 }
 func (r *RBACV1Repository) DeleteRole(ctx context.Context, key string, id uuid.UUID) error {
@@ -218,7 +225,7 @@ func (r *RBACV1Repository) DeleteRole(ctx context.Context, key string, id uuid.U
 	if tag.RowsAffected() == 0 {
 		return biz.ErrNotFound
 	}
-	return nil
+	return r.refreshSubjectAPIApplication(ctx, key)
 }
 func (r *RBACV1Repository) ListSubjectRoleBindings(ctx context.Context, key string) ([]biz.SubjectRoleBinding, error) {
 	scope, err := r.applicationID(ctx, key)
@@ -298,7 +305,10 @@ func (r *RBACV1Repository) ReplaceSubjectRoles(ctx context.Context, key, subject
 	if _, err = tx.Exec(ctx, `INSERT INTO subject_role_bindings(application_id,subject,domain,role_id) SELECT $1,$2,$3,unnest($4::uuid[])`, scope, subject, domain, roleIDs); err != nil {
 		return mapDBError(err)
 	}
-	return mapDBError(tx.Commit(ctx))
+	if err := mapDBError(tx.Commit(ctx)); err != nil {
+		return err
+	}
+	return r.refreshSubjectAPIApplication(ctx, key)
 }
 
 func (r *RBACV1Repository) applicationID(ctx context.Context, key string) (uuid.UUID, error) {
@@ -338,66 +348,4 @@ func (r *RBACV1Repository) ListApplicationEndpoints(ctx context.Context, app, se
 		out = append(out, v)
 	}
 	return out, total, rows.Err()
-}
-
-// Read current normalized tables in one MVCC statement; nothing is persisted as JSON.
-const applicationCurrentPolicySQL = `SELECT a.policy_token::text,jsonb_build_object(
- 'app_key',a.app_key,'application_id',a.id,
- 'service_resources',COALESCE((SELECT jsonb_agg(jsonb_build_object('key',x.service_resource_key) ORDER BY x.service_resource_key) FROM application_service_resources x WHERE x.application_id=a.id AND x.service_resource_key=ANY($2::text[])),'[]'::jsonb),
- 'endpoints',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',e.id,'service_resource',e.service_resource_key,'method',e.method,'path_template',e.path_template,'enabled',e.enabled) ORDER BY e.id) FROM api_endpoints e JOIN application_service_resources x ON x.service_resource_key=e.service_resource_key WHERE x.application_id=a.id AND e.service_resource_key=ANY($2::text[])),'[]'::jsonb),
- 'roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.id,'code',r.code,'enabled',r.enabled,'endpoint_ids',COALESCE((SELECT jsonb_agg(b.endpoint_id ORDER BY b.endpoint_id) FROM role_api_endpoint_bindings b WHERE b.role_id=r.id),'[]'::jsonb),'menu_ids',COALESCE((SELECT jsonb_agg(b.menu_id ORDER BY b.menu_id) FROM role_menu_bindings b WHERE b.role_id=r.id),'[]'::jsonb)) ORDER BY r.id) FROM roles r WHERE r.application_id=a.id),'[]'::jsonb),
- 'subject_roles',COALESCE((SELECT jsonb_agg(jsonb_build_object('subject',b.subject,'domain',b.domain,'role_id',b.role_id) ORDER BY b.subject,b.domain,b.role_id) FROM subject_role_bindings b WHERE b.application_id=a.id),'[]'::jsonb),
- 'menus',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',m.id,'parent_id',m.parent_id,'code',m.code,'name',m.name,'menu_type',m.menu_type,'route',m.route,'component',m.component,'icon',m.icon,'sort_order',m.sort_order,'enabled',m.enabled) ORDER BY m.sort_order,m.id) FROM menus m WHERE m.application_id=a.id),'[]'::jsonb)
- ) FROM applications a WHERE a.id=$1 AND a.enabled AND a.policy_token::text=split_part($3,':',1)`
-
-func (r *RBACV1Repository) GetPolicyMetadata(ctx context.Context, scope string) (biz.CurrentPolicy, error) {
-	var p biz.CurrentPolicy
-	if strings.TrimSpace(scope) == "" {
-		return p, biz.ErrInvalidArgument
-	}
-	if err := r.pool.QueryRow(ctx, `SELECT id,policy_token::text FROM applications WHERE app_key=$1 AND enabled`, scope).Scan(&p.ApplicationID, &p.Token); err != nil {
-		return p, mapDBError(err)
-	}
-	keys, err := r.activeServiceKeys(ctx)
-	if err != nil {
-		return p, err
-	}
-	sort.Strings(keys)
-	raw, _ := json.Marshal(keys)
-	digest := sha256.Sum256(raw)
-	p.Token += ":" + hex.EncodeToString(digest[:])
-	p.ServiceKeys = keys
-	return p, nil
-}
-
-func (r *RBACV1Repository) GetCurrentPolicy(ctx context.Context, p biz.CurrentPolicy) (biz.CurrentPolicy, error) {
-	if r.cache != nil {
-		data, err := r.cache.Load(ctx, p)
-		if err == nil {
-			p.Data = data
-			return p, nil
-		}
-		if ctx.Err() != nil {
-			return p, ctx.Err()
-		}
-	}
-	var raw []byte
-	var token string
-	err := r.pool.QueryRow(ctx, applicationCurrentPolicySQL, p.ApplicationID, p.ServiceKeys, p.Token).Scan(&token, &raw)
-	// A save won the race after metadata was read. Retry with fresh metadata.
-	if err == pgx.ErrNoRows {
-		return p, biz.ErrConflict
-	}
-	if err != nil {
-		return p, mapDBError(err)
-	}
-	if err = json.Unmarshal(raw, &p.Data); err != nil {
-		return p, err
-	}
-	if r.cache != nil {
-		if err := r.cache.Store(ctx, p); err != nil {
-			slog.WarnContext(ctx, "current policy cache write failed; using database", "application_id", p.ApplicationID, "error", err)
-		}
-	}
-	return p, nil
 }
