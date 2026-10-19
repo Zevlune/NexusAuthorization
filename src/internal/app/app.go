@@ -25,13 +25,12 @@ type Application struct {
 
 // New 创建权限中心应用，并完成数据库仓储、业务服务和认证服务的装配。
 func New(ctx context.Context, cfg *config.Config) (*Application, error) {
+	if cfg.Redis.Enabled && strings.TrimSpace(cfg.Redis.URL) == "" {
+		return nil, fmt.Errorf("redis.url is required when redis.enabled is true")
+	}
 	pool, err := db.NewPool(ctx, cfg.Database)
 	if err != nil {
 		return nil, err
-	}
-	if strings.TrimSpace(cfg.Redis.URL) == "" {
-		pool.Close()
-		return nil, fmt.Errorf("redis.url is required for runtime service API authorization")
 	}
 	serviceResourceRepository := repo.NewServiceResourceRepository(pool)
 	serviceResources, err := newServiceResourceCatalog(serviceResourceRepository, cfg.ServiceResource)
@@ -58,20 +57,23 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 		}
 	}
 	rbacRepository := repo.NewRBACV1Repository(pool, serviceResources)
+	rbacService := biz.NewRBACV1Service(rbacRepository)
 	var policyCache *rediscache.PolicyCache
-	if strings.TrimSpace(cfg.Redis.URL) != "" {
+	if cfg.Redis.Enabled {
 		policyCache, err = rediscache.New(cfg.Redis)
 		if err != nil {
 			pool.Close()
 			return nil, err
 		}
 		rbacRepository.WithPolicyCache(policyCache)
+		serviceResourceRepository.WithSubjectAPISync(rbacRepository.RefreshSubjectAPIForService)
+	} else {
+		rbacService.WithDatabaseAuthorization()
 	}
-	serviceResourceRepository.WithSubjectAPISync(rbacRepository.RefreshSubjectAPIForService)
 	return &Application{
 		Pool:             pool,
 		ServiceResources: serviceResources,
-		RBACV1:           biz.NewRBACV1Service(rbacRepository),
+		RBACV1:           rbacService,
 		PolicyCache:      policyCache,
 		Auth:             authenticator,
 		Users:            users,

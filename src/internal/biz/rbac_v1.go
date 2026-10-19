@@ -96,9 +96,10 @@ type RBACV1Repository interface {
 // RBACV1Service coordinates application, service-resource, role, and binding
 // administration, and authorizes requests against the current compiled policy.
 type RBACV1Service struct {
-	repository  RBACV1Repository
-	policies    *rbacPolicyCache
-	subjectAPIs *subjectAPICache
+	repository            RBACV1Repository
+	policies              *rbacPolicyCache
+	subjectAPIs           *subjectAPICache
+	databaseAuthorization bool
 }
 
 // RBACV1SwaggerImportResult reports the endpoint import counts for a Swagger
@@ -113,6 +114,14 @@ type RBACV1SwaggerImportResult struct {
 // per-process cache of compiled current policies.
 func NewRBACV1Service(repository RBACV1Repository) *RBACV1Service {
 	return &RBACV1Service{repository: repository, policies: newRBACPolicyCache(64), subjectAPIs: newSubjectAPICache(1024)}
+}
+
+// WithDatabaseAuthorization selects current database records for API decisions.
+// Configure this at startup only when Redis is explicitly disabled; Redis errors
+// must never cause an automatic change of authorization source.
+func (s *RBACV1Service) WithDatabaseAuthorization() *RBACV1Service {
+	s.databaseAuthorization = true
+	return s
 }
 
 // SaveEndpoint creates or updates an endpoint in the service catalog. Method
@@ -216,7 +225,7 @@ func (s *RBACV1Service) Authorize(ctx context.Context, scope string, input map[s
 	if strings.TrimSpace(service) == "" || strings.TrimSpace(subject) == "" || strings.TrimSpace(method) == "" || !strings.HasPrefix(path, "/") {
 		return RBACDecision{}, fmt.Errorf("%w: service_resource, subject, method and absolute path are required", ErrInvalidArgument)
 	}
-	if repository, ok := s.repository.(SubjectAPIRepository); ok {
+	if repository, ok := s.repository.(SubjectAPIRepository); ok && !s.databaseAuthorization {
 		return s.authorizeSubjectAPI(ctx, scope, input, repository)
 	}
 	policy, err := s.activeCompiledPolicy(ctx, normalizeRBACScope(scope))

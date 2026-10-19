@@ -137,6 +137,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
+	cfg.Redis.Enabled = true
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -144,7 +145,9 @@ func Load(path string) (*Config, error) {
 		cfg.Database.URL = value
 	}
 	applyOIDCEnv(&cfg.OIDC)
-	applyRedisEnv(&cfg.Redis)
+	if err := applyRedisEnv(&cfg.Redis); err != nil {
+		return nil, err
+	}
 	if err := cfg.Redis.Validate(); err != nil {
 		return nil, err
 	}

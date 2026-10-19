@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 // RedisConfig configures the Redis runtime store for service API authorization.
 type RedisConfig struct {
+	Enabled   bool   `yaml:"enabled"`
 	URL       string `yaml:"url"`
 	KeyPrefix string `yaml:"key_prefix"`
 	CacheTTL  string `yaml:"cache_ttl"`
@@ -44,12 +46,14 @@ func redisDuration(value string, fallback time.Duration, name string) (time.Dura
 }
 
 func (c RedisConfig) Validate() error {
-	if strings.TrimSpace(c.URL) == "" {
+	if !c.Enabled {
 		return nil
 	}
-	if _, err := redis.ParseURL(strings.TrimSpace(c.URL)); err != nil {
-		// Never include the URL or parser error: either may contain credentials.
-		return fmt.Errorf("redis.url must be a valid redis:// or rediss:// URL")
+	if url := strings.TrimSpace(c.URL); url != "" {
+		if _, err := redis.ParseURL(url); err != nil {
+			// Never include the URL or parser error: either may contain credentials.
+			return fmt.Errorf("redis.url must be a valid redis:// or rediss:// URL")
+		}
 	}
 	if strings.ContainsAny(c.Prefix(), "{} \t\r\n") || strings.HasSuffix(c.Prefix(), ":") {
 		return fmt.Errorf("redis.key_prefix must not contain braces or whitespace or end with a colon")
@@ -61,7 +65,14 @@ func (c RedisConfig) Validate() error {
 	return err
 }
 
-func applyRedisEnv(cfg *RedisConfig) {
+func applyRedisEnv(cfg *RedisConfig) error {
+	if value, ok := os.LookupEnv("NEXUSAUTHORIZATION_REDIS_ENABLED"); ok {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("NEXUSAUTHORIZATION_REDIS_ENABLED must be a valid boolean: %w", err)
+		}
+		cfg.Enabled = enabled
+	}
 	for _, field := range []struct {
 		key string
 		dst *string
@@ -75,4 +86,5 @@ func applyRedisEnv(cfg *RedisConfig) {
 			*field.dst = value
 		}
 	}
+	return nil
 }

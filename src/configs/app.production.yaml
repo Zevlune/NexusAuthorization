@@ -8,8 +8,10 @@ database:
   url: ""
   max_conns: 10
   min_conns: 2
-# Required runtime store for service API authorization.
+# Service API authorization uses Redis by default. Set enabled: false to use
+# database current-policy authorization without creating a Redis client.
 redis:
+  enabled: true
   url: ""
   key_prefix: "nexusauthorization:prod"
   cache_ttl: "24h"
