@@ -115,9 +115,9 @@ func New(ctx context.Context, cfg config.OIDCConfig) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider, err := oidc.NewProvider(withOIDCHTTPClient(ctx, httpClient), cfg.Authority)
+	provider, err := discoverOIDCProvider(ctx, cfg.Authority, httpClient)
 	if err != nil {
-		return nil, fmt.Errorf("discover oidc provider: %w", err)
+		return nil, err
 	}
 	service.sessions = sessions
 	service.httpClient = httpClient
@@ -537,13 +537,13 @@ func newOIDCHTTPClient(cfg config.OIDCConfig) (*http.Client, *url.URL, *url.URL,
 		return nil, nil, nil, err
 	}
 	if strings.TrimSpace(cfg.BackchannelAuthority) == "" {
-		return nil, public, nil, nil
+		return &http.Client{Transport: http.DefaultTransport, Timeout: 15 * time.Second}, public, nil, nil
 	}
 	backchannel, err := parseAuthority(cfg.BackchannelAuthority, "oidc.backchannel_authority")
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	return &http.Client{Transport: &authorityRoutingTransport{
+	return &http.Client{Timeout: 15 * time.Second, Transport: &authorityRoutingTransport{
 		base:        http.DefaultTransport,
 		public:      public,
 		backchannel: backchannel,
