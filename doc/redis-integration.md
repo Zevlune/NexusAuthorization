@@ -1,10 +1,21 @@
 # Redis 服务 API 授权
 
-使用 `github.com/redis/go-redis/v9`。运行时服务 API 鉴权直接以 Redis 为授权来源：管理端保存业务表后，由服务同步重建受影响的 Redis 记录；鉴权请求只读这些记录，不读取数据库，也不回源。数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。保存生效与撤权规则见 [权限生效设计](permission-lifecycle.md)。
+服务 API 鉴权有两种运行模式，由 `redis.enabled` 选择，默认 `true`。启用模式使用 `github.com/redis/go-redis/v9`：管理端保存业务表后，由服务同步重建受影响的 Redis 记录；鉴权请求只读这些记录，不读取数据库，也不回源。显式禁用后，服务 API 鉴权走数据库 current-policy 路径，不创建 Redis 客户端，也不发布 Redis 记录。数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。保存生效与撤权规则见 [权限生效设计](permission-lifecycle.md)。
 
-菜单和全策略适配器是独立域，走自己的 current-policy 路径：每次请求在一条 MVCC 语句里读取当前规范化业务表并编译，不读取本页描述的服务 API Redis 记录，也不依赖这些记录是否 ready。因此 Redis 记录只服务服务 API 鉴权入口。
+菜单和全策略适配器是独立域，始终走自己的 current-policy 路径：每次请求在一条 MVCC 语句里读取当前规范化业务表并编译，不读取本页描述的服务 API Redis 记录，也不依赖这些记录是否 ready。Redis 开关只控制服务 API 鉴权来源和 Redis 写入，不控制菜单。
+
+## 启用开关
+
+- `redis.enabled` 省略时默认为 `true`；显式 YAML `false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 选择数据库 current-policy API 鉴权。环境变量覆盖 YAML。
+- 启用时必须设置非空 `redis.url`。缺失或格式错误会使应用启动失败；启动阶段不会 PING Redis。
+- 启用后，连接失败、超时、记录缺失、`state` 未就绪或记录损坏都直接拒绝，不会自动回退数据库。
+- 禁用时不创建 Redis 客户端，也不在保存应用、服务、角色或绑定时发布 Redis。数据库 current-policy 路径仍读取当前业务表。
+- 开关在进程启动时生效，修改后必须重启 API。重新启用时，先设置 `redis.enabled=true` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，然后在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定，以重建对应应用的 Redis 记录。
+- 该开关不增加数据库迁移或版本表，也没有发布版本、快照或回滚记录。
 
 ## key 标准与大小
+
+本节仅适用于启用的 Redis 服务 API 鉴权模式。
 
 ### 授权记录
 
@@ -39,19 +50,19 @@ PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:members
 
 ## 读取语义
 
-鉴权入口（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）每次请求都直接从 Redis 读取该「应用 key + 主体 + 服务 + 归一化 domain」的记录，不经过数据库，也没有回源路径。一次 Lua 脚本在同一步内读取应用的 `state` 与记录：
+Redis 模式下，鉴权入口（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）每次请求都直接从 Redis 读取该「应用 key + 主体 + 服务 + 归一化 domain」的记录，不经过数据库，也没有回源路径。一次 Lua 脚本在同一步内读取应用的 `state` 与记录：
 
 1. `state = ready` 且记录存在：校验记录身份与请求一致、JSON 合法且不超过 16 MiB，再按内容哈希复用进程内已编译索引（上限 1024，同一内容并发加载用 30 秒 singleflight 合并），匹配 `service_resource + method + path`。
 2. `state = ready` 但该身份没有记录：普通未命中，拒绝。
 3. 应用从未发布（`state` 不存在）：未命中，拒绝。
 4. `state = updating`：应用正在批量替换，直接拒绝，不返回可能半写的记录。
-5. Redis 未配置、连接失败、超时、记录损坏或身份不匹配：报错并拒绝。
+5. 连接失败、超时、记录损坏或身份不匹配：报错并拒绝。
 
-这些情形都不会读取数据库放行。Redis 未配置或不可用时，服务 API 鉴权没有可读授权，因此直接拒绝；这是设计要求。菜单路径不受影响，见下。
+这些情形都不会读取数据库放行。Redis 模式启动时已经要求 `redis.url` 非空；运行中不可用或未就绪时，服务 API 鉴权直接拒绝，这是设计要求。菜单路径不受影响，见下。禁用 Redis 时不会进入本节流程，服务 API 改走数据库 current-policy 路径。
 
 ## 写入与重建
 
-管理端保存业务表后，控制面在同一进程内重建受影响应用的 Redis 记录，而不是异步等待：
+Redis 模式下，管理端保存业务表后，控制面在同一进程内重建受影响应用的 Redis 记录，而不是异步等待：
 
 1. 先把受影响应用置为 `updating`（`BlockSubjectAPIApplications`），使并发鉴权在替换期间被拒绝。
 2. 读取旧 `members`，删除本次不再存在的记录，再分批写入新记录（写授权记录并 `SADD members`）。每批最多 64 条，受配置的 `timeout` 限制，整个替换受 30 秒 deadline 约束。
@@ -59,14 +70,15 @@ PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:members
 
 删除先于写入，且闸门只在全部记录落盘后才打开，因此已离开的用户不会在闸门重开后仍被寻址。触发重建的写操作包括：保存应用、替换应用服务关联、保存/删除角色、替换主体角色、保存/删除 API 端点、创建/更新/删除服务资源。服务目录变更会重建所有关联该服务的应用。
 
-菜单 token 不参与服务 API 记录；纯菜单保存不改变服务 API 记录。菜单与全策略适配器仍按应用读取当前规范化业务表并在进程内编译，属于独立的 current-policy 域。
+菜单 token 不参与服务 API 记录；纯菜单保存不改变服务 API 记录。菜单与全策略适配器仍按应用读取当前规范化业务表并在进程内编译，属于独立的 current-policy 域。Redis 禁用时，上述保存流程不执行任何 Redis 发布。
 
 ## 配置
 
-Redis 是服务 API 鉴权的运行时依赖：`redis.url` 为空时应用启动失败，避免业务配置已经保存但服务 API 授权记录没有生成。菜单 current-policy 路径仍按数据库工作，但不会绕过这个启动约束。
+默认的 Redis 模式如下：
 
 ```yaml
 redis:
+  enabled: true
   url: "redis://localhost:6379/0"
   key_prefix: "nexusauthorization:dev"
   cache_ttl: "24h"
@@ -74,13 +86,27 @@ redis:
 ```
 
 ```sh
+export NEXUSAUTHORIZATION_REDIS_ENABLED='true'
 export NEXUSAUTHORIZATION_REDIS_URL='redis://localhost:6379/0'
 export NEXUSAUTHORIZATION_REDIS_KEY_PREFIX='nexusauthorization:dev'
 export NEXUSAUTHORIZATION_REDIS_CACHE_TTL='24h'
 export NEXUSAUTHORIZATION_REDIS_TIMEOUT='200ms'
 ```
 
-`key_prefix` 决定 key 的 `PREFIX`。`timeout` 限制单次 Redis 网络操作（默认 200 ms，至少 1 ms），同时约束重建的每一批与鉴权读取。`cache_ttl` 是配置层保留的当前记录缓存 TTL，默认 24h；本页描述的服务 API 授权记录写入时不设 TTL，不受该值影响。旧 `snapshot_ttl` / `NEXUSAUTHORIZATION_REDIS_SNAPSHOT_TTL` 已移除。支持 redis://、rediss://、用户名、密码和 DB 编号，凭据特殊字符需 URL 编码。应用启动时要求 `redis.url` 非空，但不会在启动阶段强制 PING；连接失败会在实际重建或鉴权时暴露。
+数据库 current-policy API 模式可设置为：
+
+```yaml
+redis:
+  enabled: false
+```
+
+或：
+
+```sh
+export NEXUSAUTHORIZATION_REDIS_ENABLED='false'
+```
+
+禁用时 `redis.url`、`key_prefix`、`cache_ttl` 和 `timeout` 不参与 Redis 连接或发布，也不需要配置为有效值。`key_prefix` 决定启用模式的 key `PREFIX`。`timeout` 限制单次 Redis 网络操作（默认 200 ms，至少 1 ms），同时约束重建的每一批与鉴权读取。`cache_ttl` 是配置层保留的当前记录缓存 TTL，默认 24h；本页描述的服务 API 授权记录写入时不设 TTL，不受该值影响。旧 `snapshot_ttl` / `NEXUSAUTHORIZATION_REDIS_SNAPSHOT_TTL` 已移除。支持 redis://、rediss://、用户名、密码和 DB 编号，凭据特殊字符需 URL 编码。应用启动时要求启用的 `redis.url` 非空，但不会在启动阶段强制 PING；连接失败会在实际重建或鉴权时暴露。
 
 ## 验证
 

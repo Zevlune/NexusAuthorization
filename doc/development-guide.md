@@ -10,7 +10,7 @@
 - Node.js 与 npm；
 - PostgreSQL 16；
 - Docker Compose；
-- Redis（运行时服务 API 鉴权需要；菜单 current-policy 路径不依赖）；
+- Redis（服务 API 鉴权默认启用；禁用后使用数据库 current-policy，菜单始终不依赖）；
 - 可选 Playwright 浏览器运行环境。
 
 仓库主要目录：
@@ -43,6 +43,20 @@ docker compose -f docker-compose-dev.yml ps
 
 默认 Dashboard 地址为 `http://127.0.0.1:5274`，PostgreSQL 地址为 `localhost:55434`。默认关闭 OIDC，适合本地页面和 API 开发；需要联调统一认证时，通过 `.env.dev` 覆盖 OIDC、服务目录和 SCIM 配置。
 
+服务 API 的 `redis.enabled` 默认为 `true`，启用时必须提供非空 Redis URL：
+
+```sh
+NEXUSAUTHORIZATION_REDIS_ENABLED=true \
+NEXUSAUTHORIZATION_REDIS_URL='redis://localhost:6379/0' \
+docker compose -f docker-compose-dev.yml up -d
+```
+
+本地不需要 Redis 时，显式禁用后重启 API：
+
+```sh
+NEXUSAUTHORIZATION_REDIS_ENABLED=false docker compose -f docker-compose-dev.yml up -d
+```
+
 ### 2.2 独立运行后端
 
 指向已初始化的 PostgreSQL 后，进入 `src/` 启动：
@@ -52,7 +66,7 @@ cd src
 go run ./cmd/api-server
 ```
 
-默认读取 `src/configs/app.yaml`。数据库 URL、OIDC、服务目录、SCIM 和 Redis 均可以通过 `NEXUSAUTHORIZATION_*` 环境变量覆盖。配置加载时会验证数据库、服务目录 source、远程 URL、Redis URL 和 SCIM 超时；配置错误会在进程启动阶段退出。
+默认读取 `src/configs/app.yaml`。数据库 URL、OIDC、服务目录、SCIM 和 Redis 均可以通过 `NEXUSAUTHORIZATION_*` 环境变量覆盖。`redis.enabled` 省略时仍为 `true`；启用时 `redis.url` 必须非空，禁用时不创建 Redis 客户端或发布记录。配置加载时会验证数据库、服务目录 source、远程 URL、启用模式的 Redis URL 和 SCIM 超时；配置错误会在进程启动阶段退出。
 
 ### 2.3 启动前端
 
@@ -115,7 +129,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 1. HTTP Handler 只负责读取路径/查询/JSON、调用业务服务和映射错误；
 2. `internal/biz` 负责校验、领域规则、授权决策和外部目录接口；
 3. Repository 负责 SQL、事务、行映射和数据库约束协作；
-4. Redis 层保存服务 API 授权记录，控制面在保存业务表后同步重建，不保存业务版本；
+4. Redis 启用时，Redis 层保存服务 API 授权记录，控制面在保存业务表后同步重建，不保存业务版本；禁用时业务入口走数据库 current-policy，不访问 Redis；
 5. Dashboard API 统一走 `dashboard/src/api/request.ts`，页面不自行创建 Axios 实例；
 6. SDK 保持失败关闭，并且禁止把用户可控输入当作 app/service/subject 的可信来源。
 
@@ -129,7 +143,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 - Repository 查询和事务；
 - `CurrentPolicy` 数据装载；
 - `compiledRBACPolicy` 的编译和匹配；
-- 保存后 Redis 服务 API 记录重建；
+- Redis 启用时的保存后服务 API 记录重建，以及禁用时的数据库 current-policy 读取；
 - `/api/v1/rbac-v1/simulate` 输入和结果；
 - `/api/v1/authorize` 请求字段及 SDK；
 - 管理端 API、表单、回显和错误处理；
@@ -212,7 +226,7 @@ docker build -t nexusauthorization-dashboard:local .
 4. 角色是否启用、是否授权该 API、主体是否绑定该角色；
 5. domain 是否和绑定记录一致；
 6. 实际 path 是否符合固定/参数路径规则；
-7. Redis 服务 API 记录是否在保存后重建成功、应用 `state` 是否为 `ready`，以及是否使用了正确环境前缀；
+7. 确认 `redis.enabled`；启用时检查 Redis 服务 API 记录是否重建成功、应用 `state` 是否为 `ready` 及前缀，禁用时检查数据库 current-policy；
 8. 用 `/api/v1/rbac-v1/simulate` 复现同一组输入。
 
 若页面无法登录，先用 `/api/healthz` 和 `/api/auth/config` 区分进程问题、反向代理问题与 OIDC 配置问题。若服务目录或 SCIM 失败，直接检查外部 URL、凭证和超时，不要修改权限表来绕过依赖故障。

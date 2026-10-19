@@ -45,6 +45,8 @@ NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL='https://auth.example.com
 NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY='CHANGE_ME'
 NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL='https://auth.example.com'
 NEXUSAUTHORIZATION_SCIM_API_KEY='CHANGE_ME'
+NEXUSAUTHORIZATION_REDIS_ENABLED='true'
+NEXUSAUTHORIZATION_REDIS_URL='redis://redis.example.com:6379/0'
 ```
 
 以数据库 owner 身份执行完整初始化：
@@ -95,12 +97,13 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL` | nexusauth 模式 | 远程服务目录地址 |
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY` | nexusauth 模式 | 服务目录读取凭证 |
 | `NEXUSAUTHORIZATION_SCIM_*` | 需要分配用户 | NexusAuth SCIM 地址、只读凭证和超时 |
-| `NEXUSAUTHORIZATION_REDIS_URL` | 需要运行时服务 API 鉴权 | 服务 API 鉴权直接读取 Redis；为空时应用启动失败 |
+| `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
+| `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用、未就绪或记录损坏时拒绝，不回退数据库 |
 | `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 多环境必须使用不同前缀 |
 | `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 使用 Redis | 配置层保留的当前记录缓存 TTL，默认 24h；服务 API 授权记录不设 TTL |
 | `NEXUSAUTHORIZATION_REDIS_TIMEOUT` | 使用 Redis | Redis 操作超时，默认 200ms |
 
-配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
+配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。`redis.enabled` 在 YAML 省略时仍为 `true`。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
 
 ## 5. 初始化完成后的核对
 
@@ -114,7 +117,9 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 6. 用权限模拟验证一次允许和一次拒绝；
 7. 删除测试角色和测试应用，确认清理规则符合预期。
 
-业务配置由 PostgreSQL 保存；运行时服务 API 鉴权直接读取 Redis。要启动并验证业务服务实际鉴权，必须设置 `NEXUSAUTHORIZATION_REDIS_URL`，并确认保存业务表后 Redis 记录重建成功；为空时应用启动失败。菜单 current-policy 路径本身不读取服务 API Redis 记录，但应用仍要求配置 Redis。
+业务配置由 PostgreSQL 保存。Redis 启用时，运行时服务 API 鉴权直接读取 Redis，启动要求 `NEXUSAUTHORIZATION_REDIS_URL` 非空；应确认保存业务表后 Redis 记录重建成功。Redis 连接失败、应用记录未 ready、记录缺失或损坏时鉴权拒绝，不会自动回退数据库。
+
+需要不依赖 Redis 的服务 API 鉴权时，设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 后重启 API。该模式使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。菜单始终使用独立的 current-policy 路径，不受开关影响。切换只在重启后生效。
 
 ## 6. 日常操作
 
@@ -143,7 +148,7 @@ docker compose -f docker-compose.yml ps
 - PostgreSQL 全库，包括 schema、触发器、函数和权限数据；
 - `/app/data` 中的 OIDC 会话密钥和运行时数据；
 - Compose 文件、环境变量模板和实际镜像版本；
-- Redis 不作为主备份来源，它可以清空并由 PostgreSQL 重建；服务 API 授权记录会在下一次保存命中受影响应用时整体重建。
+- Redis 不作为主备份来源；启用模式下它可以清空并由 PostgreSQL 重建，服务 API 授权记录会在下一次保存命中受影响应用时整体重建。
 
 示例：
 
@@ -152,19 +157,34 @@ pg_dump "$NEXUSAUTHORIZATION_DATABASE_URL" \
   --format=custom --file=nexus-authorization-$(date +%Y%m%d).dump
 ```
 
-恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。恢复后 Redis 可能为空或残留旧记录：保存命中受影响应用的业务表（例如重新保存应用）即可让该应用整体重建；也可以清空对应前缀后重建。菜单 current-policy 路径直接读取数据库，不依赖这些记录。
+恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。启用 Redis 时，恢复后 Redis 可能为空或残留旧记录：保存命中受影响应用的业务表（例如重新保存应用）即可让该应用整体重建；也可以清空对应前缀后重建。若从 Redis 禁用模式重新启用，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定以重建记录。菜单 current-policy 路径直接读取数据库，不依赖这些记录。
 
 ## 8. 故障排查
 
+### 公网 OIDC 发现请求出现 EOF
+
+保持 `NEXUSAUTHORIZATION_OIDC_AUTHORITY` 为公网 HTTPS issuer。启动时发现请求最多尝试 3 次，每次 HTTP 请求超时为 15 秒；仅对 EOF、连接重置等暂时性网络错误重试，issuer 不匹配、证书错误和 HTTP 错误仍直接返回。重试不会在失败后自动切换地址；如果显式配置 `NEXUSAUTHORIZATION_OIDC_BACKCHANNEL_AUTHORITY`，发往公开 authority 的服务端请求会从第一次尝试起路由到 backchannel，发现文档的 `issuer` 仍须与公开 `AUTHORITY` 一致。
+
+若未配置 backchannel 且重试后仍失败，需要从部署服务器的相同 Docker 网络验证公网连接。API 正在反复重启时，可以使用临时容器：
+
+```sh
+docker run --rm --network nexusauth alpine:3.22 \
+  wget -S -O- https://authlogin.kawhiwei.com:8800/.well-known/openid-configuration
+```
+
+本机或浏览器可访问并不能证明部署容器也可访问。检查部署侧 DNS、出站代理、防火墙和公网反向代理的 TLS 日志；配置 backchannel 时还要验证 API 容器能访问该内网地址。返回的发现文档 `issuer` 应与公开 `AUTHORITY` 一致。
+
+另检查 API 的健康检查路径是否为 `/api/healthz`。误写 `/healthz` 会导致 API 启动后仍被标记为 unhealthy，阻止依赖 `service_healthy` 的 Dashboard 启动。
+
 | 现象 | 优先检查 |
 | --- | --- |
-| 容器反复重启 | `docker compose logs`；数据库 URL、服务目录 source、OIDC 必填项和配置校验错误 |
+| 容器反复重启 | `docker compose logs`；数据库 URL、服务目录 source、OIDC 必填项、Redis 启用时的 URL 和配置校验错误 |
 | `/api/healthz` 正常但页面打不开 | Dashboard 容器、宿主端口、Nginx 配置、反向代理和浏览器控制台 |
 | 登录回调失败 | OIDC redirect URI 是否逐字符匹配、HTTPS/cookie、authority 是否可达、client secret |
 | 服务资源列表失败 | `source`、远程 URL、API key、远程 TLS 和超时 |
 | 分配用户失败 | SCIM URL、只读凭证、上游分页响应和 `NEXUSAUTHORIZATION_SCIM_TIMEOUT` |
-| 权限保存成功但鉴权旧结果 | 检查事务是否提交、Redis 重建是否成功、应用 `state` 是否为 `ready`、key 前缀和数据库日志；重新保存可整体重建 |
-| 运行时鉴权全部拒绝 | `NEXUSAUTHORIZATION_REDIS_URL` 是否配置、应用 `state` 是否为 `ready`、记录是否存在、key 前缀是否正确；恢复或清空后需重建 Redis 记录 |
+| 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、Redis 重建是否成功、应用 `state` 是否为 `ready`、key 前缀和数据库日志；重新保存可整体重建 |
+| 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、应用 `state`、记录和 key 前缀，恢复或清空后需重建 Redis 记录 |
 | 取消服务关联冲突 | 先从所有角色移除该服务的 API 授权，再取消关联 |
 | 运行时接口返回 401 | 当前版本是否配置了 `authorization.service_credential`；管理端 OIDC cookie 不能代替服务凭证 |
 | 运行时接口返回拒绝 | 核对 app、service、subject、domain、method、实际 path 和角色绑定，先用权限模拟复现 |

@@ -16,7 +16,7 @@ Subject + Domain -> Application -> Role -> API Endpoint
 - 角色和菜单属于应用；角色只能授予应用已关联服务中的 API。
 - 菜单直接属于应用，不要求创建 OAuth 客户端。
 - 应用停用立即生效；API、角色、菜单和主体角色绑定在保存提交后立即生效。
-- 运行时鉴权和模拟直接以 Redis 为授权来源：每个「应用 key＋主体＋服务＋归一化 domain」读取一条 `SubjectAPIPolicy` 记录，不读取数据库、不回源；Redis 未配置、记录缺失或不 ready 时直接拒绝。菜单和全策略适配器走独立的 current-policy 路径，读取当前规范化业务表并在进程内编译。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
+- 服务 API 鉴权模式由 `redis.enabled` 选择，默认 `true`。启用时，每个「应用 key＋主体＋服务＋归一化 domain」读取一条 Redis `SubjectAPIPolicy` 记录，不读取数据库、不回源；记录缺失、未 ready 或 Redis 不可用时直接拒绝。显式禁用时不创建 Redis 客户端，也不发布记录，运行时鉴权和模拟改用数据库 current-policy。菜单和全策略适配器始终走独立的 current-policy 路径。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
 
 当前版本不包含显式 `deny`、策略文档、策略审批、数据行级/字段级权限、ABAC、用户组、组织架构，也不提供发布版本、历史快照和版本回滚接口。
 
@@ -268,18 +268,19 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 写入请求（角色 / 授权 / 菜单 / 绑定 / 服务关联 / API / 目录）
 -> 仓储检查与数据库唯一约束、触发器校验
 -> 提交当前业务表
--> 控制面把受影响应用置为 state=updating，删除旧记录、分批写入新记录
+-> Redis 启用：控制面把受影响应用置为 state=updating，删除旧记录、分批写入新记录
 -> 全部写完后置为 state=ready
--> 提交后开始的鉴权请求读取新权限
+-> Redis 禁用：不创建 Redis 客户端、不发布，鉴权读取数据库 current-policy
+-> 提交后开始的鉴权请求使用新权限
 ```
 
-- 服务 API 授权直接以 Redis 为准：每个「应用 key＋主体＋服务＋归一化 domain」的 `SubjectAPIPolicy` 是普通 JSON，无版本号、不设 TTL；保存的业务表写入与 Redis 重建由控制面顺序执行，数据库不保存任何缓存标记。
-- 受影响应用在重建期间 `state=updating`，并发鉴权直接拒绝；删除先于写入、闸门最后打开，不会读到半写集合。任何一步失败都保持 `updating`，下一次重建重试。
-- 角色 API/菜单授权、主体角色绑定、应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用；纯菜单保存只影响 current-policy 路径。
-- 鉴权（含权限模拟）只读 Redis，不读取数据库、不回源；Redis 未配置、记录缺失、`state=updating`、损坏或超时都拒绝。
+- Redis 启用时，每个「应用 key＋主体＋服务＋归一化 domain」的 `SubjectAPIPolicy` 是普通 JSON，无版本号、不设 TTL；保存的业务表写入与 Redis 重建由控制面顺序执行，数据库不保存任何缓存标记。
+- Redis 启用时，受影响应用在重建期间 `state=updating`，并发鉴权直接拒绝；删除先于写入、闸门最后打开，不会读到半写集合。任何一步失败都保持 `updating`，下一次重建重试。
+- Redis 启用时，角色 API/菜单授权、主体角色绑定、应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用；纯菜单保存只影响 current-policy 路径。Redis 禁用时不执行发布。
+- Redis 启用时，鉴权（含权限模拟）只读 Redis，不读取数据库、不回源；记录缺失、`state=updating`、损坏或超时都拒绝。禁用时不连接 Redis，使用数据库 current-policy。
 - 提交前已开始读取的在途请求可以完成其已读到的判断；提交并重建后开始的请求使用新权限。
 
-菜单 current-policy 路径读取当前规范化业务表并计算内容摘要，在进程内编译，不依赖服务 API Redis 记录；Redis 未配置时菜单仍可用。事务、单飞、缓存容量和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
+菜单 current-policy 路径读取当前规范化业务表并计算内容摘要，在进程内编译，不受 Redis 开关控制。开关在重启后生效；从禁用切回启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定，以重建 Redis 记录。事务、单飞、缓存容量和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
 
 ## 8. 运行时鉴权
 
@@ -323,15 +324,17 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 | `matched_permissions` | 预留字段，当前实现不填充，序列化时省略 |
 | `matched_roles` | 命中的角色编码 |
 
-算法：
+算法（以下为 `redis.enabled=true`，也是省略 YAML 时的默认值）：
 
 ```text
 1. 用 appKey、服务、subject 和归一化 domain 直接从 Redis 读取该身份的 SubjectAPIPolicy 记录（Lua 原子读取 state + record）。
-2. Redis 未配置、应用未 ready、记录缺失或读取出错 -> 拒绝；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
+2. 应用未 ready、记录缺失、记录损坏或读取出错 -> 拒绝，不回退数据库；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
 3. 通过 service_resource + method 定位路由集合，使用静态哈希或参数 Trie 匹配 Endpoint，固定路径段更多者优先；同优先级不同 Endpoint 冲突时拒绝。
 4. 记录已按 subject + 归一化 domain 聚合；`domain` 省略、空白或旧 `global` 都归一为空默认域。
 5. 目标 Endpoint 在该用户的 API 授权并集内且服务启用 -> ALLOW，否则 DENY。
 ```
+
+`redis.enabled=false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，步骤 1–2 改为读取数据库 current-policy；不创建 Redis 客户端，也不执行 Redis 发布。
 
 `reason` 取值：
 
@@ -390,7 +393,7 @@ role_menu_bindings(role_id, menu_id, PRIMARY KEY(role_id, menu_id))
 subject_role_bindings(id, application_id, subject, domain, role_id, ...)
 ```
 
-应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用，并保护服务资源启停与服务关联解除。数据库不保存 `policy_token`、角色/服务 revision 或发布历史；服务 API 授权直接以 Redis 为准。`subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`，默认域是空串，具名域按原值隔离。以上结构由首次初始化脚本直接创建。
+应用服务关联与 Endpoint 只保存 `service_resource_key`，不建立指向 `service_resources` 的外键；key 由目录校验。数据库触发器保证角色 API 关联的服务已关联应用、角色菜单属于同一应用、菜单父子同应用，并保护服务资源启停与服务关联解除。数据库不保存 `policy_token`、角色/服务 revision 或发布历史；Redis 启用时服务 API 授权以 Redis 为准，禁用时使用数据库 current-policy。`subject_role_bindings.domain` 为 `NOT NULL DEFAULT ''`，默认域是空串，具名域按原值隔离。以上结构由首次初始化脚本直接创建。
 
 ## 12. 当前未实现
 

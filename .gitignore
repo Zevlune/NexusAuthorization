@@ -56,3 +56,7 @@ dashboard/.env.*
 !dashboard/.env.example
 dashboard/.DS_Store
 .env.deploy
+
+# Local deployment configuration and runtime data
+/.local/
+/docker-compose.local.yml

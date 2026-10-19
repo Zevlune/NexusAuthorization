@@ -19,7 +19,7 @@
 
 NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-users.md)。
 
-运行时服务 API 鉴权直接以 Redis 为授权来源。每个「应用 key + 主体 + 服务 + 归一化 domain」保存一条记录，key 为 `PREFIX:rbac:api:app:<escaped app_key>:user:<escaped subject>:service:<escaped service>:domain:<escaped domain>`，值为普通 `SubjectAPIPolicy` JSON，单条上限 16 MiB 且不设 TTL；另有 `PREFIX:rbac:api:app:<escaped app_key>:state` 写入闸门与 `PREFIX:rbac:api:app:<escaped app_key>:members` 记录集合两个辅助 key。管理端保存业务表后由服务同步重建对应应用的 Redis 记录；鉴权只读 Redis，Redis 未配置、未就绪、记录缺失或读取出错时直接拒绝，不回源数据库。菜单与全策略适配器走独立的 current-policy 路径，直接读取当前业务表并在进程内编译，不读取服务 API 的这套 Redis 记录。数据库只保存业务配置，不保存 `policy_token`、角色/服务 revision 或发布历史。key、闸门、写入顺序和 Redis 配置见 [Redis 接入说明](doc/redis-integration.md)，保存生效与撤权规则见 [权限生效设计](doc/permission-lifecycle.md)。
+服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，每个「应用 key + 主体 + 服务 + 归一化 domain」保存一条 Redis 记录，key 为 `PREFIX:rbac:api:app:<escaped app_key>:user:<escaped subject>:service:<escaped service>:domain:<escaped domain>`，值为普通 `SubjectAPIPolicy` JSON；管理端保存业务表后同步重建记录，鉴权只读 Redis，连接失败、未就绪、记录缺失或损坏时拒绝，不回源数据库。启用模式要求启动时 `redis.url` 非空。配置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。菜单与全策略适配器始终走独立的 current-policy 路径，不受该开关控制。数据库只保存业务配置，不保存 `policy_token`、角色/服务 revision 或发布历史。key、闸门、写入顺序和切换规则见 [Redis 接入说明](doc/redis-integration.md)，保存生效与撤权规则见 [权限生效设计](doc/permission-lifecycle.md)。
 
 API 鉴权使用静态路径哈希、参数路径 Trie 和角色位图。服务 API 入口按「用户 × 服务」聚合授权并复用进程内编译索引；菜单与全策略适配器走独立的 current-policy 编译索引。数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
 

@@ -55,7 +55,7 @@ sh src/scripts/init-db.sh
 - 应用边界校验、菜单父子关系校验和服务关联保护四条业务保护触发器；
 - 唯一约束、查询索引和默认空域 `subject_role_bindings.domain = ''`。
 
-`001_init.sql` 只创建业务表和四条业务保护触发器。它**不创建** `applications.policy_token`、`role_api_policy_tokens`、`service_api_policy_tokens`，也不创建任何缓存失效触发器、发布版本、历史快照或迁移记录表。运行时服务 API 授权直接以 Redis 为准，数据库只保存业务配置。
+`001_init.sql` 只创建业务表和四条业务保护触发器。它**不创建** `applications.policy_token`、`role_api_policy_tokens`、`service_api_policy_tokens`，也不创建任何缓存失效触发器、发布版本、历史快照或迁移记录表。Redis 启用时服务 API 授权以 Redis 为准，显式禁用时使用数据库 current-policy；`redis.enabled` 开关不需要数据库迁移或版本表。
 
 脚本不插入应用、服务、角色、菜单或用户绑定等业务种子数据。初始化完成后，使用 Dashboard 或管理 API 创建第一套业务配置。
 
@@ -121,4 +121,4 @@ go run ./cmd/api-server
 7. 使用权限模拟验证允许和拒绝；
 8. 再接入业务服务的 SDK 或 `/api/v1/authorize`。
 
-保存成功后权限立即参与鉴权，没有发布按钮和发布步骤。服务 API 鉴权直接读取 Redis 记录，需要在配置中设置 `NEXUSAUTHORIZATION_REDIS_URL`；菜单 current-policy 路径不依赖 Redis。完整操作见 [用户使用手册](../doc/user-guide.md)，部署见 [运维操作手册](../doc/operations-manual.md)，系统结构见 [系统设计说明](../doc/system-design.md)。
+保存成功后权限立即参与鉴权，没有发布按钮和发布步骤。服务 API 鉴权默认使用 Redis，必须设置非空 `NEXUSAUTHORIZATION_REDIS_URL`；连接失败、记录缺失、未 ready 或损坏时拒绝，不回退数据库。设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 后改用数据库 current-policy，不创建 Redis 客户端或发布记录；重启后生效。重新启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定以重建记录，避免旧 Redis 记录落后于禁用期间的编辑。菜单 current-policy 路径始终不依赖 Redis。完整操作见 [用户使用手册](../doc/user-guide.md)，部署见 [运维操作手册](../doc/operations-manual.md)，系统结构见 [系统设计说明](../doc/system-design.md)。

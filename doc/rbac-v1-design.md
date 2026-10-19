@@ -146,9 +146,9 @@ subject_role_bindings
 UNIQUE(application_id, subject, domain, role_id)
 ```
 
-数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。表上只保留四条业务保护触发器；缓存一致性由控制面在保存业务表后重建 Redis 记录实现。
+数据库只保存业务配置，没有 `policy_token`、角色/服务 revision 或发布历史。表上只保留四条业务保护触发器；Redis 启用时，一致性由控制面在保存业务表后重建 Redis 记录实现。
 
-运行时服务 API 鉴权读取 Redis 中该「应用 key＋主体＋服务＋归一化 domain」的记录，不读取数据库、不回源；Redis 未配置、记录缺失或不 ready 时直接拒绝。菜单和全策略适配器走独立的 current-policy 路径，在一条 MVCC 语句里读取当前可编辑表并在进程内编译。两条路径都只使用当前数据，不读取草稿、历史快照或发布版本。匹配数据结构见 [鉴权匹配与性能](authorization-matching.md)，生效规则见 [权限生效设计](permission-lifecycle.md)，缓存实现见 [Redis 接入说明](redis-integration.md)。
+`redis.enabled` 默认 `true`。启用时，服务 API 鉴权读取该「应用 key＋主体＋服务＋归一化 domain」的 Redis 记录，不读取数据库、不回源；记录缺失、未 ready 或 Redis 不可用时直接拒绝。显式禁用时，服务 API 使用数据库 current-policy，不创建 Redis 客户端，也不发布记录。菜单和全策略适配器始终走独立的 current-policy 路径，在一条 MVCC 语句里读取当前可编辑表并在进程内编译。上述路径都只使用当前数据，不读取草稿、历史快照或发布版本。匹配数据结构见 [鉴权匹配与性能](authorization-matching.md)，生效规则见 [权限生效设计](permission-lifecycle.md)，缓存实现见 [Redis 接入说明](redis-integration.md)。
 
 ## 4. 管理 API
 
@@ -211,7 +211,7 @@ flowchart LR
 - 菜单父子关系属于同一应用（数据库复合外键）；
 - 按钮不能作为父节点、不能有子节点，菜单树不存在循环。
 
-写入成功后不生成任何版本或快照：事务提交业务表，随后由控制面重建受影响应用的 Redis 记录，提交前已开始读取的在途请求可以完成其已读到的判断。应用不存在或已停用、写入约束不满足时整个事务回滚，不重建 Redis。当前没有历史版本、快照表或回滚入口。
+写入成功后不生成任何版本或快照：事务提交业务表；Redis 启用时随后由控制面重建受影响应用的 Redis 记录，Redis 禁用时直接使用数据库 current-policy。提交前已开始读取的在途请求可以完成其已读到的判断。应用不存在、已停用或写入约束不满足时整个事务回滚，不执行 Redis 重建。当前没有历史版本、快照表或回滚入口。
 
 ## 7. 运行时鉴权
 
@@ -228,15 +228,15 @@ flowchart LR
 }
 ```
 
-鉴权用 `appKey`、`serviceResource`、subject 和归一化 domain 直接从 Redis 读取该身份的 `SubjectAPIPolicy` 记录，再按 method 和 path 匹配 API；记录已聚合该用户在该服务上的启用角色授权。`domain` 可省略，省略、空白和旧值 `global` 都归一为空默认域，具名域保持独立。Redis 未配置、应用未发布、记录缺失或读取失败时返回错误并拒绝；记录中 `service_active=false`、API 不存在或未被授予时返回正常 deny 决策（`allowed=false`）。
+Redis 启用时，鉴权用 `appKey`、`serviceResource`、subject 和归一化 domain 直接读取该身份的 `SubjectAPIPolicy` 记录，再按 method 和 path 匹配 API；记录已聚合该用户在该服务上的启用角色授权。应用记录缺失、未 ready 或 Redis 读取失败时返回错误并拒绝。显式禁用 Redis 时，服务 API 鉴权改用数据库 current-policy，不连接或发布 Redis。`domain` 可省略，省略、空白和旧值 `global` 都归一为空默认域，具名域保持独立。Redis 记录中 `service_active=false`、API 不存在或未被授予时返回正常 deny 决策（`allowed=false`）。
 
-应用停用会触发重建并把受影响记录标记为 `service_active=false`；API、角色、菜单和主体角色绑定在保存提交并重建后立即参与判断。响应不包含发布版本号。
+Redis 启用时，应用停用会触发重建并把受影响记录标记为 `service_active=false`；保存 API 角色授权、角色启停和主体角色绑定会触发受影响应用重建。保存角色时附带的菜单授权也会因同一角色保存路径触发整体重建，但不改变 Service API 记录内容；单独保存或删除菜单节点不触发重建，由菜单 current-policy 路径读取。Redis 禁用时，这些修改由数据库 current-policy 在后续请求中读取。响应不包含发布版本号。
 
 运行时 SDK 已要求调用方同时提供应用和服务上下文，这是 breaking change。请参阅 [SDK application integration](sdk-application-integration.md)；`Client.Check` 的 `Request` 需要 `AppKey` 和 `ServiceResource`，`Client.Require` 需要同时传入两个固定的受信配置值，不能从用户输入读取。
 
 ## 8. 初始化与兼容策略
 
-首次上线使用空库 `nexus-authorization`。PostgreSQL 管理员连接维护库 `postgres` 执行一次 `migrations/000_create_database.sql`；该脚本是独立执行的 `CREATE DATABASE "nexus-authorization";`，不能放进事务。使用独立应用用户时，管理员须先创建该用户，再把数据库所有者改给它：
+首次上线使用空库 `nexus-authorization`。PostgreSQL 管理员连接维护库 `postgres` 执行一次 `migrations/000_create_database.sql`；该脚本是独立执行的 `CREATE DATABASE "nexus-authorization" WITH TEMPLATE template0 ENCODING 'UTF8';`，不能放进事务。使用独立应用用户时，管理员须先创建该用户，再把数据库所有者改给它：
 
 ```sql
 ALTER DATABASE "nexus-authorization" OWNER TO "nexus-authorization";
