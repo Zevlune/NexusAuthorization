@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/nexus-authorization?sslmode=disable
+
+jobs:
+  backend:
+    name: Backend (vet, unit and PostgreSQL integration tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: nexus-authorization
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nexus-authorization"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Initialize database schema
+        run: psql "$TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/001_init.sql
+
+      - name: Vet
+        working-directory: src
+        run: go vet ./...
+
+      - name: Test
+        working-directory: src
+        env:
+          NEXUSAUTHORIZATION_TEST_DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: go test -race -count=1 ./...
+
+      - name: Vet and test SDK
+        working-directory: sdk
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+  frontend:
+    name: Dashboard (lint, type check and build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Yarn
+        run: npm install --global yarn@1.22.22
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        run: yarn lint
+
+      - name: Type check and build
+        run: yarn build
+
+  deployment:
+    name: Deployment (compose files, nginx config, API image smoke test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: nexus-authorization
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nexus-authorization"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Validate Compose files
+        run: |
+          docker compose --env-file .env.example -f docker-compose.yml config -q
+          docker compose --env-file .env.dev.example -f docker-compose-dev.yml config -q
+
+      - name: Validate dashboard nginx config
+        run: |
+          docker run --rm --add-host nexusauthorization-api:127.0.0.1 \
+            -v "$PWD/dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+            nginx:1.27-alpine nginx -t
+
+      - name: Build API image
+        run: docker build -t nexusauthorization-api:ci .
+
+      - name: Smoke test API image
+        run: |
+          psql "$TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/001_init.sql
+          docker run -d --name api --network host \
+            -e NEXUSAUTHORIZATION_DATABASE_URL="$TEST_DATABASE_URL" \
+            -e NEXUSAUTHORIZATION_REDIS_ENABLED=false \
+            -e NEXUSAUTHORIZATION_OIDC_ENABLED=false \
+            -e NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE=local \
+            nexusauthorization-api:ci
+          for attempt in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/api/healthz && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/api/healthz
+          # The entrypoint must hand PID 1 to the unprivileged service user.
+          actual=$(docker exec api stat -c %u /proc/1)
+          expected=$(docker exec api id -u nexus-authorization)
+          echo "PID 1 uid=$actual, nexus-authorization uid=$expected"
+          test "$actual" = "$expected"
+
+      - name: API container logs
+        if: always()
+        run: docker logs api || true
