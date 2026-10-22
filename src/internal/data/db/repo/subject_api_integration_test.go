@@ -24,7 +24,7 @@ func TestSubjectAPIDirectRedisPublicationIntegration(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	server := miniredis.RunT(t)
-	cache, err := rediscache.New(config.RedisConfig{URL: "redis://" + server.Addr(), KeyPrefix: "nexusauthorization:test:" + uuid.NewString(), CacheTTL: "1h"})
+	cache, err := rediscache.New(config.RedisConfig{URL: "redis://" + server.Addr(), KeyPrefix: "nexusauthorization-test-" + uuid.NewString(), CacheTTL: "1h"})
 	if err != nil {
 		t.Fatal(err)
 	}

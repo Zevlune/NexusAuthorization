@@ -111,23 +111,27 @@ func subjectAPIKeyIdentityMatches(request, stored biz.SubjectAPIIdentity) bool {
 // SubjectAPIKey names one user+service grant set. The application key replaces
 // the application id as the scope selector; QueryEscape keeps the application
 // key, user, service, and domain text from colliding with the structural
-// separators. An empty domain keeps the literal empty tail.
+// separators. Only named domains add a final segment.
 func SubjectAPIKey(prefix string, identity biz.SubjectAPIIdentity) string {
+	key := fmt.Sprintf("%s:%s:%s:%s", prefix,
+		url.QueryEscape(strings.TrimSpace(identity.ApplicationKey)),
+		url.QueryEscape(identity.Subject), url.QueryEscape(identity.ServiceResource))
 	domain := biz.NormalizeRBACDomain(identity.Domain)
-	return fmt.Sprintf("%s:rbac:api:app:%s:user:%s:service:%s:domain:%s",
-		prefix, url.QueryEscape(strings.TrimSpace(identity.ApplicationKey)),
-		url.QueryEscape(identity.Subject), url.QueryEscape(identity.ServiceResource), url.QueryEscape(domain))
+	if domain != "" {
+		key += ":" + url.QueryEscape(domain)
+	}
+	return key
 }
 
 // subjectAPIStateKey holds the per-application write gate ("ready"/"updating").
 func subjectAPIStateKey(prefix, appKey string) string {
-	return fmt.Sprintf("%s:rbac:api:app:%s:state", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
+	return fmt.Sprintf("%s:%s:state", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
 }
 
 // subjectAPIMembersKey is the set of record keys that belong to one
 // application, so a replace can find and delete the records it supersedes.
 func subjectAPIMembersKey(prefix, appKey string) string {
-	return fmt.Sprintf("%s:rbac:api:app:%s:members", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
+	return fmt.Sprintf("%s:%s:members", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
 }
 
 // dedupeSubjectAPIEndpoints collapses the union of several roles' grants keyed

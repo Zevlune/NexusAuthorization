@@ -22,7 +22,7 @@
 | 按钮 | 菜单页面内的操作权限节点 | `orders:create`：创建订单 |
 | 角色 | 组合应用的菜单/按钮和已关联服务 API | 订单管理员 |
 | 主体与域 | 标识被授权的身份及其授权上下文 | `subject=user-001`，`domain=''`（默认域，可省略） |
-| 服务 API 授权记录 | Redis 启用时在保存业务表后重建、鉴权只读的记录；禁用时服务 API 使用数据库 current-policy | `PREFIX:rbac:api:app:<app_key>:user:...:service:...:domain:...` |
+| 服务 API 授权记录 | Redis 启用时在保存业务表后重建、鉴权只读的记录；禁用时服务 API 使用数据库 current-policy | `PREFIX:<escaped app_key>:<escaped subject>:<escaped service>[:<escaped domain>]`，空域和 `global` 无 domain 后缀 |
 
 应用与服务是多对多：一个应用可关联多个服务，同一服务可被多个应用复用。API 属于服务，角色和菜单属于应用。关联服务不会自动给用户或角色授予 API 权限。
 

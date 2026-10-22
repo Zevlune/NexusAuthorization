@@ -26,6 +26,8 @@ Redis 模式的服务 API 记录按「应用 key + 主体 + 服务 + 归一化 d
 
 删除先于写入且闸门最后打开，所以同一应用的新旧记录不会短暂并存，也不会暴露半写集合。Redis 启用时，`role`、`role_api_endpoint_bindings`、`subject_role_bindings`、`menus`、`role_menu_bindings`、`application_service_resources`、`api_endpoints` 和 `service_resources` 的保存都会触发受影响应用的重建：角色 API/菜单授权、主体角色绑定和应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用。纯菜单保存只影响 current-policy 路径，不改变服务 API 记录。Redis 禁用时不执行这些发布。
 
+切换到新 key 结构或新前缀后需重建受影响应用的授权记录；服务只按新 key 读取，旧 key 不自动读取。
+
 数据库不再用触发器维护任何缓存版本或失效标记。`applications` 没有 `policy_token` 列，也没有 `role_api_policy_tokens` / `service_api_policy_tokens` 表；唯一保留的数据库触发器是四条业务保护触发器（防止停用有关联的服务资源、解除仍有授权的服务关联、跨应用角色 API/菜单授权）。
 
 ## 菜单 current-policy 路径

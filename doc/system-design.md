@@ -124,7 +124,7 @@ flowchart LR
 
 ## 6. 运行时授权与缓存
 
-`redis.enabled` 默认 `true`，省略 YAML 时也为 `true`。启用时，运行时服务 API 授权（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）直接以 Redis 为来源。每个「应用 key＋主体＋服务＋归一化 domain」保存一条普通 `SubjectAPIPolicy` JSON，key 为 `PREFIX:rbac:api:app:<escaped app_key>:user:<escaped subject>:service:<escaped service>:domain:<escaped domain>`，单条上限 16 MiB、不设 TTL；应用另有 `:state` 写入闸门和 `:members` 记录集合两个辅助 key。鉴权请求只读这些记录：`ready` 且有记录时校验身份、大小和 JSON，再按内容哈希复用进程内编译索引（默认上限 1024 条，并发加载用 30 秒 singleflight 合并）；记录缺失、`state=updating`、身份不匹配、损坏、超时或 Redis 不可用都直接拒绝，不读取数据库放行。启用模式要求启动时 `redis.url` 非空。
+`redis.enabled` 默认 `true`，省略 YAML 时也为 `true`。启用时，运行时服务 API 授权（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）直接以 Redis 为来源。每个「应用 key＋主体＋服务＋归一化 domain」保存一条普通 `SubjectAPIPolicy` JSON，key 为 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:<QUERY_ESCAPE(subject)>:<QUERY_ESCAPE(service)>[:<QUERY_ESCAPE(normalized domain)>]`，单条上限 16 MiB、不设 TTL；空域和 `global` 不追加 domain 后缀。应用另有 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:state` 写入闸门和 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:members` 记录集合两个辅助 key。鉴权请求只读这些记录：`ready` 且有记录时校验身份、大小和 JSON，再按内容哈希复用进程内编译索引（默认上限 1024 条，并发加载用 30 秒 singleflight 合并）；记录缺失、`state=updating`、身份不匹配、损坏、超时或 Redis 不可用都直接拒绝，不读取数据库放行。启用模式要求启动时 `redis.url` 非空。
 
 管理端保存业务表后，控制面同步重建受影响应用的 Redis 记录：先把应用置为 `updating`，依据旧 `members` 删除被取代的记录，分批写入新记录（每批最多 64 条），全部写完后置为 `ready`；任何一步失败都保持 `updating`，期间并发鉴权持续拒绝。服务资源变更重建所有关联该服务的应用。
 

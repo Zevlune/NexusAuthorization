@@ -119,8 +119,8 @@ Redis 模式的服务 API 记录写入成本在保存路径：控制面按应用
 Redis 模式下服务 API 入口的单条流程：
 
 ```text
-Lua: GET state  (PREFIX:rbac:api:app:<app_key>:state)
-     GET record (PREFIX:rbac:api:app:<app_key>:user:<subject>:service:<service>:domain:<domain>)
+Lua: GET state  (PREFIX:<QUERY_ESCAPE(trimmed app_key)>:state)
+     GET record (PREFIX:<QUERY_ESCAPE(trimmed app_key)>:<QUERY_ESCAPE(subject)>:<QUERY_ESCAPE(service)>[:<QUERY_ESCAPE(normalized domain)>])
   → state 缺失 / 记录缺失 / state=updating / Redis 错误 → 拒绝
   → ready 且有记录 → 校验大小 / JSON / 身份
   → 按内容哈希复用本地编译索引

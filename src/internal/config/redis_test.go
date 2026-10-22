@@ -35,6 +35,9 @@ func TestRedisConfiguration(t *testing.T) {
 		})
 	}
 	cfg := RedisConfig{}
+	if prefix := cfg.Prefix(); prefix != "nexusauthorization-dev" {
+		t.Fatalf("prefix = %q", prefix)
+	}
 	if ttl, err := cfg.TTLDuration(); err != nil || ttl != 24*time.Hour {
 		t.Fatalf("TTL = %s, %v", ttl, err)
 	}
@@ -124,16 +127,16 @@ func TestLoadRedisEnabledWithEmptyURLRemainsEnabled(t *testing.T) {
 
 func TestLoadRedisEnvironmentOverrides(t *testing.T) {
 	clearRedisEnv(t)
-	path := writeRedisConfig(t, `{url: "redis://yaml-host:6379", key_prefix: "nexusauthorization:yaml"}`)
+	path := writeRedisConfig(t, `{url: "redis://yaml-host:6379", key_prefix: "nexusauthorization-yaml"}`)
 	t.Setenv("NEXUSAUTHORIZATION_REDIS_URL", "rediss://redis.example.com:6380/2")
-	t.Setenv("NEXUSAUTHORIZATION_REDIS_KEY_PREFIX", "nexusauthorization:prod")
+	t.Setenv("NEXUSAUTHORIZATION_REDIS_KEY_PREFIX", "nexusauthorization-prod")
 	t.Setenv("NEXUSAUTHORIZATION_REDIS_CACHE_TTL", "12h")
 	t.Setenv("NEXUSAUTHORIZATION_REDIS_TIMEOUT", "100ms")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Redis.Enabled || cfg.Redis.URL != "rediss://redis.example.com:6380/2" || cfg.Redis.Prefix() != "nexusauthorization:prod" || cfg.Redis.CacheTTL != "12h" || cfg.Redis.Timeout != "100ms" {
+	if !cfg.Redis.Enabled || cfg.Redis.URL != "rediss://redis.example.com:6380/2" || cfg.Redis.Prefix() != "nexusauthorization-prod" || cfg.Redis.CacheTTL != "12h" || cfg.Redis.Timeout != "100ms" {
 		t.Fatalf("Redis env override failed: %#v", cfg.Redis)
 	}
 }
