@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +21,8 @@ func TestGeneratedSessionKeySurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(cfg.SessionSecretFile)
-	if err != nil || info.Mode().Perm() != 0600 {
+	// Windows does not report POSIX permission bits.
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0600) {
 		t.Fatalf("key must be persisted with mode 0600: %v, %v", info, err)
 	}
 	response := httptest.NewRecorder()
