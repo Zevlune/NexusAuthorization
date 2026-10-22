@@ -23,9 +23,26 @@ export const checkAuthenticated = async () => {
   }
 };
 
+// Browsers read "\" as "/" and drop tabs and newlines in URLs, so "/\evil.example" or
+// "/<tab>/evil.example" would act like "//evil.example".
+const hasUnsafeRedirectCharacter = (value: string) => [...value].some(char => {
+  const code = char.charCodeAt(0);
+  return char === '\\' || code < 0x20 || code === 0x7f;
+});
+
+/** Returns the redirect only when it is a path on this site, never another origin. */
 export const getSafeRedirectPath = (redirect: string | null | undefined) => {
-  if (!redirect || !redirect.startsWith('/') || redirect.startsWith('//')) {
+  if (!redirect || !redirect.startsWith('/') || redirect.startsWith('//') || hasUnsafeRedirectCharacter(redirect)) {
     return null;
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      if (new URL(redirect, window.location.origin).origin !== window.location.origin) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
   }
 
   return redirect;

@@ -12,7 +12,6 @@ import RoleEditor from './components/role-editor';
 import Simulate from './components/simulate';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { getRequestErrorMessage } from '../nexus-authorization/shared';
-import '../nexus-authorization/style.less';
 import './style.less';
 
 const useRBAC = (): State => {
@@ -78,8 +77,14 @@ const Roles = ({ state }: { state: State }) => {
   const [draftRoleStatus, setDraftRoleStatus] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [assignmentRole, setAssignmentRole] = useState<Role | null>(null);
   const confirmDelete = (role: Role) => {
-    const dialog = DialogPlugin.confirm({ header: '删除角色', body: `确认删除“${role.name}”及其授权和用户绑定吗？`, confirmBtn: { content: '确认删除', theme: 'danger' }, onConfirm: async () => {
-      try { await deleteRole(state.appKey, role.id); dialog.destroy(); await state.reload(); } catch (error) { fail(error, '删除角色失败'); }
+    let deleting = false;
+    const confirmBtn = { content: '确认删除', theme: 'danger' as const };
+    const dialog = DialogPlugin.confirm({ header: '删除角色', body: `确认删除“${role.name}”及其授权和用户绑定吗？`, confirmBtn, onConfirm: async () => {
+      // Ignore repeated clicks while the delete is in flight.
+      if (deleting) return;
+      deleting = true;
+      dialog.update({ confirmBtn: { ...confirmBtn, loading: true } });
+      try { await deleteRole(state.appKey, role.id); dialog.destroy(); await state.reload(); } catch (error) { deleting = false; dialog.update({ confirmBtn }); fail(error, '删除角色失败'); }
     } });
   };
 

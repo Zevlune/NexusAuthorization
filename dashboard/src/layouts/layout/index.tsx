@@ -12,7 +12,7 @@ import LogoComponent from './logo';
 import PublicHeader from './header';
 import WorkbenchMenu from './side/workbench-menu';
 import { getWorkbenchPageLabel, useWorkbenchNavigation } from './workbench-navigation';
-import { DEFAULT_LAYOUT_TAB, getStoredLayoutTabs, LAYOUT_TABS_STORAGE_KEY, type LayoutTabItem } from './tab-storage';
+import { DEFAULT_LAYOUT_TAB, getStoredLayoutTabs, storeLayoutTabs, type LayoutTabItem } from './tab-storage';
 
 const { Content, Aside, Header } = Layout;
 const { TabPanel } = Tabs;
@@ -31,7 +31,7 @@ const PublicLayout = () => {
   }));
   const currentLabel = getWorkbenchPageLabel(menus, pathname);
 
-  useEffect(() => { window.localStorage.setItem(LAYOUT_TABS_STORAGE_KEY, JSON.stringify(tabs)); }, [tabs]);
+  useEffect(() => { storeLayoutTabs(tabs); }, [tabs]);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 640px)');
     const sync = () => setMobile(media.matches);

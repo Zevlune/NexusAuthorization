@@ -33,6 +33,14 @@ export const getStoredLayoutTabs = (): LayoutTabItem[] => {
   }
 };
 
+export const storeLayoutTabs = (tabs: LayoutTabItem[]) => {
+  try {
+    window.localStorage.setItem(LAYOUT_TABS_STORAGE_KEY, JSON.stringify(tabs));
+  } catch {
+    // Browsers can disable localStorage in private or restricted contexts.
+  }
+};
+
 export const clearStoredLayoutTabs = () => {
   try {
     window.localStorage.removeItem(LAYOUT_TABS_STORAGE_KEY);
