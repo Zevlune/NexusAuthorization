@@ -174,6 +174,15 @@
 
 初始化脚本只定义 4 个业务保护触发器。它不创建应用标记刷新触发器或语句级缓存失效触发器。
 
+4 个触发器函数都固定 `SET search_path = nexusauthorization`，因此运维人员用未设置 `search_path` 的会话执行 SQL（例如在 `psql` 中清理数据）时，函数内引用的表仍能解析。已按旧版 `001_init.sql` 建库的环境可以补设（不影响数据）：
+
+```sql
+ALTER FUNCTION nexusauthorization.prevent_disabling_linked_service_resource() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.prevent_unlinking_granted_service_resource() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.enforce_role_api_endpoint_application() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.enforce_role_menu_application() SET search_path = nexusauthorization;
+```
+
 业务保护触发器：
 
 | 触发器 | 时机 | 作用 |
