@@ -10,7 +10,12 @@ const getPreferredThemeMode = (): ThemeMode => {
     return 'light';
   }
 
-  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  let storedTheme: string | null = null;
+  try {
+    storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    // Browsers can disable localStorage in private or restricted contexts.
+  }
   if (isThemeMode(storedTheme)) {
     return storedTheme;
   }
@@ -39,6 +44,10 @@ export const applyThemeMode = (theme: ThemeMode) => {
   }
 
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // The theme still applies for this page when it cannot be remembered.
+    }
   }
 };

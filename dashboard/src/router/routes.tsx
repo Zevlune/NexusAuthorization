@@ -1,5 +1,6 @@
 import { Navigate, RouteObject, useLocation } from 'react-router-dom';
 import ErrorPage from '../components/error';
+import RouteError from '../components/error/route-error';
 import PublicLayout from '../layouts/layout';
 import Login from '../pages/login';
 import SelectServiceResource from '../pages/select-service-resource';
@@ -27,7 +28,7 @@ export const createRoutes = (menus: WorkbenchMenu[]): RouteObject[] => [
         id: 'authenticated-layout',
         path: '/',
         Component: PublicLayout,
-        errorElement: <ErrorPage />,
+        errorElement: <RouteError />,
         children: [
           {
             element: <RequireServiceResource />,

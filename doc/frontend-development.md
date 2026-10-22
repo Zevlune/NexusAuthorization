@@ -69,7 +69,7 @@ docker build -t nexusauthorization-dashboard:local .
 - `pages/policy-workbench/components/role-editor.tsx`、`role-permission-tree.ts`：角色编辑器。
 - `pages/policy-workbench/components/role-users.tsx`：角色用户分配抽屉。
 
-`pages/policy-workbench/shared.tsx` 提供 `Page`（标题 + 面包屑）、`Guard`（未选择应用 / 加载失败状态）、`Empty` 与 `fail` 等共享件；`pages/nexus-authorization/shared.tsx` 提供 `getRequestErrorMessage` 等通用工具，仍被工作台引用。
+`pages/policy-workbench/shared.tsx` 提供 `Page`（标题 + 面包屑）、`Guard`（未选择应用 / 加载失败状态）、`Empty` 与 `fail` 等共享件；`pages/nexus-authorization/shared.tsx` 只保留被工作台引用的 `getRequestErrorMessage`。
 
 ## 路由和认证
 
@@ -85,7 +85,7 @@ docker build -t nexusauthorization-dashboard:local .
 - `/bindings`：旧路径，重定向到 `/roles`。
 - `*`：错误页。
 
-登录与回跳逻辑集中在 `dashboard/src/router/auth.tsx`：会话检查用 `checkAuth`（`GET /api/auth/me`），未登录跳转 `/login?redirect=...`，已登录但未选应用跳转 `/select-application?redirect=...`。登录回跳地址读写 `localStorage` 的 `nexus-authorization-login-redirect`；当前业务应用读写 `sessionStorage` 的 `nexus-authorization-application`，并通过 `nexus-authorization-application-change` 事件在组件间同步（`dashboard/src/api/application.ts`）。
+登录与回跳逻辑集中在 `dashboard/src/router/auth.tsx`：会话检查用 `checkAuth`（`GET /api/auth/me`），未登录跳转 `/login?redirect=...`，已登录但未选应用跳转 `/select-application?redirect=...`。回跳地址只接受本站路径：拒绝 `//`、反斜杠和控制字符，并校验与当前页面同源。接口返回 401（会话过期）时，`dashboard/src/api/request.ts` 跳转 `/login?redirect=<当前页面>`，重新登录后回到原页面。登录回跳地址读写 `localStorage` 的 `nexus-authorization-login-redirect`；当前业务应用读写 `sessionStorage` 的 `nexus-authorization-application`，并通过 `nexus-authorization-application-change` 事件在组件间同步（`dashboard/src/api/application.ts`）。
 
 后端回调地址是 `/signin-oidc`，不是 dashboard 的 `/auth/callback`；它位于 `/api` 前缀之外，由 `/signin-oidc` 代理规则单独转发到后端。前端只处理后端回调完成后的页面跳转。
 
@@ -116,9 +116,9 @@ dashboard 自身导航与「菜单与按钮」页维护的业务应用菜单是�
 
 旧的按后端菜单动态注册权限中心页面的实现，以及旧的侧栏菜单与内容容器模块，已不在当前入口中使用并已从工作区移除；它们的当前替代实现是 `router/workbench-menu.ts`、`router/workbench-routes.tsx`、`router/provider.tsx` 与 `layouts/layout/side/workbench-menu.tsx`。修改导航相关代码时应基于这些当前模块，不要恢复旧文件。
 
-历史 `dashboard/src/pages/nexus-authorization/**/index.tsx` 页面被旧 E2E mock 的组件路径引用，按测试保留原则继续保留；当前工作台对应能力在 `pages/policy-workbench/`。旧的独立用户角色绑定组件 `users.tsx` 没有运行入口或测试引用，已删除；当前用户分配在角色管理的「分配用户」抽屉中。
+旧的 `dashboard/src/pages/nexus-authorization/**/index.tsx` 页面没有路由与测试引用，调用的接口后端也已不存在，已与其样式和 `api/permission.ts` 中对应的函数一并删除；当前工作台对应能力在 `pages/policy-workbench/`。旧的独立用户角色绑定组件 `users.tsx` 没有运行入口或测试引用，已删除；当前用户分配在角色管理的「分配用户」抽屉中。
 
-`pages/nexus-authorization/shared.tsx` 与 `pages/nexus-authorization/style.less` 仍被工作台页面引用，不能按“整目录废弃”处理。
+布局路由的 `errorElement` 是 `components/error/route-error.tsx`：渲染异常或页面模块加载失败（例如发版后旧 chunk 已不存在）显示「页面加载失败」并提供刷新；不存在的路由仍显示 404 页面。
 
 ## 验证
 

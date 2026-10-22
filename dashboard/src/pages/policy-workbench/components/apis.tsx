@@ -212,19 +212,27 @@ export default function APIs({ state }: { state: State }) {
   };
 
   const confirmDelete = (endpoint: Endpoint) => {
+    let deleting = false;
+    const confirmBtn = { content: '确认删除', theme: 'danger' as const };
     const dialog = DialogPlugin.confirm({
       header: '删除 API 接口',
-      body: `确认删除“${endpoint.summary || endpoint.path_template}”吗？删除后将无法参与权限配置。`,
+      // API definitions are shared by every application linked to the service.
+      body: `确认删除“${endpoint.summary || endpoint.path_template}”吗？该接口属于服务「${endpoint.service_resource}」的共享 API 目录，删除后所有关联该服务的应用都会失去这条接口及其授权。`,
       theme: 'warning',
-      confirmBtn: { content: '确认删除', theme: 'danger' },
+      confirmBtn,
       cancelBtn: '取消',
       onConfirm: async () => {
+        if (deleting) return;
+        deleting = true;
+        dialog.update({ confirmBtn: { ...confirmBtn, loading: true } });
         try {
           await deleteEndpoint(state.appKey, endpoint.service_resource, endpoint.id);
           dialog.destroy();
           await state.reload();
           MessagePlugin.success('API 已删除');
         } catch (error) {
+          deleting = false;
+          dialog.update({ confirmBtn });
           fail(error, '删除 API 失败');
         }
       },
@@ -262,6 +270,8 @@ export default function APIs({ state }: { state: State }) {
       await state.reload();
     } catch (error) {
       setImportError(error instanceof Error ? error.message : '导入 Swagger 失败');
+      // The import saves endpoint by endpoint, so show whatever was saved before the failure.
+      void state.reload();
     } finally {
       setImporting(false);
     }
@@ -341,7 +351,7 @@ export default function APIs({ state }: { state: State }) {
         >
           {edit ? <Form className="resource-apis-form" labelAlign="top">
             {editError ? <Alert className="resource-apis-form-error" theme="error" message={editError} /> : null}
-            <Field label="接口标识" required error={errors.endpoint_key}><Input disabled={saving} value={edit.endpoint_key} placeholder="例如 orders.list" maxlength={200} onChange={(value) => updateDraft(setEdit, { endpoint_key: value })} /></Field>
+            <Field label="接口标识" required error={errors.endpoint_key}><Input disabled={saving} value={edit.endpoint_key} placeholder="例如 orders.list" maxlength={160} onChange={(value) => updateDraft(setEdit, { endpoint_key: value })} /></Field>
             <Field label="摘要"><Textarea disabled={saving} value={edit.summary} placeholder="用于列表展示和权限说明" maxlength={300} onChange={(value) => updateDraft(setEdit, { summary: value })} /></Field>
             <Field label="目标服务" required error={errors.service_resource}><Select disabled={saving || Boolean(edit.id)} value={edit.service_resource} placeholder="请选择服务" options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={(value) => updateDraft(setEdit, { service_resource: String(value || '') })} /></Field>
             <div className="resource-apis-form-grid">

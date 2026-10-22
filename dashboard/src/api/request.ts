@@ -66,7 +66,9 @@ request.interceptors.response.use(
     }
 
     if (error.response?.status === 401 && !error.config?.url?.includes('/auth/')) {
-      window.location.href = '/login';
+      // Return to the current page after signing in again; the login page validates the target.
+      const current = `${window.location.pathname}${window.location.search}`;
+      window.location.href = window.location.pathname === '/login' ? '/login' : `/login?redirect=${encodeURIComponent(current)}`;
     }
     return Promise.reject(error);
   }
