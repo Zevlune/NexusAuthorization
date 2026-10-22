@@ -314,6 +314,13 @@ func fetchSwaggerDocument(ctx context.Context, rawURL string, policy SwaggerFetc
 	if err == nil || !policy.AllowLoopback || (documentURL.Hostname() != "localhost" && documentURL.Hostname() != "127.0.0.1") {
 		return document, err
 	}
+	// Only connection failures can mean localhost points at the wrong host.
+	// Preserve policy rejections and response errors instead of retrying them
+	// against another host and masking the original failure.
+	var dialErr *net.OpError
+	if errors.Is(err, ErrInvalidArgument) || !errors.As(err, &dialErr) || dialErr.Op != "dial" || ctx.Err() != nil {
+		return document, err
+	}
 	// Development only: in Docker, localhost may resolve to the API container.
 	// Compose exposes host.docker.internal for the developer machine.
 	hostURL := *documentURL

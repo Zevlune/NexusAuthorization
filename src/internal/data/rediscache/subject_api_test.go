@@ -96,11 +96,8 @@ func TestSubjectAPIRoundTripPlainJSONNoTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity)
-	if !strings.Contains(key, ":rbac:api:app:console:") {
-		t.Fatalf("application key missing from %q", key)
-	}
-	if !strings.HasSuffix(key, ":domain:tenant-a") {
-		t.Fatal(key)
+	if want := cache.prefix + ":console:user-1001:orders:tenant-a"; key != want {
+		t.Fatalf("key = %q want %q", key, want)
 	}
 	// The value is the policy itself: no envelope, token, or checksum, and it
 	// never expires.
@@ -213,30 +210,37 @@ func TestSubjectAPIKeyIsolatesScope(t *testing.T) {
 
 func TestSubjectAPIKeyEscapingAndGlobalAlias(t *testing.T) {
 	prefix := "nexus:test"
-	base := biz.SubjectAPIIdentity{ApplicationKey: "console", ApplicationID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Subject: "alice", ServiceResource: "orders", Domain: "global"}
-	if SubjectAPIKey(prefix, base) != SubjectAPIKey(prefix, biz.SubjectAPIIdentity{ApplicationKey: "console", ApplicationID: base.ApplicationID, Subject: "alice", ServiceResource: "orders", Domain: ""}) {
-		t.Fatal("global alias did not fold onto the default domain")
+	defaultKey := prefix + ":console:alice:orders"
+	base := biz.SubjectAPIIdentity{ApplicationKey: "console", ApplicationID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Subject: "alice", ServiceResource: "orders", Domain: ""}
+	if got := SubjectAPIKey(prefix, base); got != defaultKey {
+		t.Fatalf("default-domain key = %q want %q", got, defaultKey)
 	}
-	empty := base
-	empty.Domain = ""
-	if !strings.HasSuffix(SubjectAPIKey(prefix, empty), ":domain:") {
-		t.Fatal("empty domain lost its trailing separator")
+	global := base
+	global.Domain = "global"
+	if got := SubjectAPIKey(prefix, global); got != defaultKey {
+		t.Fatalf("global alias key = %q want %q", got, defaultKey)
 	}
+
 	// Special characters must not let different scopes collide through the
 	// structural separators.
 	left := base
 	left.Subject, left.ServiceResource = "a:b", "c"
 	right := base
 	right.Subject, right.ServiceResource = "a", "b:c"
-	if SubjectAPIKey(prefix, left) == SubjectAPIKey(prefix, right) {
-		t.Fatal("escaped user/service collided")
+	if got, want := SubjectAPIKey(prefix, left), prefix+":console:a%3Ab:c"; got != want {
+		t.Fatalf("left escaped key = %q want %q", got, want)
 	}
-	if !strings.Contains(SubjectAPIKey(prefix, left), "a%3Ab") {
-		t.Fatal("subject was not escaped")
+	if got, want := SubjectAPIKey(prefix, right), prefix+":console:a:b%3Ac"; got != want {
+		t.Fatalf("right escaped key = %q want %q", got, want)
 	}
-	escapedApp := biz.SubjectAPIIdentity{ApplicationKey: "tenant:console", Subject: "alice", ServiceResource: "orders"}
-	if !strings.Contains(SubjectAPIKey(prefix, escapedApp), ":app:tenant%3Aconsole:") {
-		t.Fatal("application key was not escaped")
+	escaped := biz.SubjectAPIIdentity{
+		ApplicationKey:  " tenant:console ",
+		Subject:         "alice:team",
+		ServiceResource: "orders/api",
+		Domain:          "tenant:a",
+	}
+	if got, want := SubjectAPIKey(prefix, escaped), prefix+":tenant%3Aconsole:alice%3Ateam:orders%2Fapi:tenant%3Aa"; got != want {
+		t.Fatalf("escaped named-domain key = %q want %q", got, want)
 	}
 
 	cache, server := testCache(t)

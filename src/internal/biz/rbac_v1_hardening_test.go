@@ -144,6 +144,40 @@ func TestImportSwaggerEnforcesFetchPolicy(t *testing.T) {
 	}
 }
 
+func TestFetchSwaggerDocumentPreservesResponseErrors(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		status  int
+		body    string
+		wantErr error
+		message string
+	}{
+		{name: "HTTP error", status: http.StatusServiceUnavailable, message: "received HTTP 503"},
+		{name: "invalid Swagger UI", status: http.StatusOK, body: "<html></html>", wantErr: ErrInvalidArgument, message: "does not declare a document URL"},
+		{name: "blocked Swagger UI reference", status: http.StatusOK, body: `<html><script>url: "http://169.254.169.254/openapi.json"</script></html>`, wantErr: ErrInvalidArgument, message: "may not access"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var hits int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&hits, 1)
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			t.Cleanup(server.Close)
+			_, err := fetchSwaggerDocument(context.Background(), server.URL+"/openapi.json", SwaggerFetchPolicy{AllowLoopback: true})
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("response error was replaced: %v, want %q", err, test.message)
+			}
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("err = %v, want %v", err, test.wantErr)
+			}
+			if got := atomic.LoadInt32(&hits); got != 1 {
+				t.Fatalf("server received %d requests, want 1", got)
+			}
+		})
+	}
+}
+
 func TestSwaggerFetchPolicyCheckIP(t *testing.T) {
 	strict := SwaggerFetchPolicy{}
 	for _, address := range []string{

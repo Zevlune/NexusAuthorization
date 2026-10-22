@@ -22,10 +22,10 @@
 每个「应用 key + 主体 + 服务 + 归一化 domain」是一条 Redis String：
 
 ```text
-PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:user:<QUERY_ESCAPE(subject)>:service:<QUERY_ESCAPE(service)>:domain:<QUERY_ESCAPE(normalized domain)>
+PREFIX:<QUERY_ESCAPE(trimmed app_key)>:<QUERY_ESCAPE(subject)>:<QUERY_ESCAPE(service)>[:<QUERY_ESCAPE(normalized domain)>]
 ```
 
-应用 key、主体、服务和 domain 各自经 `url.QueryEscape` 编码，避免与结构分隔符冲突。空（默认）domain 保留字面空尾；旧 `global` 归一到同一空默认域，具名域各自独立。作用域选择器是应用 key，不是应用 UUID。
+应用 key 先去除首尾空白，然后与主体、服务和 domain 分别经 `url.QueryEscape` 编码，避免与结构分隔符冲突。仅当归一化 domain 非空时追加 domain 段；空（默认）domain 和旧 `global` 均归一到同一无 domain 后缀的 key，具名域各自独立。作用域选择器是应用 key，不是应用 UUID。
 
 值是普通 `SubjectAPIPolicy` JSON，没有信封、版本号或 checksum，读取后原样反序列化。内容字段：
 
@@ -39,8 +39,8 @@ PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:user:<QUERY_ESCAPE(subject)>:service
 ### 应用辅助 key
 
 ```text
-PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:state
-PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:members
+PREFIX:<QUERY_ESCAPE(trimmed app_key)>:state
+PREFIX:<QUERY_ESCAPE(trimmed app_key)>:members
 ```
 
 - `state` 是应用写入闸门，取值为 `ready` 或 `updating`，同样不设 TTL。应用从未发布时该 key 不存在。
@@ -54,7 +54,7 @@ PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:requested
 PREFIX:rbac:api:app:<QUERY_ESCAPE(app_key)>:published
 ```
 
-`PREFIX` 由配置的 `key_prefix` 提供，用于环境隔离，例如 `nexusauthorization:prod`。前缀不能含空白、花括号或以冒号结尾。当前使用 standalone Client，未配置 Sentinel/Cluster 客户端。**不支持 Redis Cluster**：读取和重建的 Lua 脚本同时操作闸门、租约与记录等多个 key，在 Cluster 下会跨 slot；请使用单实例或主从（含托管的单分片 Redis）。
+以上辅助 key 中的应用 key 同样先去除首尾空白，再经 `url.QueryEscape` 编码。`PREFIX` 由配置的 `key_prefix` 提供，用于环境隔离，例如 `nexusauthorization:prod`。前缀不能含空白、花括号或以冒号结尾。当前使用 standalone Client，未配置 Sentinel/Cluster 客户端。**不支持 Redis Cluster**：读取和重建的 Lua 脚本同时操作闸门、租约与记录等多个 key，在 Cluster 下会跨 slot；请使用单实例或主从（含托管的单分片 Redis）。
 
 ## 读取语义
 
