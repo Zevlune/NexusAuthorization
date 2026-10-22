@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/luck/nexus-authorization/internal/auth"
@@ -14,6 +16,11 @@ import (
 	"github.com/luck/nexus-authorization/internal/data/rediscache"
 )
 
+// subjectAPIReconciler repairs Redis publication without waiting for a save.
+type subjectAPIReconciler interface {
+	ReconcileSubjectAPIs(context.Context, bool) (int, error)
+}
+
 type Application struct {
 	Pool             *pgxpool.Pool
 	ServiceResources *biz.ServiceResourceService
@@ -21,6 +28,9 @@ type Application struct {
 	Auth             *auth.Service
 	Users            *biz.NexusAuthSCIMClient
 	PolicyCache      *rediscache.PolicyCache
+
+	reconciler        subjectAPIReconciler
+	reconcileInterval time.Duration
 }
 
 // New 创建权限中心应用，并完成数据库仓储、业务服务和认证服务的装配。
@@ -57,27 +67,77 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 		}
 	}
 	rbacRepository := repo.NewRBACV1Repository(pool, serviceResources)
-	rbacService := biz.NewRBACV1Service(rbacRepository)
-	var policyCache *rediscache.PolicyCache
+	rbacService := biz.NewRBACV1Service(rbacRepository).WithSwaggerFetchPolicy(biz.SwaggerFetchPolicy{
+		AllowLoopback: cfg.SwaggerImport.AllowLoopback,
+		AllowedHosts:  cfg.SwaggerImport.AllowedHosts,
+	})
+	application := &Application{
+		Pool:             pool,
+		ServiceResources: serviceResources,
+		RBACV1:           rbacService,
+		Auth:             authenticator,
+		Users:            users,
+	}
 	if cfg.Redis.Enabled {
-		policyCache, err = rediscache.New(cfg.Redis)
+		interval, err := cfg.Redis.ReconcileIntervalDuration()
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		policyCache, err := rediscache.New(cfg.Redis)
 		if err != nil {
 			pool.Close()
 			return nil, err
 		}
 		rbacRepository.WithPolicyCache(policyCache)
 		serviceResourceRepository.WithSubjectAPISync(rbacRepository.RefreshSubjectAPIForService)
+		application.PolicyCache = policyCache
+		application.reconciler = rbacRepository
+		application.reconcileInterval = interval
 	} else {
 		rbacService.WithDatabaseAuthorization()
 	}
-	return &Application{
-		Pool:             pool,
-		ServiceResources: serviceResources,
-		RBACV1:           rbacService,
-		PolicyCache:      policyCache,
-		Auth:             authenticator,
-		Users:            users,
-	}, nil
+	return application, nil
+}
+
+// RunSubjectAPIReconciler keeps Redis service API records consistent with the
+// database until ctx ends. It republishes every application once at start
+// (Redis may be empty, or the catalog may have changed while stopped), then
+// repairs only what needs it on every interval. It returns immediately when
+// Redis authorization is disabled.
+func (a *Application) RunSubjectAPIReconciler(ctx context.Context, logger *slog.Logger) {
+	if a == nil || a.reconciler == nil {
+		return
+	}
+	full := true
+	pass := func() {
+		passCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		republished, err := a.reconciler.ReconcileSubjectAPIs(passCtx, full)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Error("Reconciling Redis authorization records failed; will retry.",
+					slog.Bool("Full", full), slog.Int("Republished", republished), slog.Any("Error", err))
+			}
+			return
+		}
+		if full || republished > 0 {
+			logger.Info("Reconciled Redis authorization records.", slog.Bool("Full", full), slog.Int("Republished", republished))
+		}
+		// Keep retrying the full pass until one succeeds.
+		full = false
+	}
+	pass()
+	ticker := time.NewTicker(a.reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pass()
+		}
+	}
 }
 
 // newServiceResourceCatalog 根据后端配置创建本地或 NexusAuth 服务资源来源。

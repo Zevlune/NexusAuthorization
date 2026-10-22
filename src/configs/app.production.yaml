@@ -16,6 +16,8 @@ redis:
   key_prefix: "nexusauthorization:prod"
   cache_ttl: "24h"
   timeout: "200ms"
+  # Background repair of Redis records (not ready, behind a save, catalog changes).
+  reconcile_interval: "30s"
 service_resource:
   source: "nexusauth"
   nexusauth_base_url: ""
@@ -28,6 +30,11 @@ scim:
   nexusauth_base_url: ""
   api_key: ""
   timeout: "5s"
+# Swagger/OpenAPI import address policy. Link-local and cloud metadata
+# addresses are always refused; list hosts or CIDR ranges to restrict further.
+swagger_import:
+  allow_loopback: false
+  allowed_hosts: []
 oidc:
   enabled: true
   authority: ""

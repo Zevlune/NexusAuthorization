@@ -44,7 +44,6 @@ func (c *changingServiceCatalog) Get(ctx context.Context, key string) (*biz.Serv
 // Exercises the full control plane with no local service catalog entry, then
 // verifies that a conflicting local entry cannot shadow or replace remote data.
 func TestRemoteApplicationPermissionIntegration(t *testing.T) {
-	t.Skip("remote catalog status changes require an explicit Redis republish")
 	dsn := os.Getenv("NEXUSAUTHORIZATION_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("NEXUSAUTHORIZATION_TEST_DATABASE_URL not set")
@@ -92,6 +91,10 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc := biz.NewRBACV1Service(r)
+	// The startup pass records the catalog that later passes compare against.
+	if _, err := r.ReconcileSubjectAPIs(ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	input := map[string]any{"service_resource": key, "subject": "user", "domain": "global", "method": "GET", "path": "/items"}
 	decision, err := svc.Authorize(ctx, appKey, input)
 	if err != nil || !decision.Allowed {
@@ -136,6 +139,11 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	}
 	if _, err := r.SaveEndpoint(ctx, key, biz.RBACEndpoint{Method: "POST", PathTemplate: "/items", Enabled: true}); !errors.Is(err, biz.ErrConflict) {
 		t.Fatalf("disabled remote accepted: %v", err)
+	}
+	// The remote catalog changed without any local save: the reconciler
+	// detects it and republishes the linked application.
+	if _, err := r.ReconcileSubjectAPIs(ctx, false); err != nil {
+		t.Fatal(err)
 	}
 	decision, err = svc.Authorize(ctx, appKey, input)
 	if err != nil || decision.Allowed {

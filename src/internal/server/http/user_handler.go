@@ -28,12 +28,12 @@ func (h *Handler) WithUserDirectory(directory SCIMUserDirectory) *Handler {
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	startIndex, err := userListInt(r, "startIndex", 1, 1, 0)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	count, err := userListInt(r, "count", 100, 0, 200)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if h.users == nil {

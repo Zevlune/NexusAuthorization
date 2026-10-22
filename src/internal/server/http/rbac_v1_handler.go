@@ -19,8 +19,9 @@ func rbacPageParams(r *http.Request) (int, int) {
 // AuthorizeRBAC evaluates currently saved permissions for a trusted service caller.
 func (h *Handler) AuthorizeRBAC(w http.ResponseWriter, r *http.Request) {
 	fields := strings.Fields(r.Header.Get("Authorization"))
-	if len(fields) != 2 || fields[0] != "Bearer" || h.authorizationServiceCredential == "" || subtle.ConstantTimeCompare([]byte(fields[1]), []byte(h.authorizationServiceCredential)) != 1 {
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || h.authorizationServiceCredential == "" || subtle.ConstantTimeCompare([]byte(fields[1]), []byte(h.authorizationServiceCredential)) != 1 {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="authorize"`)
+		writeRawJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "errorCode": "UNAUTHENTICATED", "errorMessage": "service credential required", "result": nil})
 		return
 	}
 	var request struct {
@@ -31,17 +32,21 @@ func (h *Handler) AuthorizeRBAC(w http.ResponseWriter, r *http.Request) {
 		Method          string `json:"method"`
 		Path            string `json:"path"`
 	}
-	if err := decodeJSON(r, &request); err != nil || (strings.TrimSpace(request.AppKey) == "" || strings.TrimSpace(request.ServiceResource) == "") {
-		writeError(w, biz.ErrInvalidArgument)
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if strings.TrimSpace(request.AppKey) == "" || strings.TrimSpace(request.ServiceResource) == "" {
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	result, err := h.rbacV1.Authorize(r.Context(), request.AppKey, map[string]any{"service_resource": request.ServiceResource, "subject": request.Subject, "domain": request.Domain, "method": request.Method, "path": request.Path})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeRawJSON(w, http.StatusOK, result)
@@ -58,18 +63,18 @@ func (h *Handler) WithRBACV1Service(service *biz.RBACV1Service) *Handler {
 // rbacPageParams.
 func (h *Handler) ListRBACV1Endpoints(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	page, pageSize := rbacPageParams(r)
 	result, err := h.rbacV1.ApplicationEndpoints(r.Context(), scope, strings.TrimSpace(r.URL.Query().Get("service_resource")), page, pageSize)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -80,30 +85,30 @@ func (h *Handler) ListRBACV1Endpoints(w http.ResponseWriter, r *http.Request) {
 // 201 Created, otherwise the response is 200 OK.
 func (h *Handler) SaveRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	var value biz.RBACEndpoint
 	if err := decodeJSON(r, &value); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	service := strings.TrimSpace(r.URL.Query().Get("service_resource"))
 	if err := h.rbacV1.RequireApplicationService(r.Context(), scope, service); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	item, err := h.rbacV1.SaveEndpoint(r.Context(), service, value)
-	item.ServiceResource = service
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
+	item.ServiceResource = service
 	status := http.StatusOK
 	if value.ID == uuid.Nil {
 		status = http.StatusCreated
@@ -115,22 +120,22 @@ func (h *Handler) SaveRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 // validating the application/service scope and the path id.
 func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	id, err := uuid.Parse(r.PathValue("id"))
 	if scope == "" || err != nil {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	service := strings.TrimSpace(r.URL.Query().Get("service_resource"))
 	if err := h.rbacV1.RequireApplicationService(r.Context(), scope, service); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if err = h.rbacV1.DeleteEndpoint(r.Context(), service, id); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nil)
@@ -141,25 +146,29 @@ func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 // application; successful imports return 201 Created.
 func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	var body struct {
 		SwaggerURL string `json:"swagger_url"`
 	}
-	if scope == "" || decodeJSON(r, &body) != nil {
-		writeError(w, biz.ErrInvalidArgument)
+	if scope == "" {
+		writeError(w, r, biz.ErrInvalidArgument)
+		return
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, r, err)
 		return
 	}
 	service := strings.TrimSpace(r.URL.Query().Get("service_resource"))
 	if err := h.rbacV1.RequireApplicationService(r.Context(), scope, service); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	result, err := h.rbacV1.ImportSwagger(r.Context(), service, body.SwaggerURL)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
@@ -168,17 +177,17 @@ func (h *Handler) ImportRBACV1Swagger(w http.ResponseWriter, r *http.Request) {
 // ListRBACV1Roles lists roles for the application scope supplied by app_key.
 func (h *Handler) ListRBACV1Roles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	items, err := h.rbacV1.ListRoles(r.Context(), scope)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -188,22 +197,22 @@ func (h *Handler) ListRBACV1Roles(w http.ResponseWriter, r *http.Request) {
 // 201 Created for a new role and 200 OK for an update.
 func (h *Handler) SaveRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	var value biz.RBACRole
 	if err := decodeJSON(r, &value); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	item, err := h.rbacV1.SaveRole(r.Context(), scope, value)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	status := http.StatusOK
@@ -217,17 +226,46 @@ func (h *Handler) SaveRBACV1Role(w http.ResponseWriter, r *http.Request) {
 // the path id.
 func (h *Handler) DeleteRBACV1Role(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	id, err := uuid.Parse(r.PathValue("id"))
 	if scope == "" || err != nil {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	if err = h.rbacV1.DeleteRole(r.Context(), scope, id); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nil)
+}
+
+// UpdateRBACV1RoleSubjects grants or revokes one role for a set of subjects in
+// one domain. The body carries optional domain, add and remove subject lists.
+func (h *Handler) UpdateRBACV1RoleSubjects(w http.ResponseWriter, r *http.Request) {
+	if h.rbacV1 == nil {
+		writeError(w, r, biz.ErrNotFound)
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
+	id, err := uuid.Parse(r.PathValue("id"))
+	if scope == "" || err != nil {
+		writeError(w, r, biz.ErrInvalidArgument)
+		return
+	}
+	var body struct {
+		Domain string   `json:"domain"`
+		Add    []string `json:"add"`
+		Remove []string `json:"remove"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if err := h.rbacV1.UpdateRoleSubjects(r.Context(), scope, id, body.Domain, body.Add, body.Remove); err != nil {
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nil)
@@ -237,17 +275,17 @@ func (h *Handler) DeleteRBACV1Role(w http.ResponseWriter, r *http.Request) {
 // scope supplied by app_key.
 func (h *Handler) ListRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	items, err := h.rbacV1.ListSubjectRoleBindings(r.Context(), scope)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -258,18 +296,18 @@ func (h *Handler) ListRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request)
 // identity.
 func (h *Handler) SimulateRBACV1(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	var body map[string]any
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	result, err := h.rbacV1.Authorize(r.Context(), scope, body)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -279,12 +317,12 @@ func (h *Handler) SimulateRBACV1(w http.ResponseWriter, r *http.Request) {
 // application scope. The body carries subject, optional domain, and role_ids.
 func (h *Handler) ReplaceRBACV1SubjectRoles(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	scope := strings.TrimSpace(r.URL.Query().Get("app_key"))
 	if scope == "" {
-		writeError(w, biz.ErrInvalidArgument)
+		writeError(w, r, biz.ErrInvalidArgument)
 		return
 	}
 	var body struct {
@@ -293,11 +331,11 @@ func (h *Handler) ReplaceRBACV1SubjectRoles(w http.ResponseWriter, r *http.Reque
 		RoleIDs []uuid.UUID `json:"role_ids"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if err := h.rbacV1.ReplaceSubjectRoles(r.Context(), scope, body.Subject, body.Domain, body.RoleIDs); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nil)

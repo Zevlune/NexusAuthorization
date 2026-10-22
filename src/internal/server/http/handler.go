@@ -3,8 +3,10 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -41,7 +43,7 @@ func (h *Handler) WithServiceResourceService(service *biz.ServiceResourceService
 // CreateServiceResource 创建一条本地服务资源。
 func (h *Handler) CreateServiceResource(w http.ResponseWriter, r *http.Request) {
 	if h.serviceResourceService == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	var request struct {
@@ -52,7 +54,7 @@ func (h *Handler) CreateServiceResource(w http.ResponseWriter, r *http.Request) 
 		IsActive    *bool  `json:"is_active"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	isActive := true
@@ -67,7 +69,7 @@ func (h *Handler) CreateServiceResource(w http.ResponseWriter, r *http.Request) 
 		IsActive:    isActive,
 	})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, value)
@@ -76,28 +78,40 @@ func (h *Handler) CreateServiceResource(w http.ResponseWriter, r *http.Request) 
 // UpdateServiceResource 更新本地服务资源的展示信息。
 func (h *Handler) UpdateServiceResource(w http.ResponseWriter, r *http.Request) {
 	if h.serviceResourceService == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	var request struct {
 		DisplayName string `json:"display_name"`
 		Audience    string `json:"audience"`
 		Description string `json:"description"`
-		IsActive    bool   `json:"is_active"`
+		IsActive    *bool  `json:"is_active"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
+	}
+	// Omitting is_active keeps the current status instead of disabling.
+	isActive := true
+	if request.IsActive != nil {
+		isActive = *request.IsActive
+	} else {
+		existing, err := h.serviceResourceService.Get(r.Context(), r.PathValue("key"))
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		isActive = existing.IsActive
 	}
 	value, err := h.serviceResourceService.Update(h.auditContext(r), &biz.ServiceResource{
 		Key:         r.PathValue("key"),
 		DisplayName: request.DisplayName,
 		Audience:    request.Audience,
 		Description: request.Description,
-		IsActive:    request.IsActive,
+		IsActive:    isActive,
 	})
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, value)
@@ -106,11 +120,11 @@ func (h *Handler) UpdateServiceResource(w http.ResponseWriter, r *http.Request) 
 // DeleteServiceResource 软删除一条本地服务资源。
 func (h *Handler) DeleteServiceResource(w http.ResponseWriter, r *http.Request) {
 	if h.serviceResourceService == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	if err := h.serviceResourceService.Delete(h.auditContext(r), r.PathValue("key")); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nil)
@@ -119,12 +133,12 @@ func (h *Handler) DeleteServiceResource(w http.ResponseWriter, r *http.Request) 
 // ListServiceResources 返回当前身份平台发布的服务资源列表。
 func (h *Handler) ListServiceResources(w http.ResponseWriter, r *http.Request) {
 	if h.serviceResources == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	values, err := h.serviceResources.List(r.Context())
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writable := false
@@ -137,12 +151,12 @@ func (h *Handler) ListServiceResources(w http.ResponseWriter, r *http.Request) {
 // GetServiceResource 按唯一 key 返回一个服务资源。
 func (h *Handler) GetServiceResource(w http.ResponseWriter, r *http.Request) {
 	if h.serviceResources == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	value, err := h.serviceResources.Get(r.Context(), r.PathValue("key"))
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, value)
@@ -174,10 +188,19 @@ func (h *Handler) auditContext(r *http.Request) context.Context {
 }
 
 // decodeJSON 严格解码单个 JSON 请求体，并拒绝未知字段。
+// Requiring application/json also blocks cross-site form posts: browsers can
+// only send that content type cross-origin after a CORS preflight.
 func decodeJSON(r *http.Request, target any) error {
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		return errUnsupportedMediaType
+	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("%w: request body exceeds %d bytes", biz.ErrInvalidArgument, tooLarge.Limit)
+		}
 		return fmt.Errorf("%w: invalid JSON body", biz.ErrInvalidArgument)
 	}
 	if decoder.Decode(&struct{}{}) != io.EOF {

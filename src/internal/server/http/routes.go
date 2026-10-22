@@ -8,8 +8,21 @@ import "net/http"
 // registered redirect URI is independent from the API surface.
 const apiPrefix = "/api"
 
+// maxRequestBodyBytes bounds every request body; the largest legitimate body is
+// a role with thousands of endpoint and menu IDs.
+const maxRequestBodyBytes = 4 << 20
+
+// bodyLimitedMux caps request bodies so a client cannot exhaust memory. It
+// embeds the mux so callers can still resolve route patterns via Handler.
+type bodyLimitedMux struct{ *http.ServeMux }
+
+func (m bodyLimitedMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	m.ServeMux.ServeHTTP(w, r)
+}
+
 // NewServer 注册健康检查、认证和权限管理路由。
-func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handler) *http.ServeMux {
+func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /swagger/", SwaggerUI())
 	mux.HandleFunc("GET /swagger/openapi.json", handler.OpenAPIDocument)
@@ -50,6 +63,7 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.Handle("GET "+apiPrefix+"/v1/rbac-v1/roles", protect(http.HandlerFunc(handler.ListRBACV1Roles)))
 	mux.Handle("POST "+apiPrefix+"/v1/rbac-v1/roles", protect(http.HandlerFunc(handler.SaveRBACV1Role)))
 	mux.Handle("DELETE "+apiPrefix+"/v1/rbac-v1/roles/{id}", protect(http.HandlerFunc(handler.DeleteRBACV1Role)))
+	mux.Handle("PUT "+apiPrefix+"/v1/rbac-v1/roles/{id}/subjects", protect(http.HandlerFunc(handler.UpdateRBACV1RoleSubjects)))
 	mux.Handle("GET "+apiPrefix+"/v1/rbac-v1/subject-roles", protect(http.HandlerFunc(handler.ListRBACV1SubjectRoles)))
 	mux.Handle("PUT "+apiPrefix+"/v1/rbac-v1/subject-roles", protect(http.HandlerFunc(handler.ReplaceRBACV1SubjectRoles)))
 	mux.Handle("POST "+apiPrefix+"/v1/rbac-v1/simulate", protect(http.HandlerFunc(handler.SimulateRBACV1)))
@@ -58,5 +72,5 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.Handle("GET "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.GetServiceResource)))
 	mux.Handle("PUT "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.UpdateServiceResource)))
 	mux.Handle("DELETE "+apiPrefix+"/v1/service-resources/{key}", protect(http.HandlerFunc(handler.DeleteServiceResource)))
-	return mux
+	return bodyLimitedMux{mux}
 }

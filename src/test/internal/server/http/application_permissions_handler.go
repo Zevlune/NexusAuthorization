@@ -1,1 +1,0 @@
-../../../../internal/server/http/application_permissions_handler.go

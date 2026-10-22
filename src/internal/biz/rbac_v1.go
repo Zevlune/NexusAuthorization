@@ -100,6 +100,33 @@ type RBACV1Service struct {
 	policies              *rbacPolicyCache
 	subjectAPIs           *subjectAPICache
 	databaseAuthorization bool
+	swaggerFetch          SwaggerFetchPolicy
+}
+
+// MaxEndpointKeyLength is the endpoint_key column width.
+const MaxEndpointKeyLength = 160
+
+const maxEndpointPathLength = 500
+
+// endpointMethods are the HTTP methods an endpoint may declare.
+var endpointMethods = map[string]bool{
+	"GET": true, "POST": true, "PUT": true, "PATCH": true,
+	"DELETE": true, "HEAD": true, "OPTIONS": true, "TRACE": true,
+}
+
+// RouteShape reduces a path template to the requests it matches: surrounding
+// whitespace and slashes are ignored and every parameter segment is the same
+// placeholder. Templates with equal shapes (for example /orders/{id} and
+// /orders/{orderId}/) are ambiguous at runtime, so only one may exist per
+// service and method.
+func RouteShape(template string) string {
+	parts := strings.Split(normalizedPolicyPath(template), "/")
+	for i, part := range parts {
+		if parameterSegment(part) {
+			parts[i] = "\x00"
+		}
+	}
+	return strings.Join(parts, "/")
 }
 
 // RBACV1SwaggerImportResult reports the endpoint import counts for a Swagger
@@ -116,6 +143,12 @@ func NewRBACV1Service(repository RBACV1Repository) *RBACV1Service {
 	return &RBACV1Service{repository: repository, policies: newRBACPolicyCache(64), subjectAPIs: newSubjectAPICache(1024)}
 }
 
+// WithSwaggerFetchPolicy restricts which addresses Swagger imports may fetch.
+func (s *RBACV1Service) WithSwaggerFetchPolicy(policy SwaggerFetchPolicy) *RBACV1Service {
+	s.swaggerFetch = policy
+	return s
+}
+
 // WithDatabaseAuthorization selects current database records for API decisions.
 // Configure this at startup only when Redis is explicitly disabled; Redis errors
 // must never cause an automatic change of authorization source.
@@ -124,11 +157,18 @@ func (s *RBACV1Service) WithDatabaseAuthorization() *RBACV1Service {
 	return s
 }
 
-// SaveEndpoint creates or updates an endpoint in the service catalog. Method
-// and an absolute PathTemplate are required; the service scope is trimmed.
+// SaveEndpoint creates or updates an endpoint in the service catalog. A
+// standard HTTP method and an absolute PathTemplate are required; the service
+// scope is trimmed.
 func (s *RBACV1Service) SaveEndpoint(ctx context.Context, serviceResource string, value RBACEndpoint) (RBACEndpoint, error) {
-	if strings.TrimSpace(value.Method) == "" || !strings.HasPrefix(strings.TrimSpace(value.PathTemplate), "/") {
-		return RBACEndpoint{}, fmt.Errorf("%w: method and absolute path_template are required", ErrInvalidArgument)
+	if !endpointMethods[strings.ToUpper(strings.TrimSpace(value.Method))] || !strings.HasPrefix(strings.TrimSpace(value.PathTemplate), "/") {
+		return RBACEndpoint{}, fmt.Errorf("%w: a standard HTTP method and an absolute path_template are required", ErrInvalidArgument)
+	}
+	if len([]rune(strings.TrimSpace(value.PathTemplate))) > maxEndpointPathLength {
+		return RBACEndpoint{}, fmt.Errorf("%w: path_template must be at most %d characters", ErrInvalidArgument, maxEndpointPathLength)
+	}
+	if len([]rune(strings.TrimSpace(value.EndpointKey))) > MaxEndpointKeyLength {
+		return RBACEndpoint{}, fmt.Errorf("%w: endpoint_key must be at most %d characters", ErrInvalidArgument, MaxEndpointKeyLength)
 	}
 	return s.repository.SaveEndpoint(ctx, normalizeRBACScope(serviceResource), value)
 }
@@ -141,12 +181,12 @@ func (s *RBACV1Service) DeleteEndpoint(ctx context.Context, serviceResource stri
 	return s.repository.DeleteEndpoint(ctx, normalizeRBACScope(serviceResource), id)
 }
 
-// ImportSwagger discovers operations from rawURL and saves only endpoints that
-// are not already present for the service. It returns an error on the first
-// save failure, with counts accumulated so far.
+// ImportSwagger discovers operations from rawURL and saves only endpoints whose
+// route shape is not already present for the service. It returns an error on
+// the first save failure, with counts accumulated so far.
 func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawURL string) (RBACV1SwaggerImportResult, error) {
 	scope := normalizeRBACScope(serviceResource)
-	operations, err := ReadSwaggerEndpoints(ctx, rawURL)
+	operations, err := ReadSwaggerEndpoints(ctx, rawURL, s.swaggerFetch)
 	if err != nil {
 		return RBACV1SwaggerImportResult{}, err
 	}
@@ -156,59 +196,133 @@ func (s *RBACV1Service) ImportSwagger(ctx context.Context, serviceResource, rawU
 	}
 	routes := make(map[string]struct{}, len(existing))
 	for _, item := range existing {
-		routes[item.Method+"\x00"+item.PathTemplate] = struct{}{}
+		routes[item.Method+"\x00"+RouteShape(item.PathTemplate)] = struct{}{}
 	}
 	result := RBACV1SwaggerImportResult{Total: len(operations)}
+	pending := make([]RBACEndpoint, 0, len(operations))
 	for _, operation := range operations {
-		key := operation.Method + "\x00" + operation.Path
+		key := operation.Method + "\x00" + RouteShape(operation.Path)
 		if _, exists := routes[key]; exists {
 			result.Skipped++
 			continue
 		}
-		if _, err := s.SaveEndpoint(ctx, scope, RBACEndpoint{Method: operation.Method, PathTemplate: operation.Path, Module: operation.Module, Summary: operation.Summary, Source: "swagger", Enabled: true}); err != nil {
+		routes[key] = struct{}{}
+		pending = append(pending, RBACEndpoint{Method: operation.Method, PathTemplate: operation.Path, Module: operation.Module, Summary: operation.Summary, Source: "swagger", Enabled: true})
+	}
+	if len(pending) == 0 {
+		return result, nil
+	}
+	// Publish once for the whole import rather than once per endpoint.
+	if batch, ok := s.repository.(endpointBatchRepository); ok {
+		saved, err := batch.SaveEndpoints(ctx, scope, pending)
+		result.Created = len(saved)
+		return result, err
+	}
+	for _, endpoint := range pending {
+		if _, err := s.SaveEndpoint(ctx, scope, endpoint); err != nil {
 			return result, err
 		}
-		routes[key] = struct{}{}
 		result.Created++
 	}
 	return result, nil
 }
 
+// endpointBatchRepository saves several endpoints and publishes once.
+type endpointBatchRepository interface {
+	SaveEndpoints(context.Context, string, []RBACEndpoint) ([]RBACEndpoint, error)
+}
+
 // ListRoles returns the roles configured for the application scope.
-func (s *RBACV1Service) ListRoles(ctx context.Context, serviceResource string) ([]RBACRole, error) {
-	return s.repository.ListRoles(ctx, normalizeRBACScope(serviceResource))
+func (s *RBACV1Service) ListRoles(ctx context.Context, appKey string) ([]RBACRole, error) {
+	return s.repository.ListRoles(ctx, normalizeRBACScope(appKey))
 }
 
 // SaveRole creates or updates a role. Role code and name are required; the
 // application scope and role identity are normalized by the repository.
-func (s *RBACV1Service) SaveRole(ctx context.Context, serviceResource string, value RBACRole) (RBACRole, error) {
+func (s *RBACV1Service) SaveRole(ctx context.Context, appKey string, value RBACRole) (RBACRole, error) {
 	if strings.TrimSpace(value.Code) == "" || strings.TrimSpace(value.Name) == "" {
 		return RBACRole{}, fmt.Errorf("%w: role code and name are required", ErrInvalidArgument)
 	}
-	return s.repository.SaveRole(ctx, normalizeRBACScope(serviceResource), value)
+	return s.repository.SaveRole(ctx, normalizeRBACScope(appKey), value)
 }
 
 // DeleteRole removes a role by id.
-func (s *RBACV1Service) DeleteRole(ctx context.Context, serviceResource string, id uuid.UUID) error {
+func (s *RBACV1Service) DeleteRole(ctx context.Context, appKey string, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: role id is required", ErrInvalidArgument)
 	}
-	return s.repository.DeleteRole(ctx, normalizeRBACScope(serviceResource), id)
+	return s.repository.DeleteRole(ctx, normalizeRBACScope(appKey), id)
 }
 
 // ListSubjectRoleBindings returns the subject-to-role bindings for the
 // application scope.
-func (s *RBACV1Service) ListSubjectRoleBindings(ctx context.Context, serviceResource string) ([]SubjectRoleBinding, error) {
-	return s.repository.ListSubjectRoleBindings(ctx, normalizeRBACScope(serviceResource))
+func (s *RBACV1Service) ListSubjectRoleBindings(ctx context.Context, appKey string) ([]SubjectRoleBinding, error) {
+	return s.repository.ListSubjectRoleBindings(ctx, normalizeRBACScope(appKey))
 }
 
 // ReplaceSubjectRoles atomically replaces the role set for a subject in a
 // domain. Subject is required; an empty domain selects the default domain.
-func (s *RBACV1Service) ReplaceSubjectRoles(ctx context.Context, serviceResource, subject, domain string, roleIDs []uuid.UUID) error {
+func (s *RBACV1Service) ReplaceSubjectRoles(ctx context.Context, appKey, subject, domain string, roleIDs []uuid.UUID) error {
 	if strings.TrimSpace(subject) == "" {
 		return fmt.Errorf("%w: subject is required", ErrInvalidArgument)
 	}
-	return s.repository.ReplaceSubjectRoles(ctx, normalizeRBACScope(serviceResource), strings.TrimSpace(subject), NormalizeRBACDomain(domain), roleIDs)
+	return s.repository.ReplaceSubjectRoles(ctx, normalizeRBACScope(appKey), strings.TrimSpace(subject), NormalizeRBACDomain(domain), roleIDs)
+}
+
+// roleSubjectRepository is implemented by repositories that can change one
+// role's subjects without replacing each subject's whole role set.
+type roleSubjectRepository interface {
+	UpdateRoleSubjects(context.Context, string, uuid.UUID, string, []string, []string) error
+}
+
+// UpdateRoleSubjects grants one role to the subjects in add and revokes it from
+// the subjects in remove, within one domain and one transaction. Unlike
+// ReplaceSubjectRoles it never touches a subject's other roles, so concurrent
+// assignments of different roles cannot overwrite each other.
+func (s *RBACV1Service) UpdateRoleSubjects(ctx context.Context, appKey string, roleID uuid.UUID, domain string, add, remove []string) error {
+	if roleID == uuid.Nil {
+		return fmt.Errorf("%w: role id is required", ErrInvalidArgument)
+	}
+	normalize := func(values []string) ([]string, error) {
+		seen := make(map[string]struct{}, len(values))
+		subjects := make([]string, 0, len(values))
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return nil, fmt.Errorf("%w: subjects must not be empty", ErrInvalidArgument)
+			}
+			if _, ok := seen[value]; !ok {
+				seen[value] = struct{}{}
+				subjects = append(subjects, value)
+			}
+		}
+		return subjects, nil
+	}
+	added, err := normalize(add)
+	if err != nil {
+		return err
+	}
+	removed, err := normalize(remove)
+	if err != nil {
+		return err
+	}
+	removing := make(map[string]struct{}, len(removed))
+	for _, subject := range removed {
+		removing[subject] = struct{}{}
+	}
+	for _, subject := range added {
+		if _, ok := removing[subject]; ok {
+			return fmt.Errorf("%w: subject %q is both added and removed", ErrInvalidArgument, subject)
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+	repository, ok := s.repository.(roleSubjectRepository)
+	if !ok {
+		return ErrNotFound
+	}
+	return repository.UpdateRoleSubjects(ctx, normalizeRBACScope(appKey), roleID, NormalizeRBACDomain(domain), added, removed)
 }
 
 // Authorize evaluates an authorization input against the currently saved

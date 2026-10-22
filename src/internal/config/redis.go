@@ -15,8 +15,14 @@ type RedisConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	URL       string `yaml:"url"`
 	KeyPrefix string `yaml:"key_prefix"`
-	CacheTTL  string `yaml:"cache_ttl"`
-	Timeout   string `yaml:"timeout"`
+	// CacheTTL is accepted for compatibility but no longer used: service API
+	// records never expire and are kept current by publication.
+	CacheTTL string `yaml:"cache_ttl"`
+	Timeout  string `yaml:"timeout"`
+	// ReconcileInterval is how often the background reconciler repairs Redis
+	// publication (applications not ready, behind a save, or affected by a
+	// service catalog change).
+	ReconcileInterval string `yaml:"reconcile_interval"`
 }
 
 func (c RedisConfig) Prefix() string {
@@ -32,6 +38,14 @@ func (c RedisConfig) TTLDuration() (time.Duration, error) {
 
 func (c RedisConfig) TimeoutDuration() (time.Duration, error) {
 	return redisDuration(c.Timeout, 200*time.Millisecond, "redis.timeout")
+}
+
+func (c RedisConfig) ReconcileIntervalDuration() (time.Duration, error) {
+	duration, err := redisDuration(c.ReconcileInterval, 30*time.Second, "redis.reconcile_interval")
+	if err == nil && duration < time.Second {
+		return 0, fmt.Errorf("redis.reconcile_interval must be at least 1s")
+	}
+	return duration, err
 }
 
 func redisDuration(value string, fallback time.Duration, name string) (time.Duration, error) {
@@ -61,6 +75,9 @@ func (c RedisConfig) Validate() error {
 	if _, err := c.TTLDuration(); err != nil {
 		return err
 	}
+	if _, err := c.ReconcileIntervalDuration(); err != nil {
+		return err
+	}
 	_, err := c.TimeoutDuration()
 	return err
 }
@@ -81,6 +98,7 @@ func applyRedisEnv(cfg *RedisConfig) error {
 		{"NEXUSAUTHORIZATION_REDIS_KEY_PREFIX", &cfg.KeyPrefix},
 		{"NEXUSAUTHORIZATION_REDIS_CACHE_TTL", &cfg.CacheTTL},
 		{"NEXUSAUTHORIZATION_REDIS_TIMEOUT", &cfg.Timeout},
+		{"NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL", &cfg.ReconcileInterval},
 	} {
 		if value, ok := os.LookupEnv(field.key); ok {
 			*field.dst = value

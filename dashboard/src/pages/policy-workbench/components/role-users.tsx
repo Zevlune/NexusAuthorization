@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, Drawer, Form, MessagePlugin, Select } from 'tdesign-react';
-import { listSubjectRoles, replaceSubjectRoles, type Role } from '../../../api/rbac-v1';
+import { updateRoleSubjects, type Role } from '../../../api/rbac-v1';
 import { listAllUsers, scimUserLabel, type SCIMUser } from '../../../api/user';
 import { getRequestErrorMessage } from '../../nexus-authorization/shared';
 import type { State } from '../shared';
@@ -54,44 +54,29 @@ export default function RoleUsers({ state, role, onClose }: { state: State; role
   const save = async () => {
     if (blocked) return;
     const selected = new Set(selectedIDs);
-    const changedSubjects = [...new Set([...originalIDs, ...selected])]
-      .filter(subject => originalIDs.has(subject) !== selected.has(subject));
-    if (!changedSubjects.length) { onClose(); return; }
-    if (changedSubjects.some(subject => selected.has(subject)
-      && (!role.enabled || !userByID.has(subject) || userByID.get(subject)?.active === false))) {
+    const added = selectedIDs.filter(subject => !originalIDs.has(subject));
+    const removed = [...originalIDs].filter(subject => !selected.has(subject));
+    if (!added.length && !removed.length) { onClose(); return; }
+    if (added.some(subject => !role.enabled || !userByID.has(subject) || userByID.get(subject)?.active === false)) {
       setSaveError('只能为启用的角色分配有效且启用的用户');
       return;
     }
     setSaving(true);
     setSaveError('');
     try {
-      // Refresh before merging so unrelated roles added since opening remain assigned.
-      const currentBindings = (await listSubjectRoles(state.appKey)).items || [];
-      const outcomes = await Promise.allSettled(changedSubjects.map(subject => {
-        const otherRoles = currentBindings
-          .filter(binding => binding.subject === subject && isDefaultDomain(binding.domain) && binding.role_id !== role.id)
-          .map(binding => binding.role_id);
-        const roleIDs = [...new Set(selected.has(subject) ? [...otherRoles, role.id] : otherRoles)];
-        return replaceSubjectRoles(state.appKey, subject, DOMAIN, roleIDs);
-      }));
-      // Keep completed changes when retrying a partially successful batch.
-      const committed = new Set(originalIDs);
-      outcomes.forEach((outcome, index) => {
-        if (outcome.status !== 'fulfilled') return;
-        const subject = changedSubjects[index];
-        if (selected.has(subject)) committed.add(subject);
-        else committed.delete(subject);
-      });
-      setOriginalIDs(committed);
+      // One atomic request that only grants or revokes this role: the users' other roles and
+      // concurrent edits of other roles are never overwritten.
+      await updateRoleSubjects(state.appKey, role.id, DOMAIN, added, removed);
+      setOriginalIDs(selected);
       await state.reload();
-      const failures = outcomes.filter(outcome => outcome.status === 'rejected').length;
-      if (failures) {
-        setSaveError(`${failures === outcomes.length ? '保存用户分配失败' : '部分用户分配保存失败'}，${failures} 个用户未保存。请重试；已保存的分配会保留。`);
-        return;
-      }
       MessagePlugin.success('用户分配已保存');
       onClose();
     } catch (error) {
+      // PUBLISH_PENDING: the assignment is saved; only its publication is retried in the background.
+      if ((error as { code?: string })?.code === 'PUBLISH_PENDING') {
+        setOriginalIDs(selected);
+        void state.reload();
+      }
       setSaveError(getRequestErrorMessage(error, '保存用户分配失败'));
     } finally {
       setSaving(false);

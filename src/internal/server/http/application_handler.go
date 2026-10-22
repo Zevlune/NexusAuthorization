@@ -9,12 +9,12 @@ import (
 
 func (h *Handler) ListApplications(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	items, err := h.rbacV1.ListApplications(r.Context())
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -22,7 +22,7 @@ func (h *Handler) ListApplications(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) SaveApplication(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	var body struct {
@@ -33,7 +33,7 @@ func (h *Handler) SaveApplication(w http.ResponseWriter, r *http.Request) {
 		Enabled     *bool   `json:"enabled"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	enabled := true
@@ -48,12 +48,12 @@ func (h *Handler) SaveApplication(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPut {
 		value.Key = strings.TrimSpace(r.PathValue("key"))
 		if value.Key == "" {
-			writeError(w, biz.ErrInvalidArgument)
+			writeError(w, r, biz.ErrInvalidArgument)
 			return
 		}
 		applications, err := h.rbacV1.ListApplications(r.Context())
 		if err != nil {
-			writeError(w, err)
+			writeError(w, r, err)
 			return
 		}
 		for _, application := range applications {
@@ -69,14 +69,14 @@ func (h *Handler) SaveApplication(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if value.ID == (biz.Application{}).ID {
-			writeError(w, biz.ErrNotFound)
+			writeError(w, r, biz.ErrNotFound)
 			return
 		}
 		status = http.StatusOK
 	}
 	saved, err := h.rbacV1.SaveApplication(r.Context(), value)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, status, saved)
@@ -84,13 +84,13 @@ func (h *Handler) SaveApplication(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListApplicationServices(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	key := strings.TrimSpace(r.PathValue("key"))
 	items, err := h.rbacV1.ListApplicationServices(r.Context(), key)
 	if err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -98,18 +98,18 @@ func (h *Handler) ListApplicationServices(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) ReplaceApplicationServices(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
-		writeError(w, biz.ErrNotFound)
+		writeError(w, r, biz.ErrNotFound)
 		return
 	}
 	var body struct {
 		ServiceResourceKeys []string `json:"service_resource_keys"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	if err := h.rbacV1.ReplaceApplicationServices(r.Context(), r.PathValue("key"), body.ServiceResourceKeys); err != nil {
-		writeError(w, err)
+		writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nil)

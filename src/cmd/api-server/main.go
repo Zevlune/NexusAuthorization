@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/luck/nexus-authorization/internal/app"
 	"github.com/luck/nexus-authorization/internal/config"
@@ -34,14 +37,23 @@ func run() int {
 	}
 	defer closer.Close()
 	slog.SetDefault(logger)
-	application, err := app.New(context.Background(), cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	application, err := app.New(ctx, cfg)
 	if err != nil {
 		logger.Error("Create application failed.", slog.Any("Error", err))
 		return 1
 	}
 	defer application.Close()
+	go application.RunSubjectAPIReconciler(ctx, logger)
 	server := &http.Server{
 		Addr: cfg.HTTP.Addr,
+		// Bound slow clients. WriteTimeout leaves room for Swagger imports and
+		// Redis publication after saves.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       time.Minute,
+		WriteTimeout:      3 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 		Handler: logging.HTTPMiddleware(logger, func(request *http.Request) string {
 			user, ok := application.Auth.Me(request)
 			if !ok {
@@ -59,8 +71,23 @@ func run() int {
 		)),
 	}
 	logger.Info("Permission center HTTP server listening.", slog.String("Address", cfg.HTTP.Addr))
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("HTTP server stopped unexpectedly.", slog.Any("Error", err))
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server stopped unexpectedly.", slog.Any("Error", err))
+			return 1
+		}
+		return 0
+	case <-ctx.Done():
+	}
+	// Let in-flight saves finish, including their Redis publication.
+	logger.Info("Shutting down HTTP server.")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP server shutdown failed.", slog.Any("Error", err))
 		return 1
 	}
 	return 0

@@ -104,6 +104,9 @@ func (s *ServiceResourceService) Create(ctx context.Context, resource *ServiceRe
 	if err != nil {
 		return nil, err
 	}
+	if err := validatePathSegmentKey(resourceKey, "key"); err != nil {
+		return nil, err
+	}
 	if source := strings.TrimSpace(resource.Source); source != "" && !strings.EqualFold(source, ServiceResourceSourceLocal) {
 		return nil, fmt.Errorf("%w: NexusAuth service resources cannot be created locally", ErrConflict)
 	}

@@ -49,6 +49,31 @@ func markSubjectAPIReady(t *testing.T, server *miniredis.Miniredis, prefix, appK
 	}
 }
 
+// leaseFor acquires the rebuild lease of the given applications.
+func leaseFor(t *testing.T, cache *PolicyCache, appKeys ...string) biz.SubjectAPILease {
+	t.Helper()
+	lease, err := cache.AcquireSubjectAPILease(context.Background(), appKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lease.Release(context.Background()) })
+	return lease
+}
+
+// publishSubjectAPIs runs one complete lease-protected rebuild of an application.
+func publishSubjectAPIs(t *testing.T, cache *PolicyCache, appKey string, policies ...biz.SubjectAPIPolicy) {
+	t.Helper()
+	ctx := context.Background()
+	lease := leaseFor(t, cache, appKey)
+	if err := lease.Block(ctx, []string{appKey}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Replace(ctx, appKey, policies); err != nil {
+		t.Fatal(err)
+	}
+	lease.Release(ctx)
+}
+
 func TestSubjectAPINoReadyGateRejectsReads(t *testing.T) {
 	cache, _ := testCache(t)
 	ctx := context.Background()
@@ -243,7 +268,8 @@ func TestSubjectAPIGateBlocksStaleReads(t *testing.T) {
 
 	// Blocking writes the gate. The old record is still present, but a read must
 	// refuse it because the gate is checked and the value fetched atomically.
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{policy.ApplicationKey}); err != nil {
+	lease := leaseFor(t, cache, policy.ApplicationKey)
+	if err := lease.Block(ctx, []string{policy.ApplicationKey}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cache.LoadSubjectAPIs(ctx, policy.SubjectAPIIdentity); err == nil || errors.Is(err, biz.ErrNotFound) {
@@ -257,6 +283,27 @@ func TestSubjectAPIGateBlocksStaleReads(t *testing.T) {
 	}
 }
 
+func TestSubjectAPIMissingRecordBehindReadyGate(t *testing.T) {
+	cache, _ := testCache(t)
+	ctx := context.Background()
+	alice := testSubjectAPIPolicy(testSubjectAPIIdentity())
+	publishSubjectAPIs(t, cache, alice.ApplicationKey, alice)
+
+	// A published application without a record for this subject is a normal
+	// "no grant" miss, distinct from an application that was never published.
+	bob := alice.SubjectAPIIdentity
+	bob.Subject = "user-without-roles"
+	if _, err := cache.LoadSubjectAPIs(ctx, bob); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("missing record = %v", err)
+	}
+	unpublished := alice.SubjectAPIIdentity
+	unpublished.ApplicationKey = "never-published"
+	_, err := cache.LoadSubjectAPIs(ctx, unpublished)
+	if !errors.Is(err, biz.ErrNotFound) || errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("unpublished application = %v", err)
+	}
+}
+
 func TestSubjectAPIReplaceRemovesDepartedUsers(t *testing.T) {
 	cache, server := testCache(t)
 	ctx := context.Background()
@@ -267,12 +314,7 @@ func TestSubjectAPIReplaceRemovesDepartedUsers(t *testing.T) {
 	bobIdentity.Subject = "user-2002"
 	bob := testSubjectAPIPolicy(bobIdentity)
 
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{appKey}); err != nil {
-		t.Fatal(err)
-	}
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, []biz.SubjectAPIPolicy{alice, bob}); err != nil {
-		t.Fatal(err)
-	}
+	publishSubjectAPIs(t, cache, appKey, alice, bob)
 	for _, p := range []biz.SubjectAPIPolicy{alice, bob} {
 		if _, err := cache.LoadSubjectAPIs(ctx, p.SubjectAPIIdentity); err != nil {
 			t.Fatalf("initial replace did not publish %s: %v", p.Subject, err)
@@ -280,12 +322,7 @@ func TestSubjectAPIReplaceRemovesDepartedUsers(t *testing.T) {
 	}
 
 	// The next batch drops Bob (departed). His record must be deleted.
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{appKey}); err != nil {
-		t.Fatal(err)
-	}
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, []biz.SubjectAPIPolicy{alice}); err != nil {
-		t.Fatal(err)
-	}
+	publishSubjectAPIs(t, cache, appKey, alice)
 	if _, err := cache.LoadSubjectAPIs(ctx, bob.SubjectAPIIdentity); !errors.Is(err, biz.ErrNotFound) {
 		t.Fatalf("departed user still served: %v", err)
 	}
@@ -314,14 +351,9 @@ func TestSubjectAPIReplaceEmptyClearsOldUsers(t *testing.T) {
 	}
 	markSubjectAPIReady(t, server, cache.prefix, appKey)
 
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{appKey}); err != nil {
-		t.Fatal(err)
-	}
-	// A disabled application is published as an empty policy list: it clears old
-	// records and still opens the gate.
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, nil); err != nil {
-		t.Fatal(err)
-	}
+	// An application without bindings is published as an empty policy list: it
+	// clears old records and still opens the gate.
+	publishSubjectAPIs(t, cache, appKey)
 	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, appKey)); state != subjectAPIStateReady {
 		t.Fatalf("state = %q", state)
 	}
@@ -341,29 +373,177 @@ func TestSubjectAPIReplaceRequiresUpdatingGate(t *testing.T) {
 	ctx := context.Background()
 	policy := testSubjectAPIPolicy(testSubjectAPIIdentity())
 	appKey := policy.ApplicationKey
+	lease := leaseFor(t, cache, appKey)
 	// No gate at all.
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, []biz.SubjectAPIPolicy{policy}); err == nil {
+	if err := lease.Replace(ctx, appKey, []biz.SubjectAPIPolicy{policy}); err == nil {
 		t.Fatal("replace ran without a gate")
 	}
 	// Ready is not a valid gate either.
 	markSubjectAPIReady(t, server, cache.prefix, appKey)
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, []biz.SubjectAPIPolicy{policy}); err == nil {
+	if err := lease.Replace(ctx, appKey, []biz.SubjectAPIPolicy{policy}); err == nil {
 		t.Fatal("replace ran while ready")
 	}
 	// A policy for another application is rejected.
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{appKey}); err != nil {
+	if err := lease.Block(ctx, []string{appKey}); err != nil {
 		t.Fatal(err)
 	}
 	foreign := policy
 	foreign.ApplicationKey = "billing"
-	if err := cache.ReplaceSubjectAPIApplication(ctx, appKey, []biz.SubjectAPIPolicy{foreign}); err == nil {
+	if err := lease.Replace(ctx, appKey, []biz.SubjectAPIPolicy{foreign}); err == nil {
 		t.Fatal("replace accepted a foreign application policy")
 	}
 	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, appKey)); state != subjectAPIStateUpdating {
 		t.Fatalf("failed replace changed the gate to %q", state)
 	}
-	if err := cache.ReplaceSubjectAPIApplication(ctx, "", nil); err == nil {
+	if err := lease.Replace(ctx, "", nil); err == nil {
 		t.Fatal("replace accepted an empty application key")
+	}
+	// Applications outside the lease cannot be touched.
+	if err := lease.Block(ctx, []string{"billing"}); err == nil {
+		t.Fatal("blocked an application the lease does not hold")
+	}
+	if err := lease.Replace(ctx, "billing", nil); err == nil {
+		t.Fatal("replaced an application the lease does not hold")
+	}
+}
+
+func TestSubjectAPILeaseIsExclusive(t *testing.T) {
+	cache, _ := testCache(t)
+	ctx := context.Background()
+	first, err := cache.AcquireSubjectAPILease(ctx, []string{"console", "billing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, err := cache.AcquireSubjectAPILease(waitCtx, []string{"billing"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second lease while held = %v", err)
+	}
+	// Releasing frees every application, and a waiter then gets the lease.
+	released := make(chan error, 1)
+	go func() {
+		lease, err := cache.AcquireSubjectAPILease(ctx, []string{"billing", "console"})
+		if err == nil {
+			lease.Release(ctx)
+		}
+		released <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	first.Release(ctx)
+	select {
+	case err := <-released:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never acquired the released lease")
+	}
+	if _, err := cache.AcquireSubjectAPILease(ctx, []string{" "}); err == nil {
+		t.Fatal("lease accepted an empty application key")
+	}
+}
+
+// A holder whose lease expired (for example after a long pause) must not be
+// able to overwrite the records of the rebuild that took over.
+func TestSubjectAPILostLeaseCannotWrite(t *testing.T) {
+	cache, server := testCache(t)
+	ctx := context.Background()
+	identity := testSubjectAPIIdentity()
+	appKey := identity.ApplicationKey
+	stale := testSubjectAPIPolicy(identity)
+	stale.RoleCodes = []string{"revoked-role"}
+	current := testSubjectAPIPolicy(identity)
+	current.APIs = nil
+	current.RoleCodes = nil
+
+	old := leaseFor(t, cache, appKey)
+	if err := old.Block(ctx, []string{appKey}); err != nil {
+		t.Fatal(err)
+	}
+	server.FastForward(subjectAPILeaseTTL + time.Second)
+	newer := leaseFor(t, cache, appKey)
+	if err := newer.Block(ctx, []string{appKey}); err != nil {
+		t.Fatal(err)
+	}
+	if err := newer.Replace(ctx, appKey, []biz.SubjectAPIPolicy{current}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := old.Block(ctx, []string{appKey}); !errors.Is(err, ErrSubjectAPILeaseLost) {
+		t.Fatalf("expired lease blocked the gate: %v", err)
+	}
+	if err := server.Set(subjectAPIStateKey(cache.prefix, appKey), subjectAPIStateUpdating); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Replace(ctx, appKey, []biz.SubjectAPIPolicy{stale}); !errors.Is(err, ErrSubjectAPILeaseLost) {
+		t.Fatalf("expired lease replaced records: %v", err)
+	}
+	raw, err := server.Get(SubjectAPIKey(cache.prefix, identity))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "revoked-role") {
+		t.Fatal("stale rebuild overwrote the newer record")
+	}
+	// Releasing the expired lease must not free the newer holder's lock.
+	old.Release(ctx)
+	if lock, _ := server.Get(subjectAPILockKey(cache.prefix, appKey)); lock == "" {
+		t.Fatal("expired lease released the current holder's lock")
+	}
+}
+
+func TestSubjectAPIRequestAndPublishedCounters(t *testing.T) {
+	cache, server := testCache(t)
+	ctx := context.Background()
+	appKey := "console"
+
+	tickets, err := cache.RequestSubjectAPIRefresh(ctx, []string{appKey})
+	if err != nil || tickets[appKey] != 1 {
+		t.Fatalf("first ticket = %v, %v", tickets, err)
+	}
+	lease := leaseFor(t, cache, appKey)
+	pending, err := lease.Pending(ctx, tickets)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("unpublished application pending = %v, %v", pending, err)
+	}
+	// A save that commits while this rebuild holds the lease asks for a newer
+	// rebuild; this one only covers what it saw when it took the lease.
+	later, err := cache.RequestSubjectAPIRefresh(ctx, []string{appKey})
+	if err != nil || later[appKey] != 2 {
+		t.Fatalf("second ticket = %v, %v", later, err)
+	}
+	if err := lease.Block(ctx, []string{appKey}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Replace(ctx, appKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	if published, _ := server.Get(subjectAPIPublishedKey(cache.prefix, appKey)); published != "1" {
+		t.Fatalf("published = %q, want 1", published)
+	}
+	statuses, err := cache.SubjectAPIStatuses(ctx, []string{appKey, "unknown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := statuses[appKey]; status.State != subjectAPIStateReady || status.Requested != 2 || status.Published != 1 || status.Ready() {
+		t.Fatalf("status = %+v", status)
+	}
+	if status := statuses["unknown"]; status.State != "" || status.Requested != 0 || status.Published != 0 {
+		t.Fatalf("unknown status = %+v", status)
+	}
+	if pending, _ := lease.Pending(ctx, tickets); len(pending) != 0 {
+		t.Fatalf("covered ticket still pending: %v", pending)
+	}
+	if pending, _ := lease.Pending(ctx, later); len(pending) != 1 {
+		t.Fatalf("newer ticket not pending: %v", pending)
+	}
+	lease.Release(ctx)
+
+	// The next holder covers the second save.
+	publishSubjectAPIs(t, cache, appKey)
+	statuses, _ = cache.SubjectAPIStatuses(ctx, []string{appKey})
+	if !statuses[appKey].Ready() || statuses[appKey].Published != 2 {
+		t.Fatalf("status after second rebuild = %+v", statuses[appKey])
 	}
 }
 
@@ -438,8 +618,11 @@ func TestSubjectAPIClosedOnCorruptOversizeAndMismatch(t *testing.T) {
 	if err := cache.StoreSubjectAPIs(ctx, policy); err == nil {
 		t.Fatal("outage ignored on store")
 	}
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{policy.ApplicationKey}); err == nil {
-		t.Fatal("outage ignored on block")
+	if _, err := cache.AcquireSubjectAPILease(ctx, []string{policy.ApplicationKey}); err == nil {
+		t.Fatal("outage ignored on lease")
+	}
+	if _, err := cache.RequestSubjectAPIRefresh(ctx, []string{policy.ApplicationKey}); err == nil {
+		t.Fatal("outage ignored on refresh request")
 	}
 }
 
@@ -461,8 +644,8 @@ func TestSubjectAPIRejectsInvalidIdentity(t *testing.T) {
 			t.Fatalf("load accepted invalid %s", name)
 		}
 	}
-	if err := cache.BlockSubjectAPIApplications(ctx, []string{" "}); err == nil {
-		t.Fatal("block accepted an empty application key")
+	if _, err := cache.RequestSubjectAPIRefresh(ctx, []string{" "}); err == nil {
+		t.Fatal("refresh request accepted an empty application key")
 	}
 }
 
@@ -501,12 +684,17 @@ func TestSubjectAPITimeoutOutageAndCancellation(t *testing.T) {
 	if _, err := cache.LoadSubjectAPIs(canceled, identity); err == nil {
 		t.Fatal("canceled load succeeded")
 	}
-	if err := cache.BlockSubjectAPIApplications(canceled, []string{identity.ApplicationKey}); !errors.Is(err, context.Canceled) {
+	lease := leaseFor(t, cache, identity.ApplicationKey)
+	if err := lease.Block(canceled, []string{identity.ApplicationKey}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("block cancel = %v", err)
 	}
-	if err := cache.ReplaceSubjectAPIApplication(canceled, identity.ApplicationKey, nil); !errors.Is(err, context.Canceled) {
+	if err := lease.Replace(canceled, identity.ApplicationKey, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("replace cancel = %v", err)
 	}
+	if _, err := cache.AcquireSubjectAPILease(canceled, []string{"other-app"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("lease cancel = %v", err)
+	}
+	lease.Release(ctx)
 
 	cache.timeout = 20 * time.Millisecond
 	cache.client.AddHook(subjectAPIDelayHook{delay: time.Second})

@@ -174,6 +174,15 @@
 
 初始化脚本只定义 4 个业务保护触发器。它不创建应用标记刷新触发器或语句级缓存失效触发器。
 
+4 个触发器函数都固定 `SET search_path = nexusauthorization`，因此运维人员用未设置 `search_path` 的会话执行 SQL（例如在 `psql` 中清理数据）时，函数内引用的表仍能解析。已按旧版 `001_init.sql` 建库的环境可以补设（不影响数据）：
+
+```sql
+ALTER FUNCTION nexusauthorization.prevent_disabling_linked_service_resource() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.prevent_unlinking_granted_service_resource() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.enforce_role_api_endpoint_application() SET search_path = nexusauthorization;
+ALTER FUNCTION nexusauthorization.enforce_role_menu_application() SET search_path = nexusauthorization;
+```
+
 业务保护触发器：
 
 | 触发器 | 时机 | 作用 |
@@ -187,7 +196,7 @@
 
 ## 显式索引
 
-PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 6 个索引：
+PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 7 个索引：
 
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
@@ -196,6 +205,15 @@ PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动�
 | `subject_role_bindings_application_lookup_idx` | `subject_role_bindings` | (`application_id`, `subject`, `domain`) | 按应用、主体和域查询角色绑定 |
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
 | `application_service_resources_service_idx` | `application_service_resources` | (`service_resource_key`, `application_id`) | 按服务资源反查应用 |
+| `subject_role_bindings_role_idx` | `subject_role_bindings` | (`role_id`, `application_id`) | 删除角色时级联删除主体绑定，避免全表扫描 |
+| `role_menu_bindings_menu_idx` | `role_menu_bindings` | (`menu_id`) | 删除菜单时级联删除角色菜单授权 |
+
+已按旧版 `001_init.sql` 建库的环境可以手动补建后两个索引（不影响数据）：
+
+```sql
+CREATE INDEX IF NOT EXISTS subject_role_bindings_role_idx ON nexusauthorization.subject_role_bindings(role_id, application_id);
+CREATE INDEX IF NOT EXISTS role_menu_bindings_menu_idx ON nexusauthorization.role_menu_bindings(menu_id);
+```
 
 ## 关系概览
 

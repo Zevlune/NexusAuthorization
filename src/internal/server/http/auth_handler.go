@@ -2,10 +2,12 @@ package httpserver
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/luck/nexus-authorization/internal/auth"
+	"github.com/luck/nexus-authorization/internal/logging"
 )
 
 // AuthConfig 返回前端启动登录流程所需的认证开关。
@@ -20,12 +22,12 @@ func (h *Handler) AuthConfig(w http.ResponseWriter, _ *http.Request) {
 // AuthLogin 创建 OIDC 登录请求并返回身份平台授权地址。
 func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
 	if h.auth == nil {
-		writeAuthError(w, auth.ErrDisabled)
+		writeAuthError(w, r, auth.ErrDisabled)
 		return
 	}
 	authorizeURL, err := h.auth.Login(w, r)
 	if err != nil {
-		writeAuthError(w, err)
+		writeAuthError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"authorizeUrl": authorizeURL})
@@ -34,11 +36,11 @@ func (h *Handler) AuthLogin(w http.ResponseWriter, r *http.Request) {
 // AuthCallback 处理 OIDC 回调、建立本地会话并跳转到管理端。
 func (h *Handler) AuthCallback(w http.ResponseWriter, r *http.Request) {
 	if h.auth == nil {
-		writeAuthError(w, auth.ErrDisabled)
+		writeAuthError(w, r, auth.ErrDisabled)
 		return
 	}
 	if err := h.auth.Callback(w, r); err != nil {
-		writeAuthError(w, err)
+		writeAuthError(w, r, err)
 		return
 	}
 	// Follow the NexusAuth Workbench BFF pattern: the backend owns the OIDC
@@ -61,7 +63,7 @@ func dashboardCallbackURL(authenticator *auth.Service) string {
 // AuthMe 返回当前会话中的登录用户信息。
 func (h *Handler) AuthMe(w http.ResponseWriter, r *http.Request) {
 	if h.auth == nil {
-		writeAuthError(w, auth.ErrUnauthenticated)
+		writeAuthError(w, r, auth.ErrUnauthenticated)
 		return
 	}
 	if !h.auth.Enabled() {
@@ -73,7 +75,7 @@ func (h *Handler) AuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok := h.auth.Me(r)
 	if !ok {
-		writeAuthError(w, auth.ErrUnauthenticated)
+		writeAuthError(w, r, auth.ErrUnauthenticated)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"isAuthenticated": true, "user": user})
@@ -87,14 +89,16 @@ func (h *Handler) AuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	logoutURL, err := h.auth.Logout(w, r)
 	if err != nil {
-		writeAuthError(w, err)
+		writeAuthError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"logoutUrl": logoutURL})
 }
 
 // writeAuthError 将认证错误写入统一的 HTTP 错误响应。
-func writeAuthError(w http.ResponseWriter, err error) {
+// Unexpected errors (for example a failed code exchange) are logged and
+// answered generically instead of echoing upstream details to the browser.
+func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
@@ -104,10 +108,15 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	case errors.Is(err, auth.ErrInvalidRequest), errors.Is(err, auth.ErrInvalidState), errors.Is(err, auth.ErrInvalidNonce):
 		status = http.StatusBadRequest
 	}
+	message := err.Error()
+	if status == http.StatusInternalServerError {
+		message = "authentication failed"
+		logging.FromContext(r.Context()).Error("Authentication request failed.", slog.Any("Error", err))
+	}
 	writeRawJSON(w, status, map[string]any{
 		"success":      false,
 		"errorCode":    authErrorCode(err),
-		"errorMessage": err.Error(),
+		"errorMessage": message,
 		"result":       nil,
 	})
 }

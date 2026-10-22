@@ -132,7 +132,7 @@ CREATE TABLE subject_role_bindings (
 );
 
 CREATE OR REPLACE FUNCTION prevent_disabling_linked_service_resource()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = nexusauthorization AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
         IF EXISTS (SELECT 1 FROM application_service_resources WHERE service_resource_key = OLD.resource_key)
@@ -158,7 +158,7 @@ BEFORE UPDATE OF enabled OR DELETE ON service_resources
 FOR EACH ROW EXECUTE FUNCTION prevent_disabling_linked_service_resource();
 
 CREATE OR REPLACE FUNCTION prevent_unlinking_granted_service_resource()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = nexusauthorization AS $$
 BEGIN
     IF EXISTS (
         SELECT 1
@@ -179,7 +179,7 @@ BEFORE DELETE ON application_service_resources
 FOR EACH ROW EXECUTE FUNCTION prevent_unlinking_granted_service_resource();
 
 CREATE OR REPLACE FUNCTION enforce_role_api_endpoint_application()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = nexusauthorization AS $$
 DECLARE
     role_application UUID;
     endpoint_service VARCHAR(128);
@@ -202,7 +202,7 @@ BEFORE INSERT OR UPDATE ON role_api_endpoint_bindings
 FOR EACH ROW EXECUTE FUNCTION enforce_role_api_endpoint_application();
 
 CREATE OR REPLACE FUNCTION enforce_role_menu_application()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql SET search_path = nexusauthorization AS $$
 DECLARE
     role_application UUID;
     menu_application UUID;
@@ -226,5 +226,8 @@ CREATE INDEX role_api_endpoint_bindings_endpoint_idx ON role_api_endpoint_bindin
 CREATE INDEX subject_role_bindings_application_lookup_idx ON subject_role_bindings(application_id, subject, domain);
 CREATE INDEX menus_application_enabled_idx ON menus(application_id, enabled, sort_order);
 CREATE INDEX application_service_resources_service_idx ON application_service_resources(service_resource_key, application_id);
+-- Foreign-key lookups when a role or menu is deleted (ON DELETE CASCADE).
+CREATE INDEX subject_role_bindings_role_idx ON subject_role_bindings(role_id, application_id);
+CREATE INDEX role_menu_bindings_menu_idx ON role_menu_bindings(menu_id);
 
 COMMIT;

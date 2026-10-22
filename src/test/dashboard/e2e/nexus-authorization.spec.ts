@@ -13,8 +13,8 @@ const { expect, test } = requireDashboardDependency('@playwright/test') as typeo
 //   - stores the selected business application in sessionStorage 'nexus-authorization-application'
 //     (dashboard/src/api/application.ts) and scopes every business call with ?app_key=;
 //   - manages roles through /api/v1/rbac-v1/roles (POST creates and updates, DELETE removes);
-//   - binds users through /api/v1/rbac-v1/subject-roles (PUT replaces one subject+domain membership,
-//     default domain = the empty string);
+//   - binds users through PUT /api/v1/rbac-v1/roles/{id}/subjects (adds/removes one role's members
+//     atomically, default domain = the empty string);
 //   - evaluates requests through /api/v1/rbac-v1/simulate chosen from the service catalog, API
 //     endpoints and the SCIM directory (service_resource + subject/method/path, domain omitted).
 //
@@ -345,6 +345,21 @@ async function mockWorkbench(page: Page, options: { application?: string | null;
       return;
     }
 
+    const roleSubjects = path.match(/^\/api\/v1\/rbac-v1\/roles\/([^/]+)\/subjects$/);
+    if (roleSubjects && request.method() === 'PUT') {
+      const roleID = decodeURIComponent(roleSubjects[1]);
+      const body = request.postDataJSON() as { domain: string; add: string[]; remove: string[] };
+      state.subjectRolePuts.push({ url: url.pathname + url.search, body });
+      // Mirrors the backend: only this role changes for the listed subjects in the domain.
+      const current = state.bindings[appKey ?? ''] ?? [];
+      const kept = current.filter(item => !(item.role_id === roleID && item.domain === body.domain && body.remove.includes(item.subject)));
+      const added = body.add
+        .filter(subject => !kept.some(item => item.role_id === roleID && item.domain === body.domain && item.subject === subject))
+        .map(subject => ({ subject, domain: body.domain, role_id: roleID }));
+      state.bindings[appKey ?? ''] = [...kept, ...added];
+      await fulfill(route, null);
+      return;
+    }
     const roleDetail = path.match(/^\/api\/v1\/rbac-v1\/roles\/([^/]+)$/);
     if (roleDetail && request.method() === 'DELETE') {
       const id = decodeURIComponent(roleDetail[1]);
@@ -606,7 +621,7 @@ test('删除角色：确认后 DELETE rbac-v1 roles/{id} 带 app_key 并刷新�
   expect(state.publishRequests).toEqual([]);
 });
 
-test('分配用户：subject-roles 保存保留其他角色与 domain，移除后再分配', async ({ page }) => {
+test('分配用户：只增删本角色的成员，保留其他角色与 domain，移除后再分配', async ({ page }) => {
   const state = await mockWorkbench(page, {
     bindings: [
       { subject: ALICE.id, domain: '', role_id: 'reader-role' },
@@ -623,7 +638,7 @@ test('分配用户：subject-roles 保存保留其他角色与 domain，移除�
     return drawer;
   };
 
-  // Removing this role only rewrites the default domain and keeps the other default role.
+  // Removing this role only revokes it in the default domain and keeps the other default role.
   const drawer = await openDrawer();
   const select = drawer.locator('.t-select').first();
   await expect(select.locator('.t-tag').filter({ hasText: ALICE_LABEL })).toBeVisible();
@@ -632,15 +647,15 @@ test('分配用户：subject-roles 保存保留其他角色与 domain，移除�
 
   await expect.poll(() => state.subjectRolePuts.length).toBe(1);
   const removal = state.subjectRolePuts[0];
-  expect(removal.url).toContain('/api/v1/rbac-v1/subject-roles');
+  expect(removal.url).toContain('/api/v1/rbac-v1/roles/reader-role/subjects');
   expect(removal.url).toContain('app_key=app-orders');
-  expect(removal.body).toEqual({ subject: ALICE.id, domain: '', role_ids: ['editor-role'] });
+  expect(removal.body).toEqual({ domain: '', add: [], remove: [ALICE.id] });
   expect(state.bindings[APP_ORDERS]).toEqual([
-    { subject: ALICE.id, domain: 'tenant-a', role_id: 'reader-role' },
     { subject: ALICE.id, domain: '', role_id: 'editor-role' },
+    { subject: ALICE.id, domain: 'tenant-a', role_id: 'reader-role' },
   ]);
 
-  // Assigning the role back merges the existing other role instead of replacing the whole subject.
+  // Assigning the role back only grants this role; the other role is never sent.
   const reassign = await openDrawer();
   const reassignSelect = reassign.locator('.t-select').first();
   await reassignSelect.click();
@@ -649,8 +664,9 @@ test('分配用户：subject-roles 保存保留其他角色与 domain，移除�
 
   await expect.poll(() => state.subjectRolePuts.length).toBe(2);
   const assignment = state.subjectRolePuts[1];
-  expect(assignment.body).toMatchObject({ subject: ALICE.id, domain: '' });
-  expect(sortedIDs((assignment.body as { role_ids: string[] }).role_ids)).toEqual(['editor-role', 'reader-role']);
+  expect(assignment.url).toContain('/api/v1/rbac-v1/roles/reader-role/subjects');
+  expect(assignment.body).toEqual({ domain: '', add: [ALICE.id], remove: [] });
+  expect(sortedIDs(state.bindings[APP_ORDERS].filter(item => item.subject === ALICE.id && item.domain === '').map(item => item.role_id))).toEqual(['editor-role', 'reader-role']);
   expect(state.bindings[APP_ORDERS]).toContainEqual({ subject: ALICE.id, domain: 'tenant-a', role_id: 'reader-role' });
 });
 

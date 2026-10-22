@@ -100,8 +100,11 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 | `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
 | `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用、未就绪或记录损坏时拒绝，不回退数据库 |
 | `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 多环境必须使用不同前缀 |
-| `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 使用 Redis | 配置层保留的当前记录缓存 TTL，默认 24h；服务 API 授权记录不设 TTL |
+| `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 已废弃 | 仅为兼容旧配置保留，不再使用；服务 API 授权记录不设 TTL |
 | `NEXUSAUTHORIZATION_REDIS_TIMEOUT` | 使用 Redis | Redis 操作超时，默认 200ms |
+| `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL` | 使用 Redis | 后台对账周期，默认 30s：补发布失败的保存、修复清空的 Redis 和卡住的闸门、跟进远程服务目录变化 |
+| `NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOW_LOOPBACK` | 可选 | Swagger 导入是否允许访问回环地址；生产默认 `false`，仅本地开发开启 |
+| `NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOWED_HOSTS` | 可选 | 逗号分隔的主机名或 CIDR；设置后 Swagger 导入只能访问这些地址。链路本地与云元数据地址始终禁止 |
 
 配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。`redis.enabled` 在 YAML 省略时仍为 `true`。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
 
@@ -148,7 +151,7 @@ docker compose -f docker-compose.yml ps
 - PostgreSQL 全库，包括 schema、触发器、函数和权限数据；
 - `/app/data` 中的 OIDC 会话密钥和运行时数据；
 - Compose 文件、环境变量模板和实际镜像版本；
-- Redis 不作为主备份来源；启用模式下它可以清空并由 PostgreSQL 重建，服务 API 授权记录会在下一次保存命中受影响应用时整体重建。
+- Redis 不作为主备份来源；启用模式下它可以清空并由 PostgreSQL 重建：API 启动时会完整发布一次，运行中被清空则由后台对账在一个周期（默认 30 秒）内重建，期间该应用的服务 API 鉴权返回 404 并拒绝。
 
 示例：
 

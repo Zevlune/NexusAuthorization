@@ -133,6 +133,14 @@ func TestCanonicalAPIRoutesUseAPIPrefix(t *testing.T) {
 	}
 }
 
+// newJSONRequest builds a request with a JSON body, as browsers and the SDK
+// send it.
+func newJSONRequest(method, target, body string) *http.Request {
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
 func TestApplicationMenuRequiresAppKey(t *testing.T) {
 	server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(&testRBACRepo{})))
 	response := httptest.NewRecorder()
@@ -140,60 +148,6 @@ func TestApplicationMenuRequiresAppKey(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("missing app_key status = %d body=%s", response.Code, response.Body.String())
 	}
-}
-
-type testRoleRepo struct {
-	values  map[string]*biz.Role
-	menuIDs []uuid.UUID
-}
-
-func (r *testRoleRepo) Create(_ context.Context, value *biz.Role) (*biz.Role, error) {
-	value.ID = "role-test"
-	r.values[value.ID] = value
-	return value, nil
-}
-func (r *testRoleRepo) Get(_ context.Context, id string) (*biz.Role, error) {
-	value, ok := r.values[id]
-	if !ok {
-		return nil, biz.ErrNotFound
-	}
-	return value, nil
-}
-func (r *testRoleRepo) Update(_ context.Context, value *biz.Role) (*biz.Role, error) {
-	if _, ok := r.values[value.ID]; !ok {
-		return nil, biz.ErrNotFound
-	}
-	r.values[value.ID] = value
-	return value, nil
-}
-func (r *testRoleRepo) SoftDelete(_ context.Context, id string) error {
-	value, ok := r.values[id]
-	if !ok {
-		return biz.ErrNotFound
-	}
-	value.IsDeleted = true
-	value.Enabled = false
-	return nil
-}
-func (*testRoleRepo) ListByServiceResource(context.Context, string) ([]*biz.Role, error) {
-	return nil, nil
-}
-func (r *testRoleRepo) ReplaceMenus(_ context.Context, _ string, menuIDs []uuid.UUID) error {
-	r.menuIDs = append([]uuid.UUID(nil), menuIDs...)
-	return nil
-}
-func (r *testRoleRepo) MenuIDs(context.Context, string) ([]uuid.UUID, error) {
-	return append([]uuid.UUID(nil), r.menuIDs...), nil
-}
-
-type testMenuRepo struct {
-	values map[uuid.UUID]*biz.Menu
-}
-
-type testUserRoleRepo struct {
-	subject string
-	app     string
-	roleIDs []string
 }
 
 type testRBACRepo struct {
@@ -235,61 +189,10 @@ func (*testRBACRepo) GetCurrentPolicy(context.Context, biz.CurrentPolicy) (biz.C
 	return biz.CurrentPolicy{}, nil
 }
 
-func (r *testUserRoleRepo) ReplaceRoles(_ context.Context, subject, app string, roleIDs []string) error {
-	r.subject, r.app, r.roleIDs = subject, app, append([]string(nil), roleIDs...)
-	return nil
-}
-func (r *testUserRoleRepo) RoleIDs(context.Context, string, string) ([]string, error) {
-	return append([]string(nil), r.roleIDs...), nil
-}
-
-func (r *testMenuRepo) Create(_ context.Context, menu *biz.Menu) (*biz.Menu, error) {
-	if r.values == nil {
-		r.values = map[uuid.UUID]*biz.Menu{}
-	}
-	if menu.ID == uuid.Nil {
-		menu.ID = uuid.New()
-	}
-	r.values[menu.ID] = menu
-	return menu, nil
-}
-func (r *testMenuRepo) Get(_ context.Context, id uuid.UUID) (*biz.Menu, error) {
-	menu, ok := r.values[id]
-	if !ok {
-		return nil, biz.ErrNotFound
-	}
-	return menu, nil
-}
-func (r *testMenuRepo) Update(_ context.Context, menu *biz.Menu) (*biz.Menu, error) {
-	if _, ok := r.values[menu.ID]; !ok {
-		return nil, biz.ErrNotFound
-	}
-	r.values[menu.ID] = menu
-	return menu, nil
-}
-func (r *testMenuRepo) SoftDelete(_ context.Context, id uuid.UUID) error {
-	menu, ok := r.values[id]
-	if !ok {
-		return biz.ErrNotFound
-	}
-	menu.IsDeleted = true
-	menu.Enabled = false
-	return nil
-}
-func (r *testMenuRepo) ListByServiceResource(_ context.Context, serviceResource string) ([]*biz.Menu, error) {
-	menus := make([]*biz.Menu, 0)
-	for _, menu := range r.values {
-		if menu.ServiceResource == serviceResource {
-			menus = append(menus, menu)
-		}
-	}
-	return menus, nil
-}
-
 func TestRoleCreateEndpointIsRetired(t *testing.T) {
 	server := NewServer(NewHandler(nil))
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/roles", strings.NewReader(`{"service_resource":"admin","code":"operator","name":"Operator"}`)))
+	server.ServeHTTP(response, newJSONRequest(http.MethodPost, "/api/v1/roles", `{"service_resource":"admin","code":"operator","name":"Operator"}`))
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("retired role create status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -298,7 +201,7 @@ func TestRoleCreateEndpointIsRetired(t *testing.T) {
 func TestRejectsUnknownJSONFields(t *testing.T) {
 	repository := &serviceResourceHandlerRepository{values: map[string]*biz.ServiceResource{}}
 	server := newServiceResourceHandlerServer(t, repository)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders","other":true}`))
+	request := newJSONRequest(http.MethodPost, "/api/v1/service-resources", `{"key":"orders","display_name":"Orders","other":true}`)
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -333,7 +236,7 @@ func TestMenuMetadataRoutesAreRetired(t *testing.T) {
 		`{"service_resource":"admin","code":"settings","name":"Settings","type":"menu","api_path":"/v1/settings"}`,
 	} {
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/menus", strings.NewReader(payload)))
+		server.ServeHTTP(response, newJSONRequest(http.MethodPost, "/api/v1/menus", payload))
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("retired menu metadata route payload %s status = %d body=%s", payload, response.Code, response.Body.String())
 		}
@@ -352,7 +255,7 @@ func TestReplaceRBACV1SubjectRoles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repository := &testRBACRepo{}
 			server := NewServer(NewHandler(nil).WithRBACV1Service(biz.NewRBACV1Service(repository)))
-			request := httptest.NewRequest(http.MethodPut, "/api/v1/rbac-v1/subject-roles?app_key=admin", strings.NewReader(tc.body))
+			request := newJSONRequest(http.MethodPut, "/api/v1/rbac-v1/subject-roles?app_key=admin", tc.body)
 			response := httptest.NewRecorder()
 			server.ServeHTTP(response, request)
 			if response.Code != http.StatusOK {
@@ -409,7 +312,7 @@ func TestRBACReleaseRoutesAreRetired(t *testing.T) {
 	server := NewServer(NewHandler(nil))
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		response := httptest.NewRecorder()
-		request := httptest.NewRequest(method, "/api/v1/rbac-v1/releases", strings.NewReader(`{"description":"legacy"}`))
+		request := newJSONRequest(method, "/api/v1/rbac-v1/releases", `{"description":"legacy"}`)
 		server.ServeHTTP(response, request)
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("retired release route %s status = %d body=%s", method, response.Code, response.Body.String())
@@ -430,7 +333,7 @@ func TestDevelopmentModeInjectsAuditActor(t *testing.T) {
 	server := NewServer(NewHandler(nil, authenticator).
 		WithServiceResourceCatalog(service).
 		WithServiceResourceService(service))
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"Orders"}`))
+	request := newJSONRequest(http.MethodPost, "/api/v1/service-resources", `{"key":"orders","display_name":"Orders"}`)
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated {
