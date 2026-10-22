@@ -67,6 +67,8 @@ export const saveRole = (appKey: string, item: Partial<Role>) => request.post<Ro
 export const deleteRole = (appKey: string, id: string) => request.delete(`/v1/rbac-v1/roles/${id}${query(appKey)}`);
 export const listSubjectRoles = (appKey: string) => request.get<{ items: SubjectRole[] }>(`/v1/rbac-v1/subject-roles${query(appKey)}`);
 export const replaceSubjectRoles = (appKey: string, subject: string, domain: string, roleIDs: string[]) => request.put(`/v1/rbac-v1/subject-roles${query(appKey)}`, { subject, domain, role_ids: roleIDs });
+/** Grants or revokes one role for several subjects atomically, leaving their other roles untouched. */
+export const updateRoleSubjects = (appKey: string, roleID: string, domain: string, add: string[], remove: string[]) => request.put(`/v1/rbac-v1/roles/${roleID}/subjects${query(appKey)}`, { domain, add, remove });
 export const simulateRBAC = (appKey: string, input: { service_resource: string; subject: string; domain?: string; method: string; path: string }) => request.post(`/v1/rbac-v1/simulate${query(appKey, input.service_resource)}`, input);
 export const listMenus = async (appKey: string): Promise<{ items: Menu[] }> => {
   const result = await request.get<{ items: MenuWire[] }>(`/v1/rbac-v1/menus${query(appKey)}`);

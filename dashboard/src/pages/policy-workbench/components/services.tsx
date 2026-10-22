@@ -3,6 +3,7 @@ import { Alert, Button, Card, DialogPlugin, Drawer, Form, Input, MessagePlugin, 
 import { AddIcon, DeleteIcon, EditIcon, LinkIcon, LinkUnlinkIcon, RefreshIcon, SearchIcon } from 'tdesign-icons-react';
 import { useNavigate } from 'react-router-dom';
 import {
+  listApplicationServiceResources,
   replaceApplicationServiceResources,
   type ApplicationServiceResource,
 } from '../../../api/application';
@@ -106,14 +107,18 @@ export default function Services({ state }: { state: State }) {
     });
   }, [associatedKeys, filter, resources, search]);
 
+  // The page state is empty until every workbench request succeeds, so association writes wait for it.
+  const associationBlocked = state.loading || Boolean(state.loadError);
   const updateAssociation = async (key: string, shouldAssociate: boolean) => {
-    if (associationSaving || !state.appKey) return;
-    const next = new Set(associatedKeys);
-    if (shouldAssociate) next.add(key);
-    else next.delete(key);
+    if (associationSaving || associationBlocked || !state.appKey) return;
     setAssociationSaving(key);
     setAssociationError('');
     try {
+      // The API replaces the whole set: merge into the latest saved links rather than page
+      // state, so links added elsewhere since loading are kept.
+      const next = new Set((await listApplicationServiceResources(state.appKey)).map(item => item.key));
+      if (shouldAssociate) next.add(key);
+      else next.delete(key);
       await replaceApplicationServiceResources(state.appKey, Array.from(next));
       await state.reload();
     } catch (error) {
@@ -254,7 +259,7 @@ export default function Services({ state }: { state: State }) {
           <Button variant="text" icon={<EditIcon />} disabled={Boolean(deletingKey)} onClick={() => openEdit(row)}>编辑</Button>
           <Button variant="text" theme="danger" icon={<DeleteIcon />} disabled={associated || Boolean(deletingKey)} loading={deletingKey === row.key} title={associated ? '请先取消当前应用的服务关联' : '删除本地服务资源'} onClick={() => confirmDelete(row)}>删除</Button>
         </> : null}
-        {associated ? <Button variant="text" theme="danger" loading={associationSaving === row.key} disabled={Boolean(associationSaving)} icon={<LinkUnlinkIcon />} onClick={() => void updateAssociation(row.key, false)}>取消关联</Button> : <Button variant="text" disabled={!row.isActive || Boolean(associationSaving)} loading={associationSaving === row.key} icon={<LinkIcon />} onClick={() => void updateAssociation(row.key, true)}>关联</Button>}
+        {associated ? <Button variant="text" theme="danger" loading={associationSaving === row.key} disabled={Boolean(associationSaving) || associationBlocked} icon={<LinkUnlinkIcon />} onClick={() => void updateAssociation(row.key, false)}>取消关联</Button> : <Button variant="text" disabled={!row.isActive || Boolean(associationSaving) || associationBlocked} loading={associationSaving === row.key} icon={<LinkIcon />} onClick={() => void updateAssociation(row.key, true)}>关联</Button>}
       </Space>;
     } },
   ];

@@ -19,8 +19,9 @@ const roles = [
 ];
 
 type Binding = { id?: string; subject: string; domain: string; role_id: string };
-type PutFailure = { status: number; errorMessage: string };
-type SavedAssignment = { subject: string; domain: string; role_ids: string[] };
+type PutFailure = { status: number; errorCode?: string; errorMessage: string };
+// One PUT /roles/{id}/subjects call: grants or revokes a single role atomically.
+type SavedAssignment = { role: string; domain: string; add: string[]; remove: string[] };
 
 // The backend normalizes a blank/missing domain and the legacy "global" alias to the empty default.
 const normalizeDomain = (domain: string) => (domain === 'global' ? '' : domain);
@@ -30,7 +31,7 @@ const normalizeDomain = (domain: string) => (domain === 'global' ? '' : domain);
 async function mockWorkbench(page: Page, initialBindings: Binding[] = []) {
   const saved: SavedAssignment[] = [];
   let bindings: Binding[] = initialBindings.map((binding, index) => ({ id: binding.id || `binding-${index}`, ...binding }));
-  const failures = new Map<string, PutFailure>();
+  let failure: PutFailure | undefined;
 
   await page.addInitScript(() => sessionStorage.setItem('nexus-authorization-application', 'console'));
   await page.route('**/api/**', async route => {
@@ -42,21 +43,27 @@ async function mockWorkbench(page: Page, initialBindings: Binding[] = []) {
     if (path === '/api/v1/rbac-v1/roles') result = { items: roles };
     if (path === '/api/v1/rbac-v1/endpoints') result = { items: [], total: 0, page: 1, page_size: 100 };
     if (path === '/api/v1/rbac-v1/subject-roles') {
-      if (request.method() === 'PUT') {
-        const body = request.postDataJSON() as SavedAssignment;
-        saved.push(body);
-        const failure = failures.get(body.subject);
-        if (failure) {
-          await route.fulfill({ status: failure.status, json: { success: false, errorMessage: failure.errorMessage } });
-          return;
-        }
-        bindings = bindings.filter(binding => !(binding.subject === body.subject && normalizeDomain(binding.domain) === normalizeDomain(body.domain)));
-        for (const roleID of body.role_ids) {
-          bindings.push({ id: `binding-${body.subject}-${roleID}`, subject: body.subject, domain: body.domain, role_id: roleID });
-        }
-      } else {
-        result = { items: bindings };
+      if (request.method() === 'PUT') throw new Error('user assignment must not replace whole subject role sets');
+      result = { items: bindings };
+    }
+    const roleSubjects = path.match(/^\/api\/v1\/rbac-v1\/roles\/([^/]+)\/subjects$/);
+    if (roleSubjects && request.method() === 'PUT') {
+      const body = request.postDataJSON() as Omit<SavedAssignment, 'role'>;
+      const role = roleSubjects[1];
+      saved.push({ role, ...body });
+      if (failure) {
+        await route.fulfill({ status: failure.status, json: { success: false, errorCode: failure.errorCode, errorMessage: failure.errorMessage } });
+        return;
       }
+      // Mirrors the backend: only this role changes, in the default domain (including legacy "global" rows).
+      const domain = normalizeDomain(body.domain);
+      bindings = bindings.filter(binding => !(binding.role_id === role && body.remove.includes(binding.subject) && normalizeDomain(binding.domain) === domain));
+      for (const subject of body.add) {
+        if (!bindings.some(binding => binding.role_id === role && binding.subject === subject && normalizeDomain(binding.domain) === domain)) {
+          bindings.push({ id: `binding-${subject}-${role}`, subject, domain: body.domain, role_id: role });
+        }
+      }
+      result = null;
     }
     await route.fulfill({ json: { success: true, result } });
   });
@@ -64,7 +71,7 @@ async function mockWorkbench(page: Page, initialBindings: Binding[] = []) {
   return {
     saved,
     currentBindings: () => bindings,
-    failPutFor: (subject: string, failure: PutFailure) => { failures.set(subject, failure); },
+    failSaves: (next: PutFailure) => { failure = next; },
   };
 }
 
@@ -121,7 +128,7 @@ test('角色分配用户按 200/页 自动读取完整 SCIM 目录，并显示�
 
   await saveAssignment(drawer);
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: 'nexus-alice', domain: '', role_ids: ['reader-role'] });
+  expect(workbench.saved[0]).toEqual({ role: 'reader-role', domain: '', add: ['nexus-alice'], remove: [] });
   await expect(page.getByText('用户分配已保存')).toBeVisible();
   await expect(drawer).toBeHidden();
 });
@@ -142,9 +149,10 @@ test('移除用户只改默认域的本角色 membership，保留其他角色与
 
   await expect.poll(() => workbench.saved.length).toBe(1);
   // Only the reader membership in the default domain is dropped: editor stays, and tenant-a is untouched.
-  // The legacy "global" rows read as the default domain and are rewritten into the empty default domain.
-  expect(workbench.saved[0]).toEqual({ subject: alice.id, domain: '', role_ids: ['editor-role'] });
+  // The legacy "global" rows read as the default domain.
+  expect(workbench.saved[0]).toEqual({ role: 'reader-role', domain: '', add: [], remove: [alice.id] });
   expect(workbench.currentBindings().some(binding => binding.domain === 'tenant-a' && binding.role_id === 'reader-role')).toBe(true);
+  expect(workbench.currentBindings().some(binding => binding.subject === alice.id && binding.role_id === 'editor-role')).toBe(true);
   await expect(drawer).toBeHidden();
 });
 
@@ -159,8 +167,9 @@ test('新增用户到角色时保留其已有的其他默认域角色', async ({
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toMatchObject({ subject: alice.id, domain: '' });
-  expectSameIDs(workbench.saved[0].role_ids, ['editor-role', 'reader-role']);
+  // The request only grants this role; the editor role is never sent and therefore never overwritten.
+  expect(workbench.saved[0]).toEqual({ role: 'reader-role', domain: '', add: [alice.id], remove: [] });
+  expectSameIDs(workbench.currentBindings().filter(binding => binding.subject === alice.id).map(binding => binding.role_id), ['editor-role', 'reader-role']);
   await expect(drawer).toBeHidden();
 });
 
@@ -175,11 +184,11 @@ test('目录中已不存在的原绑定用户显示为 原绑定用户（ID）�
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: 'former-user', domain: '', role_ids: [] });
+  expect(workbench.saved[0]).toEqual({ role: 'reader-role', domain: '', add: [], remove: ['former-user'] });
   await expect(drawer).toBeHidden();
 });
 
-test('目录加载失败可重试，失败时禁用保存且不发送 PUT', async ({ page }) => {
+test('目录加载失败可重试，失败时禁用保存且不发送保存请求', async ({ page }) => {
   const workbench = await mockWorkbench(page);
   let attempts = 0;
   await page.route('**/api/v1/users?**', async route => {
@@ -215,17 +224,17 @@ test('停用用户不能新增，但原停用绑定用户可以取消', async ({
   await saveAssignment(drawer);
 
   await expect.poll(() => workbench.saved.length).toBe(1);
-  expect(workbench.saved[0]).toEqual({ subject: inactiveBound.id, domain: '', role_ids: [] });
-  expect(workbench.saved.some(item => item.subject === inactiveNew.id)).toBe(false);
+  expect(workbench.saved[0]).toEqual({ role: 'reader-role', domain: '', add: [], remove: [inactiveBound.id] });
+  expect(workbench.saved.some(item => item.add.includes(inactiveNew.id))).toBe(false);
   await expect(drawer).toBeHidden();
 });
 
-test('保存部分失败时停留在抽屉、提示失败且不显示成功', async ({ page }) => {
+test('多个用户在一次请求中原子保存；失败时停留在抽屉、提示失败且不显示成功', async ({ page }) => {
   const workbench = await mockWorkbench(page, [
     { subject: alice.id, domain: 'global', role_id: 'reader-role' },
     { subject: bob.id, domain: 'global', role_id: 'reader-role' },
   ]);
-  workbench.failPutFor(bob.id, { status: 502, errorMessage: '部分用户分配保存失败' });
+  workbench.failSaves({ status: 502, errorMessage: '用户分配保存失败' });
   await page.route('**/api/v1/users?**', route => route.fulfill({ json: userDirectory([alice, bob]) }));
 
   const drawer = await openAssignDrawer(page);
@@ -233,14 +242,34 @@ test('保存部分失败时停留在抽屉、提示失败且不显示成功', as
   await removeUserTag(drawer, bobLabel);
   await saveAssignment(drawer);
 
-  await expect.poll(() => workbench.saved.length).toBe(2);
-  expectSameIDs(workbench.saved.map(item => item.subject), [alice.id, bob.id]);
+  await expect.poll(() => workbench.saved.length).toBe(1);
+  expect(workbench.saved[0].role).toBe('reader-role');
+  expectSameIDs(workbench.saved[0].remove, [alice.id, bob.id]);
+  // Nothing was committed: both users keep the role.
+  expect(workbench.currentBindings().filter(binding => binding.role_id === 'reader-role')).toHaveLength(2);
   await expect(drawer).toBeVisible();
   await expect(page.getByText('用户分配已保存')).toHaveCount(0);
-  await expect(page.getByText(/用户分配保存失败/)).toBeVisible();
+  await expect(page.getByText('用户分配保存失败')).toBeVisible();
 });
 
-test('保存成功关闭抽屉，未修改绑定时不发送 PUT', async ({ page }) => {
+test('保存已提交但发布待重试（PUBLISH_PENDING）时提示原因，再次保存不会重复提交', async ({ page }) => {
+  const workbench = await mockWorkbench(page);
+  workbench.failSaves({ status: 503, errorCode: 'PUBLISH_PENDING', errorMessage: '配置已保存，但授权记录发布失败，后台会自动重试；如持续失败请检查 Redis' });
+  await page.route('**/api/v1/users?**', route => route.fulfill({ json: userDirectory([alice]) }));
+
+  const drawer = await openAssignDrawer(page);
+  await pickUser(page, drawer, 'alice', aliceLabel);
+  await saveAssignment(drawer);
+
+  await expect.poll(() => workbench.saved.length).toBe(1);
+  await expect(drawer.getByRole('alert')).toContainText('配置已保存');
+  // The change counts as saved, so saving again closes without another request.
+  await saveAssignment(drawer);
+  await expect(drawer).toBeHidden();
+  expect(workbench.saved).toHaveLength(1);
+});
+
+test('保存成功关闭抽屉，未修改绑定时不发送保存请求', async ({ page }) => {
   const workbench = await mockWorkbench(page, [{ subject: alice.id, domain: 'global', role_id: 'reader-role' }]);
   await page.route('**/api/v1/users?**', route => route.fulfill({ json: userDirectory([alice]) }));
 
