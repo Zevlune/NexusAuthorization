@@ -1,38 +1,46 @@
 name: nexusauthorization
 
+# Production stack: API + dashboard. PostgreSQL and Redis are external.
+# Every deployment value comes from the env file, for example:
+#   docker compose --env-file .env.deploy -f docker-compose.yml up -d
+# See .env.example and doc/operations-manual.md. Never commit real values.
+
 services:
   nexusauthorization-api:
-    image: 18790997531/nexusauthorization-api:1.0.2
+    image: ${NEXUSAUTHORIZATION_API_IMAGE:-18790997531/nexusauthorization-api:1.0.2}
     container_name: nexusauthorization-api
     pull_policy: missing
     environment:
-      TZ: Asia/Shanghai
-      NEXUSAUTHORIZATION_DATABASE_URL: "postgres://postgres:wzw0126%40..@pgsql-postgres-1:5432/nexus-authorization?sslmode=disable"
+      TZ: ${TZ:-Asia/Shanghai}
+      NEXUSAUTHORIZATION_DATABASE_URL: ${NEXUSAUTHORIZATION_DATABASE_URL:?set NEXUSAUTHORIZATION_DATABASE_URL in the env file}
+      NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL: ${NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL:-}
       NEXUSAUTHORIZATION_REDIS_ENABLED: ${NEXUSAUTHORIZATION_REDIS_ENABLED:-true}
       NEXUSAUTHORIZATION_REDIS_URL: ${NEXUSAUTHORIZATION_REDIS_URL:-}
       NEXUSAUTHORIZATION_REDIS_KEY_PREFIX: ${NEXUSAUTHORIZATION_REDIS_KEY_PREFIX:-nexusauthorization:prod}
       NEXUSAUTHORIZATION_REDIS_CACHE_TTL: ${NEXUSAUTHORIZATION_REDIS_CACHE_TTL:-24h}
       NEXUSAUTHORIZATION_REDIS_TIMEOUT: ${NEXUSAUTHORIZATION_REDIS_TIMEOUT:-200ms}
-      NEXUSAUTHORIZATION_OIDC_ENABLED: 'true'
-      NEXUSAUTHORIZATION_OIDC_AUTHORITY: "https://authlogin.kawhiwei.com:8800"
-      NEXUSAUTHORIZATION_OIDC_CLIENT_ID: "nexusauthorization"
-      NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET: ""
-      NEXUSAUTHORIZATION_OIDC_REDIRECT_URI: "https://authorizationdashboard.kawhiwei.com:8800/signin-oidc"
-      NEXUSAUTHORIZATION_OIDC_POST_LOGOUT_REDIRECT_URI: "https://authorizationdashboard.kawhiwei.com:8800/"
-      NEXUSAUTHORIZATION_OIDC_SCOPES: "openid profile offline_access nexusauthorization.api"
-      NEXUSAUTHORIZATION_OIDC_AUDIENCE: "nexusauthorization.api"
-
-      NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE: "nexusauth"
-      NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL: "http://nexusauth-host:8080"
-      NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY: ""
-
-      NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL: "http://nexusauth-host:8080"
-      NEXUSAUTHORIZATION_SCIM_API_KEY: ""
-      NEXUSAUTHORIZATION_SCIM_TIMEOUT: "10s"
+      NEXUSAUTHORIZATION_OIDC_ENABLED: ${NEXUSAUTHORIZATION_OIDC_ENABLED:-true}
+      NEXUSAUTHORIZATION_OIDC_AUTHORITY: ${NEXUSAUTHORIZATION_OIDC_AUTHORITY:-}
+      NEXUSAUTHORIZATION_OIDC_BACKCHANNEL_AUTHORITY: ${NEXUSAUTHORIZATION_OIDC_BACKCHANNEL_AUTHORITY:-}
+      NEXUSAUTHORIZATION_OIDC_CLIENT_ID: ${NEXUSAUTHORIZATION_OIDC_CLIENT_ID:-}
+      NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET: ${NEXUSAUTHORIZATION_OIDC_CLIENT_SECRET:-}
+      NEXUSAUTHORIZATION_OIDC_REDIRECT_URI: ${NEXUSAUTHORIZATION_OIDC_REDIRECT_URI:-}
+      NEXUSAUTHORIZATION_OIDC_POST_LOGOUT_REDIRECT_URI: ${NEXUSAUTHORIZATION_OIDC_POST_LOGOUT_REDIRECT_URI:-}
+      NEXUSAUTHORIZATION_OIDC_SCOPES: ${NEXUSAUTHORIZATION_OIDC_SCOPES:-}
+      NEXUSAUTHORIZATION_OIDC_AUDIENCE: ${NEXUSAUTHORIZATION_OIDC_AUDIENCE:-}
+      NEXUSAUTHORIZATION_OIDC_SESSION_SECRET: ${NEXUSAUTHORIZATION_OIDC_SESSION_SECRET:-}
+      NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE: ${NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE:-nexusauth}
+      NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL: ${NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL:-}
+      NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY: ${NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY:-}
+      NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL: ${NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL:-}
+      NEXUSAUTHORIZATION_SCIM_API_KEY: ${NEXUSAUTHORIZATION_SCIM_API_KEY:-}
+      NEXUSAUTHORIZATION_SCIM_TIMEOUT: ${NEXUSAUTHORIZATION_SCIM_TIMEOUT:-5s}
     ports:
-      - "9101:8080"
+      # Business services call /api/v1/authorize through this port; bind to 127.0.0.1 if they use the Docker network instead.
+      - '${NEXUSAUTHORIZATION_API_BIND_ADDR:-0.0.0.0}:${NEXUSAUTHORIZATION_API_PORT:-9101}:8080'
     volumes:
-      - /vol1/1000/dockervm/nexus-authorization/data:/app/data
+      # A named volume by default; set NEXUSAUTHORIZATION_DATA_DIR to a host path to bind-mount instead.
+      - ${NEXUSAUTHORIZATION_DATA_DIR:-nexusauthorization-data}:/app/data
     healthcheck:
       test: [CMD, wget, --quiet, --spider, 'http://127.0.0.1:8080/api/healthz']
       interval: 10s
@@ -41,14 +49,15 @@ services:
       start_period: 20s
     restart: always
     networks:
-      - nexusauth
+      nexusauth:
+        aliases: [nexusauthorization-api]
 
   dashboard:
-    image: 18790997531/nexusauthorization-dashboard:1.0.3
+    image: ${NEXUSAUTHORIZATION_DASHBOARD_IMAGE:-18790997531/nexusauthorization-dashboard:1.0.3}
     container_name: nexusauthorization-dashboard
     pull_policy: missing
     ports:
-      - "5274:80"
+      - '${DASHBOARD_BIND_ADDR:-0.0.0.0}:${DASHBOARD_PORT:-5274}:80'
     depends_on:
       nexusauthorization-api:
         condition: service_healthy
@@ -58,13 +67,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    volumes:
-      - /vol1/1000/dockervm/nexus-authorization/dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     restart: always
     networks:
       - nexusauth
 
+volumes:
+  nexusauthorization-data:
+
 networks:
   nexusauth:
     external: true
-    name: nexusauth
+    name: ${NEXUSAUTHORIZATION_DOCKER_NETWORK:-nexusauth}

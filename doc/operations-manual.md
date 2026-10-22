@@ -47,7 +47,11 @@ NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL='https://auth.example.com'
 NEXUSAUTHORIZATION_SCIM_API_KEY='CHANGE_ME'
 NEXUSAUTHORIZATION_REDIS_ENABLED='true'
 NEXUSAUTHORIZATION_REDIS_URL='redis://redis.example.com:6379/0'
+# 业务服务 / Go SDK 调用 /api/v1/authorize 的 Bearer 凭证；留空则该接口始终返回 401
+NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL='CHANGE_ME'
 ```
+
+完整变量（含镜像 tag、宿主端口、数据目录、外部网络名）见仓库根目录 `.env.example`。`docker-compose.yml` 不含任何环境专属值，全部从该文件读取；缺少 `NEXUSAUTHORIZATION_DATABASE_URL` 时 `docker compose config` 会直接报错。
 
 以数据库 owner 身份执行完整初始化：
 
@@ -66,7 +70,7 @@ sh src/scripts/init-db.sh
 
 ## 3. Docker Compose 首次部署
 
-当前 Compose 使用外部 `nexusauth` 网络、API 容器端口 `8080`、Dashboard 容器端口 `80`，默认映射到宿主机 `9101` 和 `5274`。先确认网络存在：
+Compose 默认使用外部 `nexusauth` 网络（`NEXUSAUTHORIZATION_DOCKER_NETWORK` 可改名），API 容器端口 `8080`、Dashboard 容器端口 `80`，默认映射到宿主机 `9101` 和 `5274`（`NEXUSAUTHORIZATION_API_PORT`、`DASHBOARD_PORT`）。会话密钥默认保存在命名卷 `nexusauthorization-data`，设置 `NEXUSAUTHORIZATION_DATA_DIR` 可改为宿主机目录。先确认网络存在：
 
 ```sh
 docker network inspect nexusauth >/dev/null 2>&1 || docker network create nexusauth
@@ -86,6 +90,8 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 
 输出 `{"status":"ok"}` 只说明 API 进程可响应。登录、服务目录、SCIM 和运行时鉴权应在部署验收中单独验证。
 
+API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `nexus-authorization` 后降权运行服务进程。宿主机目录不允许 `chown`（部分 NAS、NFS 或 rootless 存储）时，脚本会保留原权限，只要该用户可写即可启动；不可写时容器直接退出并提示修正卷权限。也可以用 `user:` 直接以非 root 用户启动，此时由运维保证数据目录可写。
+
 ## 4. 关键环境变量
 
 | 变量 | 必填场景 | 说明 |
@@ -97,6 +103,7 @@ docker compose -f docker-compose.yml logs --tail=200 nexusauthorization-api dash
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL` | nexusauth 模式 | 远程服务目录地址 |
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY` | nexusauth 模式 | 服务目录读取凭证 |
 | `NEXUSAUTHORIZATION_SCIM_*` | 需要分配用户 | NexusAuth SCIM 地址、只读凭证和超时 |
+| `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` | 业务服务调用鉴权接口时 | `/api/v1/authorize` 的 Bearer 凭证；留空时接口始终 401。使用足够长的随机值，只下发给可信业务服务 |
 | `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
 | `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用、未就绪或记录损坏时拒绝，不回退数据库 |
 | `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 多环境必须使用不同前缀 |
@@ -189,7 +196,8 @@ docker run --rm --network nexusauth alpine:3.22 \
 | 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、Redis 重建是否成功、应用 `state` 是否为 `ready`、key 前缀和数据库日志；重新保存可整体重建 |
 | 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、应用 `state`、记录和 key 前缀，恢复或清空后需重建 Redis 记录 |
 | 取消服务关联冲突 | 先从所有角色移除该服务的 API 授权，再取消关联 |
-| 运行时接口返回 401 | 当前版本是否配置了 `authorization.service_credential`；管理端 OIDC cookie 不能代替服务凭证 |
+| 运行时接口返回 401 | 是否配置了 `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL`，业务服务发送的 Bearer 是否与之一致；管理端 OIDC cookie 不能代替服务凭证 |
+| API 容器启动即退出并提示 `/app/data` 不可写 | 宿主机数据目录权限；让容器内 `nexus-authorization` 用户可写，或改用命名卷 |
 | 运行时接口返回拒绝 | 核对 app、service、subject、domain、method、实际 path 和角色绑定，先用权限模拟复现 |
 
 排障时优先保留第一条错误日志、请求的 app/service 标识、数据库迁移版本和镜像标签，避免只记录最后一条连锁错误。

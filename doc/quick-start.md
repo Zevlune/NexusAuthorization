@@ -2,7 +2,7 @@
 
 ## 使用 Docker 镜像
 
-本地体验：复制 `.env.dev.example` 为 `.env.dev`，使用包含 PostgreSQL 的开发版配置。默认只监听本机，禁用 SSO，使用本地服务资源。
+本地体验：复制 `.env.dev.example` 为 `.env.dev`，使用包含 PostgreSQL 和 Redis 的开发版配置。默认只监听本机，禁用 SSO，使用本地服务资源；`/api/v1/authorize` 使用 `.env.dev` 中的开发用服务凭证。
 
 ```sh
 cp .env.dev.example .env.dev

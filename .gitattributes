@@ -1,0 +1,2 @@
+# Scripts run inside Linux containers; CRLF breaks the shebang.
+*.sh text eol=lf
