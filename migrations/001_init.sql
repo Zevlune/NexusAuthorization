@@ -226,5 +226,8 @@ CREATE INDEX role_api_endpoint_bindings_endpoint_idx ON role_api_endpoint_bindin
 CREATE INDEX subject_role_bindings_application_lookup_idx ON subject_role_bindings(application_id, subject, domain);
 CREATE INDEX menus_application_enabled_idx ON menus(application_id, enabled, sort_order);
 CREATE INDEX application_service_resources_service_idx ON application_service_resources(service_resource_key, application_id);
+-- Foreign-key lookups when a role or menu is deleted (ON DELETE CASCADE).
+CREATE INDEX subject_role_bindings_role_idx ON subject_role_bindings(role_id, application_id);
+CREATE INDEX role_menu_bindings_menu_idx ON role_menu_bindings(menu_id);
 
 COMMIT;

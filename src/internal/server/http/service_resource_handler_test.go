@@ -114,7 +114,7 @@ func cloneHandlerServiceResource(value *biz.ServiceResource) *biz.ServiceResourc
 	return &clone
 }
 
-func newServiceResourceHandlerServer(t *testing.T, repository *serviceResourceHandlerRepository) *http.ServeMux {
+func newServiceResourceHandlerServer(t *testing.T, repository *serviceResourceHandlerRepository) http.Handler {
 	t.Helper()
 	service, err := biz.NewServiceResourceCatalog(repository, nil, biz.ServiceResourceSourceLocal)
 	if err != nil {
@@ -125,7 +125,7 @@ func newServiceResourceHandlerServer(t *testing.T, repository *serviceResourceHa
 		WithServiceResourceService(service))
 }
 
-func newNexusAuthServiceResourceHandlerServer(t *testing.T, repository *serviceResourceHandlerRepository, remote biz.ServiceResourceCatalog) *http.ServeMux {
+func newNexusAuthServiceResourceHandlerServer(t *testing.T, repository *serviceResourceHandlerRepository, remote biz.ServiceResourceCatalog) http.Handler {
 	t.Helper()
 	service, err := biz.NewServiceResourceCatalog(repository, remote, biz.ServiceResourceSourceNexusAuth)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	createResponse := httptest.NewRecorder()
-	server.ServeHTTP(createResponse, httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"orders","display_name":"订单服务","audience":"orders-api","description":"订单权限","is_active":true}`)))
+	server.ServeHTTP(createResponse, newJSONRequest(http.MethodPost, "/api/v1/service-resources", `{"key":"orders","display_name":"订单服务","audience":"orders-api","description":"订单权限","is_active":true}`))
 	if createResponse.Code != http.StatusCreated {
 		t.Fatalf("create status = %d body=%s", createResponse.Code, createResponse.Body.String())
 	}
@@ -176,7 +176,7 @@ func TestServiceResourceCRUDHandlers(t *testing.T) {
 	}
 
 	updateResponse := httptest.NewRecorder()
-	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/api/v1/service-resources/orders", strings.NewReader(`{"display_name":"订单中心","audience":"orders-web","description":"更新后的订单权限","is_active":false}`)))
+	server.ServeHTTP(updateResponse, newJSONRequest(http.MethodPut, "/api/v1/service-resources/orders", `{"display_name":"订单中心","audience":"orders-web","description":"更新后的订单权限","is_active":false}`))
 	if updateResponse.Code != http.StatusOK {
 		t.Fatalf("update status = %d body=%s", updateResponse.Code, updateResponse.Body.String())
 	}
@@ -208,7 +208,7 @@ func TestCreateServiceResourceDefaultsToActive(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	response := httptest.NewRecorder()
-	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/service-resources", strings.NewReader(`{"key":"billing","display_name":"账单服务"}`)))
+	server.ServeHTTP(response, newJSONRequest(http.MethodPost, "/api/v1/service-resources", `{"key":"billing","display_name":"账单服务"}`))
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create status = %d body=%s", response.Code, response.Body.String())
 	}
@@ -224,7 +224,7 @@ func TestServiceResourceNexusAuthWriteProtection(t *testing.T) {
 	server := newServiceResourceHandlerServer(t, repository)
 
 	updateResponse := httptest.NewRecorder()
-	server.ServeHTTP(updateResponse, httptest.NewRequest(http.MethodPut, "/api/v1/service-resources/remote", strings.NewReader(`{"display_name":"禁止修改","audience":"remote","description":"","is_active":true}`)))
+	server.ServeHTTP(updateResponse, newJSONRequest(http.MethodPut, "/api/v1/service-resources/remote", `{"display_name":"禁止修改","audience":"remote","description":"","is_active":true}`))
 	if updateResponse.Code != http.StatusConflict {
 		t.Fatalf("remote update status = %d body=%s", updateResponse.Code, updateResponse.Body.String())
 	}
@@ -287,7 +287,7 @@ func TestServiceResourceNexusAuthConfiguredModeHandlers(t *testing.T) {
 		{method: http.MethodDelete, path: "/api/v1/service-resources/local"},
 	} {
 		response := httptest.NewRecorder()
-		server.ServeHTTP(response, httptest.NewRequest(request.method, request.path, strings.NewReader(request.body)))
+		server.ServeHTTP(response, newJSONRequest(request.method, request.path, request.body))
 		if response.Code != http.StatusConflict {
 			t.Fatalf("nexusauth %s %s status = %d body=%s", request.method, request.path, response.Code, response.Body.String())
 		}

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -32,8 +34,119 @@ type SwaggerEndpoint struct {
 	Summary string `json:"summary"`
 }
 
-func ReadSwaggerEndpoints(ctx context.Context, rawURL string) ([]SwaggerEndpoint, error) {
-	body, err := fetchSwaggerDocument(ctx, rawURL)
+// SwaggerFetchPolicy limits the addresses a Swagger import may contact. Imports
+// fetch URLs supplied by administrators, so without limits the server could be
+// used to probe internal networks or cloud metadata endpoints.
+type SwaggerFetchPolicy struct {
+	// AllowLoopback permits loopback addresses (local development only).
+	AllowLoopback bool
+	// AllowedHosts, when non-empty, lists the only host names and CIDR ranges
+	// an import may contact.
+	AllowedHosts []string
+}
+
+// errSwaggerAddressBlocked is returned when the policy rejects a target address.
+var errSwaggerAddressBlocked = errors.New("swagger_url points to an address that imports may not access")
+
+// Cloud metadata services outside the link-local range.
+var swaggerMetadataNetworks = []*net.IPNet{
+	mustParseCIDR("100.100.100.200/32"), // Alibaba Cloud
+	mustParseCIDR("fd00:ec2::254/128"),  // AWS IPv6
+}
+
+func mustParseCIDR(value string) *net.IPNet {
+	_, network, err := net.ParseCIDR(value)
+	if err != nil {
+		panic(err)
+	}
+	return network
+}
+
+func (p SwaggerFetchPolicy) hostNameAllowed(host string) bool {
+	for _, entry := range p.AllowedHosts {
+		if strings.EqualFold(strings.TrimSpace(entry), host) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkIP rejects addresses that imports must never reach and, with an
+// allowlist, addresses outside it.
+func (p SwaggerFetchPolicy) checkIP(ip net.IP, hostAllowed bool) error {
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 0 {
+		return errSwaggerAddressBlocked // 0.0.0.0/8 reaches the local host
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
+		return errSwaggerAddressBlocked
+	}
+	for _, network := range swaggerMetadataNetworks {
+		if network.Contains(ip) {
+			return errSwaggerAddressBlocked
+		}
+	}
+	if ip.IsLoopback() && !p.AllowLoopback {
+		return errSwaggerAddressBlocked
+	}
+	if len(p.AllowedHosts) == 0 || hostAllowed {
+		return nil
+	}
+	for _, entry := range p.AllowedHosts {
+		if _, network, err := net.ParseCIDR(strings.TrimSpace(entry)); err == nil && network.Contains(ip) {
+			return nil
+		}
+	}
+	return errSwaggerAddressBlocked
+}
+
+// dialContext resolves the host itself, checks every candidate address and
+// connects to the checked IP, so DNS rebinding cannot swap in another address
+// between the check and the connection.
+func (p SwaggerFetchPolicy) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	hostAllowed := p.hostNameAllowed(host)
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	lastErr := errSwaggerAddressBlocked
+	for _, candidate := range addresses {
+		if err := p.checkIP(candidate.IP, hostAllowed); err != nil {
+			lastErr = err
+			continue
+		}
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// httpClient fetches documents directly (never through an HTTP proxy, which
+// would hide the real target from the address checks) and does not follow
+// redirects.
+func (p SwaggerFetchPolicy) httpClient() *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			Proxy:               nil,
+			DialContext:         p.dialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func ReadSwaggerEndpoints(ctx context.Context, rawURL string, policy SwaggerFetchPolicy) ([]SwaggerEndpoint, error) {
+	body, err := fetchSwaggerDocument(ctx, rawURL, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -191,41 +304,42 @@ func isSwaggerHTTPMethod(value string) bool {
 	}
 }
 
-func fetchSwaggerDocument(ctx context.Context, rawURL string) ([]byte, error) {
+func fetchSwaggerDocument(ctx context.Context, rawURL string, policy SwaggerFetchPolicy) ([]byte, error) {
 	documentURL, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || documentURL.Scheme == "" || documentURL.Host == "" || (documentURL.Scheme != "http" && documentURL.Scheme != "https") {
 		return nil, fmt.Errorf("%w: swagger_url must be an absolute http or https URL", ErrInvalidArgument)
 	}
-	document, err := fetchSwaggerDocumentAt(ctx, documentURL, 0)
-	if err == nil || (documentURL.Hostname() != "localhost" && documentURL.Hostname() != "127.0.0.1") {
+	client := policy.httpClient()
+	document, err := fetchSwaggerDocumentAt(ctx, client, documentURL, 0)
+	if err == nil || !policy.AllowLoopback || (documentURL.Hostname() != "localhost" && documentURL.Hostname() != "127.0.0.1") {
 		return document, err
 	}
-	// In Docker, localhost may resolve to the API container. Compose exposes
-	// host.docker.internal for the developer machine in that environment.
+	// Development only: in Docker, localhost may resolve to the API container.
+	// Compose exposes host.docker.internal for the developer machine.
 	hostURL := *documentURL
 	hostURL.Host = "host.docker.internal"
 	if documentURL.Port() != "" {
 		hostURL.Host += ":" + documentURL.Port()
 	}
-	return fetchSwaggerDocumentAt(ctx, &hostURL, 0)
+	return fetchSwaggerDocumentAt(ctx, client, &hostURL, 0)
 }
 
-func fetchSwaggerDocumentAt(ctx context.Context, documentURL *url.URL, depth int) ([]byte, error) {
+func fetchSwaggerDocumentAt(ctx context.Context, client *http.Client, documentURL *url.URL, depth int) ([]byte, error) {
 	if depth > 3 {
 		return nil, fmt.Errorf("%w: Swagger UI document reference is nested too deeply", ErrInvalidArgument)
 	}
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 	fetch := func(value *url.URL) ([]byte, string, error) {
+		if value.Scheme != "http" && value.Scheme != "https" {
+			return nil, "", fmt.Errorf("%w: Swagger references must use http or https", ErrInvalidArgument)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, value.String(), nil)
 		if err != nil {
 			return nil, "", err
 		}
 		resp, err := client.Do(req)
+		if errors.Is(err, errSwaggerAddressBlocked) {
+			return nil, "", fmt.Errorf("%w: %w", ErrInvalidArgument, errSwaggerAddressBlocked)
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("fetch Swagger document: %w", err)
 		}
@@ -265,7 +379,7 @@ func fetchSwaggerDocumentAt(ctx context.Context, documentURL *url.URL, depth int
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid Swagger UI document URL", ErrInvalidArgument)
 		}
-		return fetchSwaggerDocumentAt(ctx, specURL, depth+1)
+		return fetchSwaggerDocumentAt(ctx, client, specURL, depth+1)
 	}
 	if isSwaggerDocument(body) {
 		return body, nil
@@ -275,14 +389,14 @@ func fetchSwaggerDocumentAt(ctx context.Context, documentURL *url.URL, depth int
 		if parseErr != nil {
 			return nil, fmt.Errorf("%w: invalid Swagger configuration document URL", ErrInvalidArgument)
 		}
-		return fetchSwaggerDocumentAt(ctx, specURL, depth+1)
+		return fetchSwaggerDocumentAt(ctx, client, specURL, depth+1)
 	}
 	if match := swaggerUIConfigURLPattern.FindSubmatch(body); len(match) >= 2 {
 		specURL, parseErr := swaggerReferenceURL(documentURL, match[1])
 		if parseErr != nil {
 			return nil, fmt.Errorf("%w: invalid Swagger configuration URL", ErrInvalidArgument)
 		}
-		return fetchSwaggerDocumentAt(ctx, specURL, depth+1)
+		return fetchSwaggerDocumentAt(ctx, client, specURL, depth+1)
 	}
 	return body, nil
 }

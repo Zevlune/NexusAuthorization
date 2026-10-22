@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,47 @@ type Config struct {
 	ServiceResource ServiceResourceConfig `yaml:"service_resource"`
 	Authorization   AuthorizationConfig   `yaml:"authorization"`
 	SCIM            SCIMConfig            `yaml:"scim"`
+	SwaggerImport   SwaggerImportConfig   `yaml:"swagger_import"`
+}
+
+// SwaggerImportConfig limits which addresses Swagger/OpenAPI imports may fetch.
+// Link-local and cloud metadata addresses are always refused.
+type SwaggerImportConfig struct {
+	// AllowLoopback permits 127.0.0.0/8 and ::1; enable it only for local development.
+	AllowLoopback bool `yaml:"allow_loopback"`
+	// AllowedHosts, when non-empty, lists the only host names and CIDR ranges
+	// imports may contact.
+	AllowedHosts []string `yaml:"allowed_hosts"`
+}
+
+func (c SwaggerImportConfig) Validate() error {
+	for _, entry := range c.AllowedHosts {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return fmt.Errorf("swagger_import.allowed_hosts must not contain empty values")
+		}
+		if strings.Contains(entry, "/") {
+			if _, _, err := net.ParseCIDR(entry); err != nil {
+				return fmt.Errorf("swagger_import.allowed_hosts contains an invalid CIDR range %q", entry)
+			}
+		}
+	}
+	return nil
+}
+
+// applySwaggerImportEnv overrides the import policy; empty values keep the YAML.
+func applySwaggerImportEnv(cfg *SwaggerImportConfig) error {
+	if value := strings.TrimSpace(os.Getenv("NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOW_LOOPBACK")); value != "" {
+		allow, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOW_LOOPBACK must be a valid boolean: %w", err)
+		}
+		cfg.AllowLoopback = allow
+	}
+	if value := strings.TrimSpace(os.Getenv("NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOWED_HOSTS")); value != "" {
+		cfg.AllowedHosts = strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' })
+	}
+	return nil
 }
 
 // SCIMConfig 配置 NexusAuth 的只读用户目录；凭据独立于服务资源目录。
@@ -157,6 +200,12 @@ func Load(path string) (*Config, error) {
 	applyServiceResourceEnv(&cfg.ServiceResource)
 	applySCIMEnv(&cfg.SCIM)
 	if err := cfg.SCIM.Validate(); err != nil {
+		return nil, err
+	}
+	if err := applySwaggerImportEnv(&cfg.SwaggerImport); err != nil {
+		return nil, err
+	}
+	if err := cfg.SwaggerImport.Validate(); err != nil {
 		return nil, err
 	}
 	cfg.ServiceResource.Source = strings.ToLower(strings.TrimSpace(cfg.ServiceResource.Source))

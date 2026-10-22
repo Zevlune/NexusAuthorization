@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 
@@ -198,6 +199,12 @@ func (s *RBACV1Service) authorizeSubjectAPI(ctx context.Context, scope string, i
 	domain = NormalizeRBACDomain(domain)
 
 	policy, err := repository.GetSubjectAPIs(ctx, app, subject, domain, service)
+	if errors.Is(err, ErrSubjectAPIRecordNotFound) {
+		// The application is published, but the subject holds no grant for this
+		// service (no role binding, or the service is not linked): an ordinary
+		// deny, matching database authorization.
+		return RBACDecision{Effect: "deny", Reason: "endpoint_not_granted"}, nil
+	}
 	if err != nil {
 		return RBACDecision{}, err
 	}

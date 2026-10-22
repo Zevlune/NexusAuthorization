@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -60,6 +61,13 @@ func (s *RBACV1Service) SaveApplication(ctx context.Context, value Application) 
 	if len([]rune(value.Key)) > 128 {
 		return Application{}, fmt.Errorf("%w: key must be at most 128 characters", ErrInvalidArgument)
 	}
+	// New keys must work as one URL path segment (PUT /applications/{key});
+	// existing keys are only looked up, never re-validated.
+	if value.ID == uuid.Nil {
+		if err := validatePathSegmentKey(value.Key, "key"); err != nil {
+			return Application{}, err
+		}
+	}
 	if len([]rune(value.DisplayName)) > 200 {
 		return Application{}, fmt.Errorf("%w: display_name must be at most 200 characters", ErrInvalidArgument)
 	}
@@ -71,6 +79,15 @@ func (s *RBACV1Service) SaveApplication(ctx context.Context, value Application) 
 		return Application{}, err
 	}
 	return repository.SaveApplication(ctx, value)
+}
+
+// validatePathSegmentKey rejects keys that cannot be addressed as a single URL
+// path segment: separators, URL syntax characters, whitespace and controls.
+func validatePathSegmentKey(value, field string) error {
+	if strings.ContainsAny(value, `/\?#%`) || strings.IndexFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return fmt.Errorf(`%w: %s must not contain /, \, ?, #, %%, whitespace or control characters`, ErrInvalidArgument, field)
+	}
+	return nil
 }
 
 func validateApplicationURL(value string) error {

@@ -17,6 +17,8 @@ redis:
   key_prefix: "nexusauthorization:dev"
   cache_ttl: "24h"
   timeout: "200ms"
+  # Background repair of Redis records (not ready, behind a save, catalog changes).
+  reconcile_interval: "30s"
 service_resource:
   source: "nexusauth"
   nexusauth_base_url: "http://localhost:5100"
@@ -33,6 +35,11 @@ scim:
   nexusauth_base_url: ""
   api_key: ""
   timeout: "5s"
+# Swagger/OpenAPI import address policy. Link-local and cloud metadata
+# addresses are always refused. Loopback is allowed here for local development.
+swagger_import:
+  allow_loopback: true
+  allowed_hosts: []
 oidc:
   enabled: false
   authority: "http://localhost:5100"
