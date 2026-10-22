@@ -187,7 +187,7 @@
 
 ## 显式索引
 
-PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 6 个索引：
+PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动为引用侧外键列建索引。除此之外，脚本显式创建以下 7 个索引：
 
 | 索引 | 表 | 索引列 / 条件 | 用途 |
 | --- | --- | --- | --- |
@@ -196,6 +196,15 @@ PostgreSQL 会为主键和 `UNIQUE` 约束自动创建索引，但不会自动�
 | `subject_role_bindings_application_lookup_idx` | `subject_role_bindings` | (`application_id`, `subject`, `domain`) | 按应用、主体和域查询角色绑定 |
 | `menus_application_enabled_idx` | `menus` | (`application_id`, `enabled`, `sort_order`) | 按应用查询启用菜单并排序 |
 | `application_service_resources_service_idx` | `application_service_resources` | (`service_resource_key`, `application_id`) | 按服务资源反查应用 |
+| `subject_role_bindings_role_idx` | `subject_role_bindings` | (`role_id`, `application_id`) | 删除角色时级联删除主体绑定，避免全表扫描 |
+| `role_menu_bindings_menu_idx` | `role_menu_bindings` | (`menu_id`) | 删除菜单时级联删除角色菜单授权 |
+
+已按旧版 `001_init.sql` 建库的环境可以手动补建后两个索引（不影响数据）：
+
+```sql
+CREATE INDEX IF NOT EXISTS subject_role_bindings_role_idx ON nexusauthorization.subject_role_bindings(role_id, application_id);
+CREATE INDEX IF NOT EXISTS role_menu_bindings_menu_idx ON nexusauthorization.role_menu_bindings(menu_id);
+```
 
 ## 关系概览
 

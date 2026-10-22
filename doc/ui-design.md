@@ -178,7 +178,7 @@ flowchart LR
 
 ## 用户绑定与 domain 语义
 
-「分配用户」抽屉通过 `GET /api/v1/users` 分页读取 NexusAuth SCIM 用户目录，选择框支持按姓名、用户名或邮箱搜索，显示格式为「姓名 · 用户名 · 邮箱」，停用用户带「已停用」。保存时只改动当前角色在该 domain 下的成员：先读取最新绑定，再合并该用户的其它角色，对变更的 subject 调用 `PUT /api/v1/rbac-v1/subject-roles`（`dashboard/src/pages/policy-workbench/components/role-users.tsx`）。
+「分配用户」抽屉通过 `GET /api/v1/users` 分页读取 NexusAuth SCIM 用户目录，选择框支持按姓名、用户名或邮箱搜索，显示格式为「姓名 · 用户名 · 邮箱」，停用用户带「已停用」。保存时只改动当前角色在该 domain 下的成员：一次调用 `PUT /api/v1/rbac-v1/roles/{id}/subjects` 提交新增与移除的用户，后端在一个事务内完成，不触碰用户的其它角色（`dashboard/src/pages/policy-workbench/components/role-users.tsx`）。
 
 当前抽屉写入默认空域（`domain` 为空串），界面不提供 Domain 输入。停用用户不能新增分配，但原绑定（含已从目录删除的用户）可以取消。部分用户保存失败时抽屉保持打开并显示失败数量，再次保存只重试未完成的变化。
 

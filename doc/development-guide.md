@@ -27,7 +27,7 @@
 | `dashboard/src` | React 页面、路由、API 和样式 |
 | `sdk/rbac` | 业务服务 Go SDK |
 | `migrations` | 首次建库脚本和初始化说明 |
-| `src/test` | 集成和前端 E2E 测试辅助代码 |
+| `src/test/dashboard` | 前端 Playwright E2E 测试（Go 单元与集成测试与被测代码放在 `src/internal` 的同一包内） |
 | `doc` | 设计、使用、部署和验证文档 |
 
 ## 2. 本地启动
@@ -111,6 +111,8 @@ npm run lint
 npm run build
 npm run test:e2e
 ```
+
+E2E 测试会启动 Vite 开发服务器并模拟全部后端接口，不需要后端。本机没有 Playwright 自带浏览器时，可以指向已安装的 Chrome：`PLAYWRIGHT_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe' npx playwright test`。
 
 仓储集成测试需要独立 PostgreSQL，使用一次性数据库连接串：
 

@@ -81,11 +81,16 @@ Content-Type: application/json
 
 | errorCode | HTTP 状态 | 触发条件 |
 | --- | --- | --- |
-| `INVALID_ARGUMENT` | 400 | 请求字段缺失、格式错误或违反业务前置条件 |
+| `INVALID_ARGUMENT` | 400 | 请求字段缺失、格式错误、请求体超过 4 MiB 或违反业务前置条件 |
+| `UNAUTHENTICATED` | 401 | `/api/v1/authorize` 缺少或提供了错误的服务凭证 |
 | `NOT_FOUND` | 404 | 应用、服务、角色、菜单、Endpoint 不存在或不可用 |
-| `ALREADY_EXISTS` | 409 | 唯一约束冲突 |
+| `ALREADY_EXISTS` | 409 | 唯一约束冲突，或同一服务与方法下已有匹配相同请求的路径模板 |
 | `CONFLICT` | 409 | 跨应用引用、引用停用对象、移除仍被授权引用的服务关联等 |
-| `INTERNAL_ERROR` | 500 | 未分类的服务端错误 |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | 带 JSON 正文的请求未使用 `Content-Type: application/json` |
+| `INTERNAL_ERROR` | 500 | 未分类的服务端错误；响应只返回 `internal server error`，原始错误写入服务端日志 |
+| `PUBLISH_PENDING` | 503 | Redis 模式下保存已提交，但授权记录发布失败；后台对账会自动补发布，无需重复保存 |
+
+所有带 JSON 正文的接口都要求 `Content-Type: application/json`（可带 `charset` 参数）。浏览器跨站只能在 CORS 预检通过后发送该类型，因此这一要求同时阻止跨站表单伪造请求。
 
 `/api/v1/users` 在 SCIM 未配置时返回 `503 SCIM_NOT_CONFIGURED`，上游调用失败时返回 `502 SCIM_UPSTREAM_ERROR`，响应结构同为 `{success,errorCode,errorMessage,result}`。
 
@@ -195,7 +200,9 @@ Content-Type: application/json
 | `last_discovered_at` | timestamp | 最近发现时间，可为空 |
 | `created_at` / `updated_at` | timestamp | 时间戳 |
 
-保存要求 `method` 非空且 `path_template` 以 `/` 开头。Swagger 导入按 `method + path_template` 跳过已存在接口，逐条写入，不是整批原子事务。
+保存要求 `method` 为标准 HTTP 方法（GET、POST、PUT、PATCH、DELETE、HEAD、OPTIONS、TRACE），`path_template` 以 `/` 开头且不超过 500 字符，`endpoint_key` 不超过 160 字符。同一服务与方法下，只差参数名或首尾斜杠的模板（如 `/orders/{id}` 与 `/orders/{orderId}/`）匹配相同的请求，运行时会被判为歧义而全部拒绝，因此保存时返回 `409`；更新同一条 Endpoint 时可以改参数名。更新时传入非空 `endpoint_key` 会修改接口标识，传空保留原值。自动生成的 `endpoint_key` 为「方法 + 截断后的路径 + 短哈希」，保证唯一且不超长。
+
+Swagger 导入按 `method` 与上述路径形状跳过已存在接口（文档内重复的形状也只导入一次），逐条写入，不是整批原子事务；整批导入结束后只发布一次 Redis 记录。导入只访问管理员提供的地址，地址受 `swagger_import` 配置约束：始终禁止链路本地地址与云平台元数据地址，生产配置默认禁止回环地址，可用 `allowed_hosts` 进一步限定主机或网段；被拒绝时返回 `400`。
 
 ### 6.2 角色
 
@@ -243,6 +250,7 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 | --- | --- | --- |
 | GET | `/api/v1/rbac-v1/subject-roles` | 返回 `{items: SubjectRoleBinding[]}` |
 | PUT | `/api/v1/rbac-v1/subject-roles` | 替换指定 `subject + domain` 的全部角色；`domain` 省略时替换默认空域 |
+| PUT | `/api/v1/rbac-v1/roles/{id}/subjects` | 为一个角色原子地增删成员：正文 `{domain, add, remove}`，只改动该角色，不影响这些主体的其他角色；整批只发布一次 |
 
 `SubjectRoleBinding` 字段：`id`、`application_id`、`subject`、`domain`、`role_id`。
 
@@ -256,7 +264,19 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 }
 ```
 
-`subject` 必填，`domain` 可省略；省略或传空白按默认空域处理，旧值 `global` 也归一到同一默认空域。`role_ids` 必须属于当前应用，否则返回 `409`。替换是对该主体/域整组角色的覆盖，不是追加。`domain` 是授权上下文字符串，非空具名值用于按租户或组织进一步隔离，不合并具名域、不扩大权限；当前用户分配 UI 提交空域。
+`subject` 必填，`domain` 可省略；省略或传空白按默认空域处理，旧值 `global` 也归一到同一默认空域。`role_ids` 必须属于当前应用，否则返回 `409`；重复的 ID 会被去重。替换是对该主体/域整组角色的覆盖，不是追加：两个调用方并发为同一主体替换不同角色时，后写入者会覆盖前者，需要只改一个角色时请使用下面的按角色增删接口。`domain` 是授权上下文字符串，非空具名值用于按租户或组织进一步隔离，不合并具名域、不扩大权限。
+
+按角色增删成员的请求体：
+
+```json
+{
+  "domain": "",
+  "add": ["user-001", "user-002"],
+  "remove": ["user-003"]
+}
+```
+
+`add` 与 `remove` 可省略，主体不能为空，也不能同时出现在两边。角色不属于当前应用返回 `404`；给停用角色新增成员返回 `409`，从停用角色移除成员允许。默认空域的移除同时清理旧值 `global` 的绑定。管理端「分配用户」抽屉使用该接口，当前提交空域。
 
 ## 7. 保存生效与缓存
 
@@ -328,7 +348,7 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 
 ```text
 1. 用 appKey、服务、subject 和归一化 domain 直接从 Redis 读取该身份的 SubjectAPIPolicy 记录（Lua 原子读取 state + record）。
-2. 应用未 ready、记录缺失、记录损坏或读取出错 -> 拒绝，不回退数据库；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
+2. 应用未 ready、记录损坏或读取出错 -> 拒绝，不回退数据库；应用已发布但该身份没有记录 -> 正常 DENY（endpoint_not_granted）；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
 3. 通过 service_resource + method 定位路由集合，使用静态哈希或参数 Trie 匹配 Endpoint，固定路径段更多者优先；同优先级不同 Endpoint 冲突时拒绝。
 4. 记录已按 subject + 归一化 domain 聚合；`domain` 省略、空白或旧 `global` 都归一为空默认域。
 5. 目标 Endpoint 在该用户的 API 授权并集内且服务启用 -> ALLOW，否则 DENY。
@@ -346,12 +366,13 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 | `endpoint_disabled` | 匹配到但已停用 |
 | `endpoint_not_granted` | Endpoint 存在但未被授予 |
 | `ambiguous_endpoint` | 多个同优先级路径模板匹配，拒绝 |
+| `service_inactive` | Redis 模式：应用已停用，或服务在目录中已停用/不存在 |
 
 未命中授权时决策为 `allowed=false`、`effect=deny`，`reason` 取上表中除 `allowed` 外的值。
 
 路径参数按单个非空路径段匹配，例如 `/orders/{id}` 不匹配 `/orders/1/items`，也不提供任意深度通配。
 
-应用不存在或已停用时，接口返回 `404`，属于错误而不是正常 deny 响应。服务未关联、服务未启用、接口不存在或未被授予属于正常 deny 响应。
+应用不存在时接口返回 `404`，属于错误而不是正常 deny 响应；Redis 模式下应用从未发布（例如 Redis 刚清空、对账尚未完成）同样返回 `404`。服务未关联、主体未绑定角色、服务未启用、接口不存在或未被授予属于正常 deny 响应：Redis 模式下主体在该服务上没有记录时统一返回 `endpoint_not_granted`。应用停用时两种模式不同：数据库模式找不到启用应用返回 `404`，Redis 模式返回 deny `service_inactive`。
 
 ## 9. 主体菜单
 
