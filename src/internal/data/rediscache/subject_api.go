@@ -15,11 +15,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// One user+service grant set is cached as a single Redis string holding the
-// SubjectAPIPolicy JSON itself: there is no envelope, invalidation token, or
-// checksum, so the value can be replaced in place and is read back verbatim.
-// Stored values never expire; freshness is controlled by the per-application
-// state gate instead of a TTL.
+// Each service+user scope is a Redis hash. Application keys are hash fields,
+// each holding its SubjectAPIPolicy JSON without an envelope or checksum.
+// Shared services therefore group users together without merging applications'
+// grants. Hashes never expire; freshness is controlled by application gates.
 const maxSubjectAPIBytes = 16 * 1024 * 1024
 
 // Per-application write gate values. "updating" blocks every read so a batch
@@ -52,7 +51,7 @@ end
 if state ~= ARGV[1] then
   return {-1, ''}
 end
-local payload = redis.call('GET', KEYS[2])
+local payload = redis.call('HGET', KEYS[2], ARGV[2])
 if not payload then
   return {2, ''}
 end
@@ -63,7 +62,7 @@ return {1, payload}
 // a replace always finds every key that StoreSubjectAPIs has written. The set
 // write has no expiry.
 const storeSubjectAPIScript = `
-redis.call('SET', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('SADD', KEYS[2], KEYS[1])
 return 1
 `
@@ -82,8 +81,8 @@ func normalizeSubjectAPIIdentity(identity biz.SubjectAPIIdentity) biz.SubjectAPI
 	return identity
 }
 
-// validateSubjectAPIIdentity requires the fields that make up the key. The
-// application id and active flag are not part of the key and may be omitted.
+// validateSubjectAPIIdentity requires the hash identity and application field.
+// The application id and active flag are metadata and may be omitted.
 func validateSubjectAPIIdentity(identity biz.SubjectAPIIdentity) error {
 	if strings.TrimSpace(identity.ApplicationKey) == "" || strings.TrimSpace(identity.Subject) == "" ||
 		strings.TrimSpace(identity.ServiceResource) == "" {
@@ -108,14 +107,13 @@ func subjectAPIKeyIdentityMatches(request, stored biz.SubjectAPIIdentity) bool {
 	return true
 }
 
-// SubjectAPIKey names one user+service grant set. The application key replaces
-// the application id as the scope selector; QueryEscape keeps the application
-// key, user, service, and domain text from colliding with the structural
-// separators. Only named domains add a final segment.
+// SubjectAPIKey groups the environment's users under their service resource.
+// Application isolation lives in hash fields rather than the Redis key.
+// QueryEscape protects separators; only named domains add a final segment.
 func SubjectAPIKey(prefix string, identity biz.SubjectAPIIdentity) string {
-	key := fmt.Sprintf("%s:%s:%s:%s", prefix,
-		url.QueryEscape(strings.TrimSpace(identity.ApplicationKey)),
-		url.QueryEscape(identity.Subject), url.QueryEscape(identity.ServiceResource))
+	key := fmt.Sprintf("%s:%s:%s", prefix,
+		url.QueryEscape(strings.TrimSpace(identity.ServiceResource)),
+		url.QueryEscape(strings.TrimSpace(identity.Subject)))
 	domain := biz.NormalizeRBACDomain(identity.Domain)
 	if domain != "" {
 		key += ":" + url.QueryEscape(domain)
@@ -125,13 +123,13 @@ func SubjectAPIKey(prefix string, identity biz.SubjectAPIIdentity) string {
 
 // subjectAPIStateKey holds the per-application write gate ("ready"/"updating").
 func subjectAPIStateKey(prefix, appKey string) string {
-	return fmt.Sprintf("%s:%s:state", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
+	return fmt.Sprintf("%s:rbac:api:app:%s:state", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
 }
 
 // subjectAPIMembersKey is the set of record keys that belong to one
 // application, so a replace can find and delete the records it supersedes.
 func subjectAPIMembersKey(prefix, appKey string) string {
-	return fmt.Sprintf("%s:%s:members", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
+	return fmt.Sprintf("%s:rbac:api:app:%s:members", prefix, url.QueryEscape(strings.TrimSpace(appKey)))
 }
 
 // dedupeSubjectAPIEndpoints collapses the union of several roles' grants keyed
@@ -169,7 +167,7 @@ func (c *PolicyCache) LoadSubjectAPIs(ctx context.Context, identity biz.SubjectA
 	defer cancel()
 	result, err := c.client.Eval(requestCtx, loadSubjectAPIScript,
 		[]string{subjectAPIStateKey(c.prefix, identity.ApplicationKey), SubjectAPIKey(c.prefix, identity)},
-		subjectAPIStateReady).Result()
+		subjectAPIStateReady, identity.ApplicationKey).Result()
 	if err != nil {
 		return biz.SubjectAPIPolicy{}, err
 	}
@@ -211,10 +209,10 @@ func (c *PolicyCache) LoadSubjectAPIs(ctx context.Context, identity biz.SubjectA
 	return policy, nil
 }
 
-// StoreSubjectAPIs writes one plain JSON record for a user+service scope and
-// indexes its key in the application's membership set. It is used for external
-// single-record updates and as part of a replace, so it never touches the
-// application write gate: that state is owned by the batch writer. The record
+// StoreSubjectAPIs writes plain JSON to the application's field in a
+// user+service hash and indexes its key in the application's membership set.
+// It is used for external single-record updates and as part of a replace,
+// so it never touches the application write gate, owned by the batch writer. The record
 // and the index entry are written atomically and never expire.
 func (c *PolicyCache) StoreSubjectAPIs(ctx context.Context, policy biz.SubjectAPIPolicy) error {
 	if err := ctx.Err(); err != nil {
@@ -236,7 +234,7 @@ func (c *PolicyCache) StoreSubjectAPIs(ctx context.Context, policy biz.SubjectAP
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	return c.client.Eval(requestCtx, storeSubjectAPIScript,
-		[]string{SubjectAPIKey(c.prefix, policy.SubjectAPIIdentity), membersKey}, raw).Err()
+		[]string{SubjectAPIKey(c.prefix, policy.SubjectAPIIdentity), membersKey}, policy.ApplicationKey, raw).Err()
 }
 
 // Rebuild lease. Each application has a lock key holding a random token; every
@@ -276,25 +274,27 @@ redis.call('SET', KEYS[2], ARGV[2])
 return 1
 `
 
-// KEYS[1]=lock KEYS[2]=members KEYS[3..]=records; ARGV[1]=token ARGV[2..]=values.
+// KEYS[1]=lock KEYS[2]=members KEYS[3..]=hashes;
+// ARGV[1]=token ARGV[2]=application field ARGV[3..]=JSON values.
 const fencedSubjectAPIWriteScript = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
   return redis.error_reply('` + subjectAPILeaseLostCode + `')
 end
 for i = 3, #KEYS do
-  redis.call('SET', KEYS[i], ARGV[i - 1])
+  redis.call('HSET', KEYS[i], ARGV[2], ARGV[i])
   redis.call('SADD', KEYS[2], KEYS[i])
 end
 return 1
 `
 
-// KEYS[1]=lock KEYS[2]=members KEYS[3..]=records; ARGV[1]=token.
+// KEYS[1]=lock KEYS[2]=members KEYS[3..]=hashes;
+// ARGV[1]=token ARGV[2]=application field. Other applications remain intact.
 const fencedSubjectAPIDeleteScript = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
   return redis.error_reply('` + subjectAPILeaseLostCode + `')
 end
 for i = 3, #KEYS do
-  redis.call('DEL', KEYS[i])
+  redis.call('HDEL', KEYS[i], ARGV[2])
   redis.call('SREM', KEYS[2], KEYS[i])
 end
 return 1
@@ -533,10 +533,10 @@ func (l *subjectAPILease) Block(ctx context.Context, appKeys []string) error {
 	return nil
 }
 
-// Replace rewrites every record of one leased application under the
-// "updating" gate: it deletes the superseded records, writes the new ones with
-// their index entries, then reopens the gate and records the published request
-// number. Any failure leaves the gate closed for the next rebuild to retry.
+// Replace rewrites one leased application's hash fields under its "updating"
+// gate. It removes superseded fields without touching other applications,
+// writes the new fields and membership index, and only then publishes ready.
+// Any failure leaves the gate closed for the next rebuild to retry.
 func (l *subjectAPILease) Replace(ctx context.Context, appKey string, policies []biz.SubjectAPIPolicy) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -612,14 +612,15 @@ func (l *subjectAPILease) Replace(ctx context.Context, appKey string, policies [
 	// record addressable once the gate reopens.
 	for start := 0; start < len(removed); start += subjectAPIReplaceBatch {
 		batch := removed[start:min(start+subjectAPIReplaceBatch, len(removed))]
-		if err := l.evalFenced(operationCtx, fencedSubjectAPIDeleteScript, append([]string{lockKey, membersKey}, batch...)); err != nil {
+		if err := l.evalFenced(operationCtx, fencedSubjectAPIDeleteScript, append([]string{lockKey, membersKey}, batch...), appKey); err != nil {
 			return err
 		}
 	}
 	for start := 0; start < len(records); start += subjectAPIReplaceBatch {
 		batch := records[start:min(start+subjectAPIReplaceBatch, len(records))]
 		keys := make([]string, 0, len(batch)+2)
-		values := make([]any, 0, len(batch))
+		values := make([]any, 0, len(batch)+1)
+		values = append(values, appKey)
 		keys = append(keys, lockKey, membersKey)
 		for _, record := range batch {
 			keys = append(keys, record.key)
