@@ -2,9 +2,7 @@ package repo
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -15,7 +13,7 @@ import (
 )
 
 // subjectAPIRefreshTimeout bounds one publication after a committed save,
-// including the wait for another instance's rebuild lease.
+// including the wait for another instance's PostgreSQL publication lock.
 const subjectAPIRefreshTimeout = 90 * time.Second
 
 // SubjectAPICache is the direct Redis authority for runtime service API
@@ -23,9 +21,7 @@ const subjectAPIRefreshTimeout = 90 * time.Second
 // save; authorization never falls back to it.
 type SubjectAPICache interface {
 	LoadSubjectAPIs(context.Context, biz.SubjectAPIIdentity) (biz.SubjectAPIPolicy, error)
-	RequestSubjectAPIRefresh(context.Context, []string) (map[string]int64, error)
-	AcquireSubjectAPILease(context.Context, []string) (biz.SubjectAPILease, error)
-	SubjectAPIStatuses(context.Context, []string) (map[string]biz.SubjectAPIPublication, error)
+	ReplaceSubjectAPIs(context.Context, []biz.SubjectAPIPolicy) error
 }
 
 var _ biz.SubjectAPIRepository = (*RBACV1Repository)(nil)
@@ -87,13 +83,7 @@ func (r *RBACV1Repository) serviceCatalogSnapshot(ctx context.Context) (map[stri
 
 // buildSubjectAPIPolicies reads one application's records in a single
 // repeatable-read snapshot and aggregates them per subject, domain and service.
-func (r *RBACV1Repository) buildSubjectAPIPolicies(ctx context.Context, appKey string, catalog map[string]bool) ([]biz.SubjectAPIPolicy, error) {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return nil, mapDBError(err)
-	}
-	defer tx.Rollback(ctx)
-
+func (r *RBACV1Repository) buildSubjectAPIPolicies(ctx context.Context, tx pgx.Tx, appKey string, catalog map[string]bool) ([]biz.SubjectAPIPolicy, error) {
 	var in subjectAPIBuildInput
 	if err := tx.QueryRow(ctx, `SELECT id,app_key,enabled FROM applications WHERE app_key=$1`, appKey).Scan(&in.appID, &in.appKey, &in.appEnabled); err != nil {
 		return nil, mapDBError(err)
@@ -247,147 +237,97 @@ func (r *RBACV1Repository) buildSubjectAPIPolicies(ctx context.Context, appKey s
 			})
 		}
 	}
-	return policies, tx.Commit(ctx)
+	return policies, nil
 }
 
-// uniqueApplicationKeys trims, drops empty values and deduplicates.
-func uniqueApplicationKeys(appKeys []string) []string {
-	seen := make(map[string]struct{}, len(appKeys))
-	unique := make([]string, 0, len(appKeys))
-	for _, appKey := range appKeys {
-		appKey = strings.TrimSpace(appKey)
-		if appKey == "" {
-			continue
-		}
-		if _, exists := seen[appKey]; !exists {
-			seen[appKey] = struct{}{}
-			unique = append(unique, appKey)
-		}
-	}
-	return unique
+// refreshSubjectAPIApplication rebuilds service-level permissions after a
+// committed control-plane save. Contributions from every application must be
+// recomputed together, otherwise one application's revoke could erase another.
+func (r *RBACV1Repository) refreshSubjectAPIApplication(ctx context.Context, _ string) error {
+	return r.refreshAllSubjectAPIs(ctx)
 }
 
-func (r *RBACV1Repository) refreshSubjectAPIApplication(ctx context.Context, appKey string) error {
-	return r.refreshSubjectAPIApplications(ctx, []string{appKey}, false)
-}
-
-// refreshSubjectAPIApplications publishes the given applications after a
-// committed save. It detaches from the caller's cancellation so an aborted
-// HTTP request cannot leave a half-finished rebuild behind. A failure is
-// reported as biz.ErrPublishPending: the save is already committed and the
-// reconciler will publish it later.
-func (r *RBACV1Repository) refreshSubjectAPIApplications(ctx context.Context, appKeys []string, blockFirst bool) error {
+func (r *RBACV1Repository) refreshAllSubjectAPIs(ctx context.Context) error {
 	if r.cache == nil {
-		return nil
-	}
-	keys := uniqueApplicationKeys(appKeys)
-	if len(keys) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subjectAPIRefreshTimeout)
 	defer cancel()
-	tickets, err := r.cache.RequestSubjectAPIRefresh(ctx, keys)
-	if err == nil {
-		err = r.publishSubjectAPIApplications(ctx, keys, tickets, blockFirst)
-	}
-	if err != nil {
-		r.markUnpublished(keys)
+	if _, err := r.publishSubjectAPIs(ctx); err != nil {
+		// Periodic full reconciliation and the startup pass retry from current
+		// database state, including saves that failed before reaching Redis.
 		return fmt.Errorf("%w: %w", biz.ErrPublishPending, err)
 	}
 	return nil
 }
 
-// markUnpublished remembers applications whose publication failed so the next
-// reconcile pass republishes them even if Redis never recorded the request.
-func (r *RBACV1Repository) markUnpublished(appKeys []string) {
-	r.unpublishedMu.Lock()
-	defer r.unpublishedMu.Unlock()
-	if r.unpublished == nil {
-		r.unpublished = make(map[string]struct{})
-	}
-	for _, appKey := range appKeys {
-		r.unpublished[appKey] = struct{}{}
+// RefreshSubjectAPIForService also refreshes removed service associations and
+// shared-service contributions; the final snapshot owns all business keys.
+func (r *RBACV1Repository) RefreshSubjectAPIForService(ctx context.Context, _ string) error {
+	return r.refreshAllSubjectAPIs(ctx)
+}
+
+// The lock is held on a dedicated PostgreSQL session across the snapshot and
+// Redis publication. Taking it before BeginTx avoids a waiting repeatable-read
+// transaction retaining a snapshot older than a completed publisher's revoke.
+// No coordination keys are written to Redis.
+const subjectAPIPublicationLock int64 = 0x4e58534150495055
+
+// acquireSubjectAPIPublicationConn does not hold pooled connections while
+// waiting. Once locked, Hijack gives the publisher a dedicated session, leaving
+// the pool available for control-plane commits and catalog reads even at size 1.
+func (r *RBACV1Repository) acquireSubjectAPIPublicationConn(ctx context.Context) (*pgx.Conn, error) {
+	for {
+		pooled, err := r.pool.Acquire(ctx)
+		if err != nil {
+			return nil, mapDBError(err)
+		}
+		var locked bool
+		err = pooled.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, subjectAPIPublicationLock).Scan(&locked)
+		if err != nil {
+			// The reply may be lost after acquiring the session lock.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = pooled.Hijack().Close(cleanupCtx)
+			cancel()
+			return nil, mapDBError(err)
+		}
+		if locked {
+			return pooled.Hijack(), nil
+		}
+		pooled.Release()
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
-func (r *RBACV1Repository) takeUnpublished() map[string]struct{} {
-	r.unpublishedMu.Lock()
-	defer r.unpublishedMu.Unlock()
-	taken := r.unpublished
-	r.unpublished = nil
-	return taken
-}
-
-// publishSubjectAPIApplications rebuilds every leased application whose
-// records do not yet cover its ticket. The lease is taken before the database
-// snapshot, so the snapshot includes every save that requested a rebuild
-// before the lease was granted. With blockFirst every gate closes before any
-// rebuild starts (used when a shared service changed); otherwise each
-// application keeps serving its previous records until its own replace.
-func (r *RBACV1Repository) publishSubjectAPIApplications(ctx context.Context, keys []string, tickets map[string]int64, blockFirst bool) error {
-	lease, err := r.cache.AcquireSubjectAPILease(ctx, keys)
+func (r *RBACV1Repository) publishSubjectAPIs(ctx context.Context) (int, error) {
+	conn, err := r.acquireSubjectAPIPublicationConn(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer lease.Release(ctx)
-	pending, err := lease.Pending(ctx, tickets)
-	if err != nil || len(pending) == 0 {
-		return err
-	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// Closing the dedicated session releases its advisory lock, including
+		// error paths, without returning a locked connection to the pool.
+		_ = conn.Close(cleanupCtx)
+	}()
+
 	catalog, err := r.serviceCatalogSnapshot(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if blockFirst {
-		if err := lease.Block(ctx, pending); err != nil {
-			return err
-		}
-	}
-	for _, appKey := range pending {
-		policies, err := r.buildSubjectAPIPolicies(ctx, appKey, catalog)
-		if err != nil {
-			return err
-		}
-		if !blockFirst {
-			if err := lease.Block(ctx, []string{appKey}); err != nil {
-				return err
-			}
-		}
-		if err := lease.Replace(ctx, appKey, policies); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// RefreshSubjectAPIForService rebuilds every application linked to a service.
-func (r *RBACV1Repository) RefreshSubjectAPIForService(ctx context.Context, service string) error {
-	apps, err := r.applicationKeysForServices(ctx, []string{strings.TrimSpace(service)})
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return err
+		return 0, mapDBError(err)
 	}
-	return r.refreshSubjectAPIApplications(ctx, apps, true)
-}
-
-func (r *RBACV1Repository) applicationKeysForServices(ctx context.Context, services []string) ([]string, error) {
-	rows, err := r.pool.Query(ctx, `SELECT DISTINCT a.app_key FROM applications a JOIN application_service_resources l ON l.application_id=a.id WHERE l.service_resource_key=ANY($1::text[]) ORDER BY a.app_key`, services)
-	if err != nil {
-		return nil, mapDBError(err)
-	}
-	return pgx.CollectRows(rows, pgx.RowTo[string])
-}
-
-// ReconcileSubjectAPIs repairs Redis publication without waiting for another
-// save. It republishes every application when full is true, and otherwise only
-// applications whose gate is missing or not ready, whose published request
-// number is behind (a save whose rebuild failed), or that link a service whose
-// catalog status changed since the previous pass (remote catalogs change
-// without a local save). It returns the number of applications republished.
-func (r *RBACV1Repository) ReconcileSubjectAPIs(ctx context.Context, full bool) (int, error) {
-	if r.cache == nil {
-		return 0, nil
-	}
-	rows, err := r.pool.Query(ctx, `SELECT app_key FROM applications ORDER BY app_key`)
+	defer tx.Rollback(context.Background())
+	rows, err := tx.Query(ctx, `SELECT app_key FROM applications ORDER BY app_key`)
 	if err != nil {
 		return 0, mapDBError(err)
 	}
@@ -395,91 +335,125 @@ func (r *RBACV1Repository) ReconcileSubjectAPIs(ctx context.Context, full bool) 
 	if err != nil {
 		return 0, mapDBError(err)
 	}
-	catalog, err := r.serviceCatalogSnapshot(ctx)
+	var contributions []biz.SubjectAPIPolicy
+	for _, appKey := range apps {
+		policies, err := r.buildSubjectAPIPolicies(ctx, tx, appKey, catalog)
+		if err != nil {
+			return 0, err
+		}
+		contributions = append(contributions, policies...)
+	}
+	policies, err := mergeServiceSubjectAPIPolicies(contributions)
 	if err != nil {
 		return 0, err
 	}
-	// Passes are serialized so catalog change detection compares consecutive
-	// snapshots.
-	r.reconcileMu.Lock()
-	defer r.reconcileMu.Unlock()
-	previous := r.lastCatalog
-
-	forced := make(map[string]bool)
-	if full {
-		for _, appKey := range apps {
-			forced[appKey] = true
-		}
-	} else if previous != nil {
-		changed := make([]string, 0)
-		for key, active := range catalog {
-			if before, ok := previous[key]; !ok || before != active {
-				changed = append(changed, key)
-			}
-		}
-		for key := range previous {
-			if _, ok := catalog[key]; !ok {
-				changed = append(changed, key)
-			}
-		}
-		if len(changed) > 0 {
-			affected, err := r.applicationKeysForServices(ctx, changed)
-			if err != nil {
-				return 0, err
-			}
-			for _, appKey := range affected {
-				forced[appKey] = true
-			}
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, mapDBError(err)
 	}
-	if len(apps) == 0 {
-		r.lastCatalog = maps.Clone(catalog)
+	// The session lock remains held after Commit until the complete publish
+	// finishes. Each Redis value is replaced atomically, not the whole set.
+	if err := r.cache.ReplaceSubjectAPIs(ctx, policies); err != nil {
+		return 0, err
+	}
+	return len(apps), nil
+}
+
+// ReconcileSubjectAPIs always recomputes the full service/user snapshot. It
+// repairs missing values, failed saves, deleted bindings and remote catalog
+// changes without storing readiness, indexes or counters in Redis. The full
+// argument remains for the startup/background caller contract.
+func (r *RBACV1Repository) ReconcileSubjectAPIs(ctx context.Context, _ bool) (int, error) {
+	if r.cache == nil {
 		return 0, nil
 	}
-	statuses, err := r.cache.SubjectAPIStatuses(ctx, apps)
-	if err != nil {
-		return 0, err
-	}
-	// Taken only now, after every read that can fail: each taken application
-	// is either published below or marked again.
-	for appKey := range r.takeUnpublished() {
-		forced[appKey] = true
-	}
+	ctx, cancel := context.WithTimeout(ctx, subjectAPIRefreshTimeout)
+	defer cancel()
+	return r.publishSubjectAPIs(ctx)
+}
 
-	republished := 0
-	var failures []error
-	// A catalog change is only considered handled once every affected
-	// application holds a rebuild request; a failed rebuild after that is
-	// retried through its unpublished request number.
-	requested := true
-	for _, appKey := range apps {
-		status := statuses[appKey]
-		var tickets map[string]int64
-		switch {
-		case forced[appKey] || status.State != "ready":
-			// Request a fresh rebuild that is newer than anything published.
-			tickets, err = r.cache.RequestSubjectAPIRefresh(ctx, []string{appKey})
-			if err != nil {
-				requested = false
-				r.markUnpublished([]string{appKey})
-				failures = append(failures, fmt.Errorf("%s: %w", appKey, err))
-				continue
+// mergeServiceSubjectAPIPolicies gives each service/user/domain exactly one
+// value. Only active application contributions grant APIs or roles; catalog
+// routes remain complete so route specificity cannot widen a user's grants.
+func mergeServiceSubjectAPIPolicies(contributions []biz.SubjectAPIPolicy) ([]biz.SubjectAPIPolicy, error) {
+	type scope struct{ service, subject, domain string }
+	type aggregate struct {
+		policy  biz.SubjectAPIPolicy
+		apis    map[uuid.UUID]biz.SubjectAPIEndpoint
+		catalog map[uuid.UUID]biz.SubjectAPIEndpoint
+		roles   map[string]struct{}
+	}
+	groups := make(map[scope]*aggregate)
+	for _, source := range contributions {
+		key := scope{strings.TrimSpace(source.ServiceResource), strings.TrimSpace(source.Subject), biz.NormalizeRBACDomain(source.Domain)}
+		if key.service == "" || key.subject == "" {
+			return nil, fmt.Errorf("invalid service subject policy identity")
+		}
+		group := groups[key]
+		if group == nil {
+			group = &aggregate{
+				policy: biz.SubjectAPIPolicy{SubjectAPIIdentity: biz.SubjectAPIIdentity{ServiceResource: key.service, Subject: key.subject, Domain: key.domain}},
+				apis:   make(map[uuid.UUID]biz.SubjectAPIEndpoint), catalog: make(map[uuid.UUID]biz.SubjectAPIEndpoint), roles: make(map[string]struct{}),
 			}
-		case status.Published < status.Requested:
-			// A save committed but its rebuild did not finish.
-			tickets = map[string]int64{appKey: status.Requested}
-		default:
+			groups[key] = group
+		}
+		for _, endpoint := range source.Catalog {
+			if existing, ok := group.catalog[endpoint.ID]; ok && existing != endpoint {
+				return nil, fmt.Errorf("conflicting service API catalog entry %s", endpoint.ID)
+			}
+			group.catalog[endpoint.ID] = endpoint
+		}
+		if !source.ServiceActive {
 			continue
 		}
-		if err := r.publishSubjectAPIApplications(ctx, []string{appKey}, tickets, false); err != nil {
-			r.markUnpublished([]string{appKey})
-			failures = append(failures, fmt.Errorf("%s: %w", appKey, err))
-			continue
+		group.policy.ServiceActive = true
+		for _, endpoint := range source.APIs {
+			group.apis[endpoint.ID] = endpoint
 		}
-		republished++
+		for _, role := range source.RoleCodes {
+			if role = strings.TrimSpace(role); role != "" {
+				group.roles[role] = struct{}{}
+			}
+		}
 	}
-	if requested {
-		r.lastCatalog = maps.Clone(catalog)
+	keys := make([]scope, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
 	}
-	return republished, errors.Join(failures...)
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.service != b.service {
+			return a.service < b.service
+		}
+		if a.subject != b.subject {
+			return a.subject < b.subject
+		}
+		return a.domain < b.domain
+	})
+	result := make([]biz.SubjectAPIPolicy, 0, len(keys))
+	for _, key := range keys {
+		group := groups[key]
+		for _, endpoint := range group.apis {
+			group.policy.APIs = append(group.policy.APIs, endpoint)
+		}
+		for _, endpoint := range group.catalog {
+			group.policy.Catalog = append(group.policy.Catalog, endpoint)
+		}
+		less := func(a, b biz.SubjectAPIEndpoint) bool {
+			if a.Method != b.Method {
+				return a.Method < b.Method
+			}
+			if a.PathTemplate != b.PathTemplate {
+				return a.PathTemplate < b.PathTemplate
+			}
+			return a.ID.String() < b.ID.String()
+		}
+		sort.Slice(group.policy.APIs, func(i, j int) bool { return less(group.policy.APIs[i], group.policy.APIs[j]) })
+		sort.Slice(group.policy.Catalog, func(i, j int) bool { return less(group.policy.Catalog[i], group.policy.Catalog[j]) })
+		for role := range group.roles {
+			group.policy.RoleCodes = append(group.policy.RoleCodes, role)
+		}
+		sort.Strings(group.policy.RoleCodes)
+		result = append(result, group.policy)
+	}
+	return result, nil
 }

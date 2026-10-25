@@ -101,31 +101,25 @@ func New(ctx context.Context, cfg *config.Config) (*Application, error) {
 }
 
 // RunSubjectAPIReconciler keeps Redis service API records consistent with the
-// database until ctx ends. It republishes every application once at start
-// (Redis may be empty, or the catalog may have changed while stopped), then
-// repairs only what needs it on every interval. It returns immediately when
-// Redis authorization is disabled.
+// database until ctx ends. It rebuilds the complete service/user snapshot at
+// startup and on every interval, including catalog changes while stopped.
+// It returns immediately when Redis authorization is disabled.
 func (a *Application) RunSubjectAPIReconciler(ctx context.Context, logger *slog.Logger) {
 	if a == nil || a.reconciler == nil {
 		return
 	}
-	full := true
 	pass := func() {
 		passCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
-		republished, err := a.reconciler.ReconcileSubjectAPIs(passCtx, full)
+		republished, err := a.reconciler.ReconcileSubjectAPIs(passCtx, true)
 		if err != nil {
 			if ctx.Err() == nil {
 				logger.Error("Reconciling Redis authorization records failed; will retry.",
-					slog.Bool("Full", full), slog.Int("Republished", republished), slog.Any("Error", err))
+					slog.Int("Republished", republished), slog.Any("Error", err))
 			}
 			return
 		}
-		if full || republished > 0 {
-			logger.Info("Reconciled Redis authorization records.", slog.Bool("Full", full), slog.Int("Republished", republished))
-		}
-		// Keep retrying the full pass until one succeeds.
-		full = false
+		logger.Info("Reconciled Redis authorization records.", slog.Int("Republished", republished))
 	}
 	pass()
 	ticker := time.NewTicker(a.reconcileInterval)

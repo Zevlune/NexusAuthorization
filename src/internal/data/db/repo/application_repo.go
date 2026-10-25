@@ -137,6 +137,11 @@ func (r *RBACV1Repository) ListApplicationServices(ctx context.Context, key stri
 }
 
 func (r *RBACV1Repository) ReplaceApplicationServices(ctx context.Context, key string, keys []string) error {
+	// A nil slice encodes as SQL NULL, for which NOT (value = ANY(NULL))
+	// is never true. An empty selection must remove every existing link.
+	if keys == nil {
+		keys = []string{}
+	}
 	applicationID, err := r.applicationIDForKey(ctx, key)
 	if err != nil {
 		return err

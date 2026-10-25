@@ -124,6 +124,21 @@ func mustSubjectAPIPolicyKey(t *testing.T, policy SubjectAPIPolicy) subjectAPICa
 	return key
 }
 
+func TestSubjectAPIAuthorizeServicePolicyWithoutApplicationMetadata(t *testing.T) {
+	endpoint := subjectAPIEndpoint("/books", true)
+	policy := subjectAPIPolicyFor("", uuid.Nil, "user-1", "", "orders", true,
+		[]SubjectAPIEndpoint{endpoint}, []SubjectAPIEndpoint{endpoint}, []string{"reader"})
+	fixture := newSubjectAPIRepositoryFixture()
+	service := newSubjectAPITestService(fixture, 16)
+	for _, app := range []string{"console", "billing"} {
+		fixture.register(app, "user-1", "", "orders", policy)
+		decision := mustSubjectAPIAuthorize(t, service, app, subjectAPITestInput("user-1", "", "orders", "/books"))
+		if !decision.Allowed || decision.Reason != "allowed" {
+			t.Fatalf("service-level grant via %s = %+v", app, decision)
+		}
+	}
+}
+
 func TestSubjectAPIAuthorizeReadsAggregateEveryRequestAndAppliesChanges(t *testing.T) {
 	appID := uuid.New()
 	books := subjectAPIEndpoint("/books", true)

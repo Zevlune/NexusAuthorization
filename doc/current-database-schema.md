@@ -54,7 +54,7 @@
 | `created_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 创建时间 |
 | `updated_at` | `TIMESTAMPTZ` | 否 | `NOW()` | 更新时间字段；初始化脚本不自动维护 |
 
-约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。应用表没有缓存标记列；Redis 启用时，运行时服务 API 授权由控制面在保存业务表后重建记录；Redis 禁用时，服务 API 读取数据库 current-policy。数据库结构只保存业务配置。
+约束：主键为 `id`；`app_key` 唯一；`app_key` 和 `display_name` 必须满足 `btrim(...) <> ''`。应用表没有缓存标记列；Redis 启用时，影响服务 API 权限的保存会触发控制面全量重算，纯菜单编辑仍走独立 current-policy；Redis 禁用时，服务 API 读取数据库 current-policy。数据库结构只保存业务配置。
 
 ### `application_service_resources`
 
@@ -192,7 +192,7 @@ ALTER FUNCTION nexusauthorization.enforce_role_menu_application() SET search_pat
 | `role_api_endpoint_application_guard` | `role_api_endpoint_bindings` 插入或更新前、逐行 | 按端点的 `service_resource_key` 检查角色所属应用已关联该服务资源。 |
 | `role_menu_application_guard` | `role_menu_bindings` 插入或更新前、逐行 | 检查角色和菜单属于同一应用。 |
 
-这些触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验。缓存一致性不依赖数据库触发器：Redis 启用时，控制面在保存应用、角色（含其 API/菜单授权集合）、主体角色绑定、应用服务关联以及 API/服务资源后重建受影响应用的服务 API 记录；单独保存或删除菜单节点不触发服务 API Redis 重建，由菜单 current-policy 路径读取。禁用时不发布 Redis。
+这些触发器没有负责菜单树循环检测，也没有负责按钮父级类型或按钮归属校验。`menus` 的复合自引用外键只保证父节点 ID 与应用 ID 配对；前端或应用服务层的循环/按钮规则属于应用层校验。缓存一致性不依赖数据库触发器：Redis 启用时，只有影响服务 API 授权集合的应用、角色、主体角色绑定、应用服务关联及 API/服务资源保存才触发全量 String 重算；单独菜单编辑不触发 Redis 发布。禁用时不发布 Redis。
 
 ## 显式索引
 

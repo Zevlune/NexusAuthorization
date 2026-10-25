@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,15 +19,6 @@ type RBACV1Repository struct {
 	pool    *pgxpool.Pool
 	catalog biz.ServiceResourceCatalog
 	cache   SubjectAPICache
-
-	// reconcileMu serializes ReconcileSubjectAPIs; lastCatalog is the service
-	// catalog seen by the previous successful pass.
-	reconcileMu sync.Mutex
-	lastCatalog map[string]bool
-	// unpublished holds applications whose publication failed in this
-	// process, including failures before Redis recorded the request.
-	unpublishedMu sync.Mutex
-	unpublished   map[string]struct{}
 }
 
 // WithPolicyCache enables Redis publication of service API records.

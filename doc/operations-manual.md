@@ -106,11 +106,11 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 | `NEXUSAUTHORIZATION_SCIM_*` | 需要分配用户 | NexusAuth SCIM 地址、只读凭证和超时 |
 | `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` | 业务服务调用鉴权接口时 | `/api/v1/authorize` 的 Bearer 凭证；留空时接口始终 401。使用足够长的随机值，只下发给可信业务服务 |
 | `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
-| `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用、未就绪或记录损坏时拒绝，不回退数据库 |
-| `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 多环境必须使用不同前缀；默认 `nexusauthorization:dev`，production Compose 默认 `nexusauthorization:prod`，前缀已含环境，不再重复环境段 |
+| `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用或 String 缺失、类型/JSON 损坏时拒绝，不回退数据库 |
+| `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 可配置前缀；多环境应使用不同值。开发和生产默认值分别为 `nexusauthorization:dev`、`nexusauthorization:prod`，中心与消费者必须一致 |
 | `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 已废弃 | 仅为兼容旧配置保留，不再使用；服务 API 授权记录不设 TTL |
 | `NEXUSAUTHORIZATION_REDIS_TIMEOUT` | 使用 Redis | Redis 操作超时，默认 200ms |
-| `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL` | 使用 Redis | 后台对账周期，默认 30s：补发布失败的保存、修复清空的 Redis 和卡住的闸门、跟进远程服务目录变化 |
+| `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL` | 使用 Redis | 后台全量对账周期，默认 30s：补发布失败、恢复清空的 Redis 并跟进远程服务目录变化 |
 | `NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOW_LOOPBACK` | 可选 | Swagger 导入是否允许访问回环地址；生产默认 `false`，仅本地开发开启 |
 | `NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOWED_HOSTS` | 可选 | 逗号分隔的主机名或 CIDR；设置后 Swagger 导入只能访问这些地址。链路本地与云元数据地址始终禁止 |
 
@@ -128,7 +128,7 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 6. 用权限模拟验证一次允许和一次拒绝；
 7. 删除测试角色和测试应用，确认清理规则符合预期。
 
-业务配置由 PostgreSQL 保存。Redis 启用时，运行时服务 API 鉴权直接读取 Redis，启动要求 `NEXUSAUTHORIZATION_REDIS_URL` 非空；应确认保存业务表后共享业务 Hash 中本应用 field 与 `PREFIX:rbac:api:app:<escaped app_key>:state` 重建成功。Redis 连接失败、应用未 ready、field 缺失或损坏时鉴权拒绝，不会自动回退数据库。
+业务配置由 PostgreSQL 保存。Redis 启用时，运行时服务 API 鉴权直接读取按 `service + subject + domain` 组织的策略 String，启动要求 `NEXUSAUTHORIZATION_REDIS_URL` 非空。控制面在 PostgreSQL advisory lock 下使用同一个 repeatable-read 快照全量合并；启动和定时对账都会全量重建。String 缺失、类型或 JSON 损坏、身份不匹配或 Redis 错误时鉴权拒绝，不会自动回退数据库或旧应用级 JSON。
 
 需要不依赖 Redis 的服务 API 鉴权时，设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 后重启 API。该模式使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。菜单始终使用独立的 current-policy 路径，不受开关影响。切换只在重启后生效。
 
@@ -152,19 +152,19 @@ docker compose -f docker-compose.yml ps
 
 发布 Dashboard 时，应先确认新产物和 Nginx 配置，再更新容器。发布后验证登录回调、React 路由刷新、`/api/auth/me` 和 `/api/v1/applications`。
 
-## 7. String 到 Hash 协议切换
+## 7. Hash 到 String 协议切换
 
-新协议只读 `PREFIX:<escaped service>:<escaped subject>[:<escaped domain>]` 的 HASH field 与 `PREFIX:rbac:api:app:*` 内部元数据，不自动迁移或读取旧 String key。部署不为在线 Redis 执行迁移脚本，新版中心启动后按既有启动发布与后台对账机制从 PostgreSQL 重建新 Hash field 与 `state`。
+新协议读取 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]` 的完整 JSON String，不读取旧 Hash field、`state`、Lua 或 `rbac:api:app` 辅助 key。开发和生产默认前缀分别为 `nexusauthorization:dev`、`nexusauthorization:prod`，部署可配置，但中心和消费者必须保持一致。
 
 上线按以下顺序执行：
 
-1. 准备维护窗口或可停止旧消费者的流量切换方案。旧读端仍读旧 String key，新版中心不会再更新这些 key；混跑期间旧授权或已撤销权限可能继续生效。
-2. 部署新版中心，等待目标应用新 `state` 为 `ready`，确认共享业务 Hash 中存在预期应用 field。新协议变更在新 field 就绪前会按返回码 `0`/`-1` 短暂拒绝。
-3. 中心 ready 后部署 Demo 或其他新读端，再放行业务流量。建议先中心、后 Demo；从部署中心到所有新读端放行之间保持维护状态或停止旧消费者。
-4. 用精确应用、服务、主体和 domain 验证允许与拒绝，并以 `state=ready`、目标 field 可读、撤权即时生效作为切换门槛。
-5. 若发布失败或对账未完成，保持中心继续对账并停止业务流量，等待 ready。不得恢复旧 String 协议读取来实现回退；需要回退时停止流量并恢复整套匹配版本。
+1. 进入维护窗口，统一中心与消费者前缀，并停止旧 Hash reader/writer 的鉴权流量。旧 reader 不会看到新版撤权。
+2. 启动新版中心，让其全量合并并写入 String。发布没有应用级 readiness；应确认没有 `PUBLISH_PENDING`，并抽查目标业务 key 的类型和 JSON。
+3. 启动新版 Demo 或其他新 reader，用精确 service、subject、domain 验证允许、拒绝、缺失、类型/JSON 损坏和身份不匹配，再放行业务流量。
+4. 旧 Hash reader、旧 writer 与新 String 中心不能混跑。部分写入失败可能保留旧权限到下一轮全量对账；需要停止流量并等待补发。
+5. 回退需要停止流量并恢复整套匹配版本。不得让旧 reader 继续读取旧 Hash 作为新中心的兼容路径。
 
-旧 key 仅在新 Hash/state 已生成且所有旧读端停止后定向清理。清理前在非生产环境核对环境前缀、旧 key 形状和精确目标；不得执行 `FLUSHDB`、整库删除、全库 scan-and-delete 或清空共享前缀。应用的正常部署与对账流程不会自动删除旧 key。
+旧 Hash/state key 不是新协议依赖。只有确认所有旧 reader 已停止后，才按旧 key 形状做定向清理。本次文档同步不连接现网、不清理、不部署。
 
 ## 8. 备份与恢复
 
@@ -173,7 +173,7 @@ docker compose -f docker-compose.yml ps
 - PostgreSQL 全库，包括 schema、触发器、函数和权限数据；
 - `/app/data` 中的 OIDC 会话密钥和运行时数据；
 - Compose 文件、环境变量模板和实际镜像版本；
-- Redis 不作为主备份来源；启用模式下可由 PostgreSQL 重建应用 Hash field 与内部元数据。API 启动时会完整发布一次，运行中缺失的元数据或 field 由后台对账补发布；重建期间对应应用失败关闭。
+- Redis 不作为主备份来源；启用模式下可由 PostgreSQL 全量重建业务 String。API 启动时会完整发布一次，运行中发布失败或数据被清空由后台全量对账补发；部分失败可能暂时保留旧权限，直到下一轮对账。
 
 示例：
 
@@ -182,7 +182,7 @@ pg_dump "$NEXUSAUTHORIZATION_DATABASE_URL" \
   --format=custom --file=nexus-authorization-$(date +%Y%m%d).dump
 ```
 
-恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。启用 Redis 时，恢复后保存命中受影响应用的业务表（例如重新保存应用）即可重建该应用 field 与内部元数据，启动发布和后台对账也会补齐。不要用 `FLUSHDB`、整库删除或清空共享前缀处理残留协议；旧 String key 只在新协议 ready 且旧读端停止后按精确目标定向清理。若从 Redis 禁用模式重新启用，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前确认新 field 与 `state` 已就绪。菜单 current-policy 路径直接读取数据库，不依赖这些记录。
+恢复前停止 API，恢复到隔离数据库并核对表、触发器和应用数量；确认可用后再切换连接串。启用 Redis 时，启动全量发布和后台对账会从恢复后的 PostgreSQL 重建 String。不要用 `FLUSHDB`、整库删除或全库 scan-and-delete 处理残留协议；旧 Hash/state key 只在新 reader 验收完成且旧 reader 停止后按精确目标定向清理。若从 Redis 禁用模式重新启用，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，等待启动全量发布后再放行服务 API 流量。菜单 current-policy 路径直接读取数据库，不依赖这些记录。
 
 ## 9. 故障排查
 
@@ -208,8 +208,8 @@ docker run --rm --network nexusauth alpine:3.22 \
 | 登录回调失败 | OIDC redirect URI 是否逐字符匹配、HTTPS/cookie、authority 是否可达、client secret |
 | 服务资源列表失败 | `source`、远程 URL、API key、远程 TLS 和超时 |
 | 分配用户失败 | SCIM URL、只读凭证、上游分页响应和 `NEXUSAUTHORIZATION_SCIM_TIMEOUT` |
-| 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、Redis 重建是否成功、`PREFIX:rbac:api:app:<escaped app_key>:state` 是否为 `ready`、目标业务 Hash field、key 前缀和数据库日志；重新保存可重建该应用 field |
-| 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、应用内部 `state`、目标 Hash field 和 key 前缀；等待启动发布或后台对账重建，不要用整库清空替代迁移 |
+| 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、发布是否返回 `PUBLISH_PENDING`、业务 String 与 key 前缀；等待下一轮全量对账，部分失败可能保留旧权限到补发完成 |
+| 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、业务 key、String 类型、JSON、身份和前缀；等待启动发布或后台对账重建，不要用整库清空替代迁移 |
 | 取消服务关联冲突 | 先从所有角色移除该服务的 API 授权，再取消关联 |
 | 运行时接口返回 401 | 是否配置了 `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL`，业务服务发送的 Bearer 是否与之一致；管理端 OIDC cookie 不能代替服务凭证 |
 | API 容器启动即退出并提示 `/app/data` 不可写 | 宿主机数据目录权限；让容器内 `nexus-authorization` 用户可写，或改用命名卷 |
@@ -229,8 +229,8 @@ docker run --rm --network nexusauth alpine:3.22 \
 [ ] SCIM 用户列表和角色分配正常（若启用）
 [ ] API、角色、菜单、用户绑定保存后立即生效
 [ ] 权限模拟允许和拒绝各验证一次
-[ ] 应用内部 state 为 ready，目标业务 Hash 的当前应用 field 可读
-[ ] 共享 Hash 的撤权只影响当前应用 field，其他应用字段保持存在
+[ ] 目标业务 key 的类型为 String，完整 JSON 的身份、大小和内容可严格解析
+[ ] 应用撤权或停用后重新合并，其他启用应用仍提供的权限保留
 [ ] 业务服务实际调用鉴权接口或 SDK 验证一次
 [ ] 数据库备份和恢复演练记录完整
 [ ] 日志无配置、连接池、迁移或远程目录错误

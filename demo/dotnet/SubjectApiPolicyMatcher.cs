@@ -5,15 +5,13 @@ public static class SubjectApiPolicyMatcher
     public static AuthorizationDecision Evaluate(SubjectApiPolicy policy, string method, string path)
     {
         if (policy is null ||
-            policy.ApplicationKey is null ||
             policy.Subject is null ||
             policy.ServiceResource is null)
         {
             return Deny("denied");
         }
 
-        if (string.IsNullOrWhiteSpace(policy.ApplicationKey) ||
-            string.IsNullOrWhiteSpace(policy.Subject))
+        if (string.IsNullOrWhiteSpace(policy.Subject))
         {
             return Deny("denied");
         }

@@ -9,34 +9,33 @@ using Xunit.Abstractions;
 
 namespace Demo.Api.IntegrationTests;
 
-// 现网测试仅 GET + HGET / Lua 读取，绝不发布、清理或改写授权数据。
+// 现网 Redis 只执行 GET / STRING GET，绝不发布、清理或改写授权数据。
+// POST/PUT/DELETE 仅调用 TestHost 内的 Controller mock，不连接数据库或持久化。
+// 现网 Redis 必须先部署新 String 协议；未部署时保持测试禁用。
 [Trait("Category", "LiveRedis")]
 public sealed class LiveRedisAuthorizationTests(LiveRedisFixture fixture, ITestOutputHelper output)
     : IClassFixture<LiveRedisFixture>
 {
     [LiveRedisFact]
-    public async Task Published_policy_matches_the_current_user_application_and_service()
+    public async Task Published_string_policy_matches_the_current_user_and_service()
     {
         var profile = fixture.Profile;
         var settings = fixture.Factory.Settings.AuthorizationCenter;
-        Assert.Equal(profile.AppKey, settings.AppKey);
         Assert.Equal(profile.ServiceResource, settings.ServiceResource);
         Assert.Equal(profile.Domain, RedisAuthorizationStore.NormalizeDomain(settings.Domain));
 
         var connection = fixture.Factory.Services.GetRequiredService<IConnectionMultiplexer>();
         var database = connection.GetDatabase(fixture.Factory.Settings.Redis.Database);
-        Assert.Equal("ready", (string?)await database.StringGetAsync(fixture.StateKey));
-        var raw = await database.HashGetAsync(fixture.PolicyKey, fixture.PolicyField);
-        Assert.False(raw.IsNullOrEmpty, $"用户授权记录尚未发布：{fixture.PolicyKey}");
+        var raw = await database.StringGetAsync(fixture.PolicyKey);
+        Assert.False(raw.IsNull, $"用户授权 String 尚未发布：{fixture.PolicyKey}");
         var policy = JsonSerializer.Deserialize<SubjectApiPolicy>(raw.ToString());
         Assert.NotNull(policy);
-        Assert.Equal(profile.AppKey, policy.ApplicationKey);
         Assert.Equal(profile.Subject, policy.Subject);
         Assert.Equal(profile.ServiceResource, policy.ServiceResource);
         Assert.Equal(profile.Domain, RedisAuthorizationStore.NormalizeDomain(policy.Domain));
         Assert.True(policy.ServiceActive);
         Assert.Contains(profile.ExpectedRole, policy.Roles ?? []);
-        output.WriteLine($"已核对：{fixture.PolicyKey}，角色={profile.ExpectedRole}，应用状态=ready。");
+        output.WriteLine($"已核对：{fixture.PolicyKey}，角色={profile.ExpectedRole}。");
     }
 
     [LiveRedisTheory]
@@ -80,6 +79,7 @@ public sealed class LiveRedisAuthorizationTests(LiveRedisFixture fixture, ITestO
         using var response = await client.GetAsync("/api/demo/orders");
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
+
 }
 
 public sealed class LiveRedisFixture : IAsyncLifetime
@@ -88,9 +88,6 @@ public sealed class LiveRedisFixture : IAsyncLifetime
     public AuthorizationApiFactory Factory { get; private set; } = null!;
     public LiveAuthorizationProfile Profile { get; private set; } = null!;
 
-    public string StateKey =>
-        $"{Factory.Settings.Redis.KeyPrefix}:rbac:api:app:" +
-        $"{RedisAuthorizationStore.QueryEscape(Profile.AppKey.Trim())}:state";
     public string PolicyKey
     {
         get
@@ -104,7 +101,6 @@ public sealed class LiveRedisFixture : IAsyncLifetime
                 : $"{key}:{RedisAuthorizationStore.QueryEscape(domain)}";
         }
     }
-    public RedisValue PolicyField => Profile.AppKey.Trim();
 
     public Task InitializeAsync()
     {
@@ -139,7 +135,6 @@ public sealed class LiveRedisFixture : IAsyncLifetime
 public sealed class LiveAuthorizationProfile
 {
     public string Subject { get; init; } = "";
-    public string AppKey { get; init; } = "";
     public string ServiceResource { get; init; } = "";
     public string Domain { get; init; } = "";
     public string ExpectedRole { get; init; } = "";
@@ -152,7 +147,7 @@ public sealed class LiveRedisFactAttribute : FactAttribute
     public LiveRedisFactAttribute()
     {
         if (!LiveRedisFixture.Enabled)
-            Skip = "设置 NEXUS_DEMO_RUN_LIVE_TESTS=1，使用当前 Redis 与用户 ID 执行只读授权验证。";
+            Skip = "需先部署新 String 协议；再设置 NEXUS_DEMO_RUN_LIVE_TESTS=1，使用当前 Redis 与用户 ID 执行只读 GET 验证。";
     }
 }
 
@@ -161,6 +156,6 @@ public sealed class LiveRedisTheoryAttribute : TheoryAttribute
     public LiveRedisTheoryAttribute()
     {
         if (!LiveRedisFixture.Enabled)
-            Skip = "设置 NEXUS_DEMO_RUN_LIVE_TESTS=1，使用当前 Redis 与用户 ID 执行只读授权验证。";
+            Skip = "需先部署新 String 协议；再设置 NEXUS_DEMO_RUN_LIVE_TESTS=1，使用当前 Redis 与用户 ID 执行只读 GET 验证。";
     }
 }

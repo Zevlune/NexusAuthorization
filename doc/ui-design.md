@@ -147,7 +147,7 @@ flowchart LR
 
 ### 保存生效
 
-角色编辑器、用户分配抽屉、服务关联、API 与菜单表单保存成功后直接生效：后端先提交业务表；Redis 启用时随后重建受影响应用的服务 API 记录，禁用时由数据库 current-policy 读取。单独保存或删除菜单节点只影响菜单 current-policy；保存角色时附带的菜单授权会走角色保存路径触发整体重建，但不改变 Service API 记录内容。没有「发布当前配置」按钮、版本说明、版本列表或历史快照页。完整事务与缓存语义见 [权限生效设计](permission-lifecycle.md) 与 [应用边界 RBAC 设计](rbac-v1-design.md)。
+角色编辑器、用户分配抽屉、服务关联、API 与菜单表单保存成功后直接生效：后端先提交业务表；只有影响服务 API 权限的保存才在 Redis 启用时触发 String 全量重算，禁用时由数据库 current-policy 读取。纯菜单编辑继续走独立 current-policy，不触发 Redis 发布。没有「发布当前配置」按钮、版本说明、版本列表或历史快照页。完整事务与缓存语义见 [权限生效设计](permission-lifecycle.md) 与 [应用边界 RBAC 设计](rbac-v1-design.md)。
 
 ### 权限模拟
 

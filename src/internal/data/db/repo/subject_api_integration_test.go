@@ -44,8 +44,7 @@ func TestSubjectAPIDirectRedisPublicationIntegration(t *testing.T) {
 
 	repo := NewRBACV1Repository(pool).WithPolicyCache(cache)
 	rbac := biz.NewRBACV1Service(repo)
-	storedApp, err := repo.SaveApplication(ctx, biz.Application{Key: app, DisplayName: app, Enabled: true})
-	if err != nil {
+	if _, err := repo.SaveApplication(ctx, biz.Application{Key: app, DisplayName: app, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.ReplaceApplicationServices(ctx, app, []string{service}); err != nil {
@@ -67,12 +66,12 @@ func TestSubjectAPIDirectRedisPublicationIntegration(t *testing.T) {
 	if err != nil || !decision.Allowed {
 		t.Fatalf("direct redis authorize = %+v, %v", decision, err)
 	}
-	identity := biz.SubjectAPIIdentity{ApplicationKey: app, Subject: subject, ServiceResource: service}
+	identity := biz.SubjectAPIIdentity{Subject: subject, ServiceResource: service}
 	before, err := cache.LoadSubjectAPIs(ctx, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before.ApplicationID != storedApp.ID || len(before.APIs) != 1 {
+	if before.ApplicationKey != "" || before.ApplicationID != uuid.Nil || len(before.APIs) != 1 {
 		t.Fatalf("published policy = %+v", before)
 	}
 
@@ -96,7 +95,10 @@ func TestSubjectAPIDirectRedisPublicationIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(afterMenu.APIs) != len(beforeMenu.APIs) || len(afterMenu.RoleCodes) != len(beforeMenu.RoleCodes) || afterMenu.ServiceResource != beforeMenu.ServiceResource || afterMenu.Subject != beforeMenu.Subject {
+	if len(afterMenu.APIs) != len(beforeMenu.APIs) ||
+		len(afterMenu.RoleCodes) != len(beforeMenu.RoleCodes) ||
+		afterMenu.ServiceResource != beforeMenu.ServiceResource ||
+		afterMenu.Subject != beforeMenu.Subject {
 		t.Fatalf("menu save changed service API Redis record: before=%+v after=%+v", beforeMenu, afterMenu)
 	}
 }

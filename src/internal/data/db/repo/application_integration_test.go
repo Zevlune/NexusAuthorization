@@ -166,8 +166,8 @@ func TestApplicationPermissionIntegration(t *testing.T) {
 	}
 	input["service_resource"] = s1
 	d, err = svc.Authorize(ctx, otherKey, input)
-	if err == nil && d.Allowed {
-		t.Fatalf("cross application leak %+v %v", d, err)
+	if err != nil || !d.Allowed {
+		t.Fatalf("shared service-user permission through another application %+v %v", d, err)
 	}
 	menus, err := svc.SubjectMenus(ctx, appKey, "u", "d")
 	if err != nil || len(menus) != 2 {
