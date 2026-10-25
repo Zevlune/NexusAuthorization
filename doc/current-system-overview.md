@@ -22,7 +22,7 @@
 | 按钮 | 菜单页面内的操作权限节点 | `orders:create`：创建订单 |
 | 角色 | 组合应用的菜单/按钮和已关联服务 API | 订单管理员 |
 | 主体与域 | 标识被授权的身份及其授权上下文 | `subject=user-001`，`domain=''`（默认域，可省略） |
-| 服务 API 授权记录 | Redis 启用时在保存业务表后重建、鉴权只读的记录；禁用时服务 API 使用数据库 current-policy | `PREFIX:<escaped app_key>:<escaped subject>:<escaped service>[:<escaped domain>]`，空域和 `global` 无 domain 后缀 |
+| 服务 API 授权 Hash | Redis 启用时在保存业务表后重建、鉴权只读；禁用时服务 API 使用数据库 current-policy | key：`PREFIX:<escaped service>:<escaped subject>[:<escaped domain>]`；type 为 HASH，field 为 trimmed 原文 app key，空域和 `global` 无 domain 后缀 |
 
 应用与服务是多对多：一个应用可关联多个服务，同一服务可被多个应用复用。API 属于服务，角色和菜单属于应用。关联服务不会自动给用户或角色授予 API 权限。
 
@@ -92,7 +92,7 @@ flowchart LR
 - 保存/导入期间显示加载状态并防止重复提交；失败后保留表单并展示错误。
 - 删除接口前需要确认。
 
-API 是共享目录。某个应用编辑服务的 API 元数据，会修改这条共享接口定义；各应用仍需分别配置角色授权。Redis 启用时，共享接口的启用、路径或删除变更会触发所有关联应用的服务 API 记录重建；禁用时该修改由数据库 current-policy 直接读取。导入目前逐条保存，不是整批原子事务；中途失败时，已成功写入的接口可能保留，重试通过已存在路径的跳过逻辑继续处理。
+API 是共享目录。某个应用编辑服务的 API 元数据，会修改这条共享接口定义；各应用仍需分别配置角色授权。Redis 启用时，共享接口的启用、路径或删除变更会触发所有关联应用重建各自的 Hash field；禁用时该修改由数据库 current-policy 直接读取。导入目前逐条保存，不是整批原子事务；中途失败时，已成功写入的接口可能保留，重试通过已存在路径的跳过逻辑继续处理。
 
 ### 2.4 菜单与按钮
 
@@ -133,10 +133,10 @@ API 授权与菜单/按钮授权是两组独立绑定。目前没有“按钮绑
 
 ### 2.7 权限模拟与保存生效
 
-- 权限模拟与运行时鉴权使用同一配置模式：Redis 启用时读取 Redis 记录，显式禁用时使用数据库 current-policy；两者都基于应用当前已保存的服务关联、接口、角色、主体绑定和菜单树，不读取草稿或历史版本。
-- 管理保存只提交数据库当前表；Redis 启用时随后重建受影响应用的服务 API 记录，禁用时不创建 Redis 客户端也不发布。没有发布按钮、版本说明、版本历史或 JSONB 快照表。
+- 权限模拟与运行时鉴权使用同一配置模式：Redis 启用时读取共享业务 Hash 中当前应用的 field，显式禁用时使用数据库 current-policy；两者都基于应用当前已保存的服务关联、接口、角色、主体绑定和菜单树，不读取草稿或历史版本。
+- 管理保存只提交数据库当前表；Redis 启用时随后重建受影响应用在业务 Hash 中的 field，禁用时不创建 Redis 客户端也不发布。没有发布按钮、版本说明、版本历史或 JSONB 快照表。
 - 数据库不保存任何缓存标记；`applications` 没有 `policy_token`，也没有角色/服务 revision 表，只保留四条业务保护触发器。
-- Redis 启用时，每次服务 API 鉴权直接读取该「应用 key＋主体＋服务＋归一化 domain」的 Redis 记录，不读取数据库；记录缺失、未 ready 或 Redis 不可用时直接拒绝。显式禁用时改用数据库 current-policy。详细规则见 [权限生效设计](permission-lifecycle.md)。
+- Redis 启用时，每次服务 API 鉴权先用应用级内部 `state` 判断 readiness，再按 `service + subject + domain` 读取业务 Hash 的当前应用 field；不读取数据库。应用未 ready、field 缺失或 Redis 不可用时失败关闭。显式禁用时改用数据库 current-policy。详细规则见 [权限生效设计](permission-lifecycle.md)。
 - 菜单 current-policy 路径始终读取当前业务表并在进程内编译，不受 Redis 开关控制；配置目录为远程模式时，服务目录读取发生在请求路径，目录读取失败会返回错误并拒绝放行。
 
 应用停用会立即阻止该应用的鉴权请求；撤销角色、删除接口或解除服务关联在保存提交后同样立即生效。
@@ -186,7 +186,7 @@ Content-Type: application/json
 }
 ```
 
-判断原因包括 `allowed`、`service_resource_required`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。Redis 启用时，每次服务 API 鉴权读取该「应用 key＋主体＋服务＋归一化 domain」的记录，再复用对应内容的进程内编译索引；Redis 记录缺失、未 ready 或不可用时直接拒绝，不回源数据库。显式禁用时，服务 API 使用数据库 current-policy 鉴权。匹配采用哈希、路径 Trie 和稀疏角色位图，详见 [鉴权匹配与性能](authorization-matching.md) 与 [Redis 接入说明](redis-integration.md)。响应不包含发布版本号；请求缺少必要字段、凭证不符或应用不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
+判断原因包括 `allowed`、`service_resource_required`、`endpoint_not_found`、`endpoint_disabled`、`endpoint_not_granted`、`ambiguous_endpoint`。Redis 启用时，每次服务 API 鉴权用 Lua 原子读取应用级内部 `state`，ready 后从共享业务 Hash 读取当前应用 field，再复用对应内容的进程内编译索引；应用未 ready、field 缺失或 Redis 不可用时失败关闭，不回源数据库。显式禁用时，服务 API 使用数据库 current-policy 鉴权。匹配采用哈希、路径 Trie 和稀疏角色位图，详见 [鉴权匹配与性能](authorization-matching.md) 与 [Redis 接入说明](redis-integration.md)。响应不包含发布版本号；请求缺少必要字段、凭证不符或应用不存在时，HTTP 层可能返回错误，不能一概当作正常的 deny 响应。
 
 Go SDK 已提供 `Check` 以及 HTTP 中间件 `Require(appKey, serviceResource, resolve, next)`。身份解析由接入服务负责；身份无效返回 401，鉴权错误或拒绝返回 403；SDK 请求默认有 3 秒超时。
 
@@ -279,7 +279,7 @@ RBAC v1 这些表没有 `is_deleted` 软删标记；当前没有发布版本、�
 
 还需区分规则所在层级：按钮必须是叶子、按钮不能作为父节点、不能把有子节点的菜单改为按钮，这些后端已经拒绝，数据库复合外键保证父子同应用，但“按钮必须挂在菜单下”仍主要由前端表单约束，不能说成数据库已完整保障。
 
-共享 API 的普通修改会立即影响所有关联应用。Redis 启用时，接口目录变更会触发所有关联应用的服务 API 记录重建；撤销角色、删除接口或解除服务关联在保存提交并重建后立即生效，应用整体停用会重建记录并把相关记录标记为 `service_active=false`。Redis 禁用时，这些修改由数据库 current-policy 在下一次鉴权时读取。共享接口的启用/删除仍需评估所有关联应用的影响范围。
+共享 API 的普通修改会立即影响所有关联应用。Redis 启用时，接口目录变更会触发所有关联应用重建各自的 Hash field；撤销角色、删除接口或解除服务关联在保存提交并重建后立即生效，应用整体停用会重建本应用 field 并标记为 `service_active=false`。Redis 禁用时，这些修改由数据库 current-policy 在下一次鉴权时读取。共享接口的启用/删除仍需评估所有关联应用的影响范围。
 
 ## 8. 代码依据
 

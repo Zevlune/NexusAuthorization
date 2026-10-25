@@ -16,7 +16,7 @@ Subject + Domain -> Application -> Role -> API Endpoint
 - 角色和菜单属于应用；角色只能授予应用已关联服务中的 API。
 - 菜单直接属于应用，不要求创建 OAuth 客户端。
 - 应用停用立即生效；API、角色、菜单和主体角色绑定在保存提交后立即生效。
-- 服务 API 鉴权模式由 `redis.enabled` 选择，默认 `true`。启用时，每个「应用 key＋主体＋服务＋归一化 domain」读取一条 Redis `SubjectAPIPolicy` 记录，不读取数据库、不回源；记录缺失、未 ready 或 Redis 不可用时直接拒绝。显式禁用时不创建 Redis 客户端，也不发布记录，运行时鉴权和模拟改用数据库 current-policy。菜单和全策略适配器始终走独立的 current-policy 路径。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
+- 服务 API 鉴权模式由 `redis.enabled` 选择，默认 `true`。启用时，先用应用级内部 `state` 判断 readiness，再按 `service + subject + domain` 对共享业务 Hash 执行 `HGET`，field 为 trimmed app key；不读取数据库、不回源。应用未 ready、field 缺失或 Redis 不可用时失败关闭。显式禁用时不创建 Redis 客户端，也不发布记录，运行时鉴权和模拟改用数据库 current-policy。菜单和全策略适配器始终走独立的 current-policy 路径。详见 [权限生效设计](permission-lifecycle.md)、[鉴权匹配与性能](authorization-matching.md) 和 [Redis 接入说明](redis-integration.md)。
 
 当前版本不包含显式 `deny`、策略文档、策略审批、数据行级/字段级权限、ABAC、用户组、组织架构，也不提供发布版本、历史快照和版本回滚接口。
 
@@ -288,16 +288,17 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 写入请求（角色 / 授权 / 菜单 / 绑定 / 服务关联 / API / 目录）
 -> 仓储检查与数据库唯一约束、触发器校验
 -> 提交当前业务表
--> Redis 启用：控制面把受影响应用置为 state=updating，删除旧记录、分批写入新记录
--> 全部写完后置为 state=ready
+-> Redis 启用：控制面把受影响应用内部 state 置为 updating
+-> 按应用 members 只 HDEL 本应用失效 field，再分批 HSET 本应用新 field
+-> 全部写完后置为内部 state=ready
 -> Redis 禁用：不创建 Redis 客户端、不发布，鉴权读取数据库 current-policy
 -> 提交后开始的鉴权请求使用新权限
 ```
 
-- Redis 启用时，每个「应用 key＋主体＋服务＋归一化 domain」的 `SubjectAPIPolicy` 是普通 JSON，无版本号、不设 TTL；保存的业务表写入与 Redis 重建由控制面顺序执行，数据库不保存任何缓存标记。
-- Redis 启用时，受影响应用在重建期间 `state=updating`，并发鉴权直接拒绝；删除先于写入、闸门最后打开，不会读到半写集合。任何一步失败都保持 `updating`，下一次重建重试。
+- Redis 启用时，业务 Hash key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`，field 为 trimmed app key，field value 为原始 `SubjectAPIPolicy` JSON，无版本号、无新 JSON 外壳。每个 field value 上限 16 MiB，Hash 不设 TTL；保存的业务表写入与 Redis 重建由控制面顺序执行，数据库不保存任何缓存标记。
+- Redis 启用时，应用级 `state/members/lock/requested/published` 位于 `PREFIX:rbac:api:app:<escaped app key>:*`。受影响应用在重建期间内部 `state=updating`，并发鉴权直接拒绝；按旧 `members` 只 `HDEL` 本应用失效 field，再 `HSET` 本应用新 field，最后打开闸门。撤权不删除其他应用字段，任何一步失败都保持 `updating`，下一次重建重试。
 - Redis 启用时，角色 API/菜单授权、主体角色绑定、应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用；纯菜单保存只影响 current-policy 路径。Redis 禁用时不执行发布。
-- Redis 启用时，鉴权（含权限模拟）只读 Redis，不读取数据库、不回源；记录缺失、`state=updating`、损坏或超时都拒绝。禁用时不连接 Redis，使用数据库 current-policy。
+- Redis 启用时，鉴权（含权限模拟）只读 Redis，不读取数据库、不回源；目标 field 缺失、应用未 ready、损坏或超时都拒绝。禁用时不连接 Redis，使用数据库 current-policy。
 - 提交前已开始读取的在途请求可以完成其已读到的判断；提交并重建后开始的请求使用新权限。
 
 菜单 current-policy 路径读取当前规范化业务表并计算内容摘要，在进程内编译，不受 Redis 开关控制。开关在重启后生效；从禁用切回启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定，以重建 Redis 记录。事务、单飞、缓存容量和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
@@ -347,8 +348,8 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 算法（以下为 `redis.enabled=true`，也是省略 YAML 时的默认值）：
 
 ```text
-1. 用 appKey、服务、subject 和归一化 domain 直接从 Redis 读取该身份的 SubjectAPIPolicy 记录（Lua 原子读取 state + record）。
-2. 应用未 ready、记录损坏或读取出错 -> 拒绝，不回退数据库；应用已发布但该身份没有记录 -> 正常 DENY（endpoint_not_granted）；记录存在时校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
+1. 用 appKey 定位应用级内部 `state`，ready 后以 `service + subject + normalized domain` 定位业务 Hash，并 `HGET` field 为 trimmed appKey 的 `SubjectAPIPolicy`；两条读取在同一个 Lua 中原子完成。
+2. 返回码保持 `1/2/0/-1`：`1` 为 field 存在，`2` 为应用 ready 但 field 缺失，`0` 为应用未发布，`-1` 为应用未 ready。`0`、`-1`、损坏或读取出错失败关闭，不回退数据库；`2` 形成正常 DENY（`endpoint_not_granted`）；`1` 校验大小、JSON 与身份，并复用内容哈希对应的本地编译索引。
 3. 通过 service_resource + method 定位路由集合，使用静态哈希或参数 Trie 匹配 Endpoint，固定路径段更多者优先；同优先级不同 Endpoint 冲突时拒绝。
 4. 记录已按 subject + 归一化 domain 聚合；`domain` 省略、空白或旧 `global` 都归一为空默认域。
 5. 目标 Endpoint 在该用户的 API 授权并集内且服务启用 -> ALLOW，否则 DENY。
@@ -372,7 +373,7 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 
 路径参数按单个非空路径段匹配，例如 `/orders/{id}` 不匹配 `/orders/1/items`，也不提供任意深度通配。
 
-应用不存在时接口返回 `404`，属于错误而不是正常 deny 响应；Redis 模式下应用从未发布（例如 Redis 刚清空、对账尚未完成）同样返回 `404`。服务未关联、主体未绑定角色、服务未启用、接口不存在或未被授予属于正常 deny 响应：Redis 模式下主体在该服务上没有记录时统一返回 `endpoint_not_granted`。应用停用时两种模式不同：数据库模式找不到启用应用返回 `404`，Redis 模式返回 deny `service_inactive`。
+应用不存在时接口返回 `404`，属于错误而不是正常 deny 响应；Redis 模式下应用从未发布（例如 Redis 刚清空、对账尚未完成）且内部 `state` 缺失时失败关闭。服务未关联、主体未绑定角色、服务未启用、接口不存在或未被授予属于正常 deny 响应：Redis 模式下应用 ready 但共享业务 Hash 中没有当前应用 field 时统一返回 `endpoint_not_granted`。应用停用时两种模式不同：数据库模式找不到启用应用返回 `404`，Redis 模式返回 deny `service_inactive`。
 
 ## 9. 主体菜单
 

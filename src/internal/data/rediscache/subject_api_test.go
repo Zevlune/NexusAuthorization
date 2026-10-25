@@ -96,14 +96,17 @@ func TestSubjectAPIRoundTripPlainJSONNoTTL(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity)
-	if want := cache.prefix + ":console:user-1001:orders:tenant-a"; key != want {
+	if want := cache.prefix + ":orders:user-1001:tenant-a"; key != want {
 		t.Fatalf("key = %q want %q", key, want)
 	}
-	// The value is the policy itself: no envelope, token, or checksum, and it
-	// never expires.
-	raw, err := server.Get(key)
-	if err != nil {
-		t.Fatal(err)
+	if got := server.Type(key); got != "hash" {
+		t.Fatalf("cached record type = %q want hash", got)
+	}
+	// The field value is the policy itself: no envelope, token, or checksum,
+	// and the shared hash never expires.
+	raw := server.HGet(key, policy.ApplicationKey)
+	if raw == "" {
+		t.Fatal("policy field is missing")
 	}
 	for _, banned := range []string{"checksum", "format", "payload", "token"} {
 		if strings.Contains(raw, banned) {
@@ -119,6 +122,21 @@ func TestSubjectAPIRoundTripPlainJSONNoTTL(t *testing.T) {
 	}
 	if len(members) != 1 || members[0] != key {
 		t.Fatalf("members = %v want [%s]", members, key)
+	}
+	if got, want := subjectAPIStateKey(cache.prefix, policy.ApplicationKey), cache.prefix+":rbac:api:app:console:state"; got != want {
+		t.Fatalf("state key = %q want %q", got, want)
+	}
+	if got, want := subjectAPIMembersKey(cache.prefix, policy.ApplicationKey), cache.prefix+":rbac:api:app:console:members"; got != want {
+		t.Fatalf("members key = %q want %q", got, want)
+	}
+	for name, got := range map[string]string{
+		"lock":      subjectAPILockKey(cache.prefix, policy.ApplicationKey),
+		"requested": subjectAPIRequestedKey(cache.prefix, policy.ApplicationKey),
+		"published": subjectAPIPublishedKey(cache.prefix, policy.ApplicationKey),
+	} {
+		if want := cache.prefix + ":rbac:api:app:console:" + name; got != want {
+			t.Fatalf("%s key = %q want %q", name, got, want)
+		}
 	}
 
 	markSubjectAPIReady(t, server, cache.prefix, policy.ApplicationKey)
@@ -191,15 +209,32 @@ func TestSubjectAPIKeyIsolatesScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	markSubjectAPIReady(t, server, cache.prefix, base.ApplicationKey)
+
+	// The application is a field, not part of the shared hash key.
+	billing := base
+	billing.ApplicationKey = "billing"
+	if got, want := SubjectAPIKey(cache.prefix, billing), SubjectAPIKey(cache.prefix, base); got != want {
+		t.Fatalf("application changed hash key: %q != %q", got, want)
+	}
+	if _, err := cache.LoadSubjectAPIs(ctx, billing); !errors.Is(err, biz.ErrNotFound) {
+		t.Fatalf("unpublished application field was served: %v", err)
+	}
+	markSubjectAPIReady(t, server, cache.prefix, billing.ApplicationKey)
+	if _, err := cache.LoadSubjectAPIs(ctx, billing); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("another application's field was served: %v", err)
+	}
+
 	for name, mutate := range map[string]func(*biz.SubjectAPIIdentity){
-		"app":     func(i *biz.SubjectAPIIdentity) { i.ApplicationKey = "billing" },
 		"domain":  func(i *biz.SubjectAPIIdentity) { i.Domain = "tenant-b" },
 		"user":    func(i *biz.SubjectAPIIdentity) { i.Subject = "user-1002" },
 		"service": func(i *biz.SubjectAPIIdentity) { i.ServiceResource = "billing" },
 	} {
 		identity := base
 		mutate(&identity)
-		if _, err := cache.LoadSubjectAPIs(ctx, identity); !errors.Is(err, biz.ErrNotFound) {
+		if got, original := SubjectAPIKey(cache.prefix, identity), SubjectAPIKey(cache.prefix, base); got == original {
+			t.Fatalf("%s did not change the shared hash key", name)
+		}
+		if _, err := cache.LoadSubjectAPIs(ctx, identity); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
 			t.Fatalf("%s scope leaked: %v", name, err)
 		}
 	}
@@ -210,7 +245,7 @@ func TestSubjectAPIKeyIsolatesScope(t *testing.T) {
 
 func TestSubjectAPIKeyEscapingAndGlobalAlias(t *testing.T) {
 	prefix := "nexus:test"
-	defaultKey := prefix + ":console:alice:orders"
+	defaultKey := prefix + ":orders:alice"
 	base := biz.SubjectAPIIdentity{ApplicationKey: "console", ApplicationID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Subject: "alice", ServiceResource: "orders", Domain: ""}
 	if got := SubjectAPIKey(prefix, base); got != defaultKey {
 		t.Fatalf("default-domain key = %q want %q", got, defaultKey)
@@ -227,31 +262,44 @@ func TestSubjectAPIKeyEscapingAndGlobalAlias(t *testing.T) {
 	left.Subject, left.ServiceResource = "a:b", "c"
 	right := base
 	right.Subject, right.ServiceResource = "a", "b:c"
-	if got, want := SubjectAPIKey(prefix, left), prefix+":console:a%3Ab:c"; got != want {
+	if got, want := SubjectAPIKey(prefix, left), prefix+":c:a%3Ab"; got != want {
 		t.Fatalf("left escaped key = %q want %q", got, want)
 	}
-	if got, want := SubjectAPIKey(prefix, right), prefix+":console:a:b%3Ac"; got != want {
+	if got, want := SubjectAPIKey(prefix, right), prefix+":b%3Ac:a"; got != want {
 		t.Fatalf("right escaped key = %q want %q", got, want)
 	}
 	escaped := biz.SubjectAPIIdentity{
 		ApplicationKey:  " tenant:console ",
-		Subject:         "alice:team",
-		ServiceResource: "orders/api",
-		Domain:          "tenant:a",
+		Subject:         " alice:team ",
+		ServiceResource: " orders/api ",
+		Domain:          " tenant:a ",
 	}
-	if got, want := SubjectAPIKey(prefix, escaped), prefix+":tenant%3Aconsole:alice%3Ateam:orders%2Fapi:tenant%3Aa"; got != want {
+	if got, want := SubjectAPIKey(prefix, escaped), prefix+":orders%2Fapi:alice%3Ateam:tenant%3Aa"; got != want {
 		t.Fatalf("escaped named-domain key = %q want %q", got, want)
+	}
+	if got, want := subjectAPIStateKey(prefix, escaped.ApplicationKey), prefix+":rbac:api:app:tenant%3Aconsole:state"; got != want {
+		t.Fatalf("escaped state key = %q want %q", got, want)
+	}
+	if got, want := subjectAPIMembersKey(prefix, escaped.ApplicationKey), prefix+":rbac:api:app:tenant%3Aconsole:members"; got != want {
+		t.Fatalf("escaped members key = %q want %q", got, want)
 	}
 
 	cache, server := testCache(t)
 	ctx := context.Background()
-	identity := testSubjectAPIIdentity()
-	identity.Domain = "global"
-	if err := cache.StoreSubjectAPIs(ctx, testSubjectAPIPolicy(identity)); err != nil {
+	escaped.Domain = "global"
+	if err := cache.StoreSubjectAPIs(ctx, testSubjectAPIPolicy(escaped)); err != nil {
 		t.Fatal(err)
 	}
-	markSubjectAPIReady(t, server, cache.prefix, identity.ApplicationKey)
-	alias := identity
+	key := SubjectAPIKey(cache.prefix, escaped)
+	fields, err := server.HKeys(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0] != "tenant:console" {
+		t.Fatalf("application fields = %v want [tenant:console]", fields)
+	}
+	markSubjectAPIReady(t, server, cache.prefix, escaped.ApplicationKey)
+	alias := escaped
 	alias.Domain = ""
 	if _, err := cache.LoadSubjectAPIs(ctx, alias); err != nil {
 		t.Fatalf("global alias store did not serve the default domain: %v", err)
@@ -279,7 +327,7 @@ func TestSubjectAPIGateBlocksStaleReads(t *testing.T) {
 	if _, err := cache.LoadSubjectAPIs(ctx, policy.SubjectAPIIdentity); err == nil || errors.Is(err, biz.ErrNotFound) {
 		t.Fatalf("served a gated record: %v", err)
 	}
-	if _, err := server.Get(SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity)); err != nil {
+	if raw := server.HGet(SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity), policy.ApplicationKey); raw == "" {
 		t.Fatal("blocked read deleted the record it should only hide")
 	}
 	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, policy.ApplicationKey)); state != subjectAPIStateUpdating {
@@ -330,7 +378,7 @@ func TestSubjectAPIReplaceRemovesDepartedUsers(t *testing.T) {
 	if _, err := cache.LoadSubjectAPIs(ctx, bob.SubjectAPIIdentity); !errors.Is(err, biz.ErrNotFound) {
 		t.Fatalf("departed user still served: %v", err)
 	}
-	if _, err := server.Get(SubjectAPIKey(cache.prefix, bob.SubjectAPIIdentity)); err == nil {
+	if raw := server.HGet(SubjectAPIKey(cache.prefix, bob.SubjectAPIIdentity), appKey); raw != "" {
 		t.Fatal("departed record not deleted")
 	}
 	if _, err := cache.LoadSubjectAPIs(ctx, alice.SubjectAPIIdentity); err != nil {
@@ -361,14 +409,124 @@ func TestSubjectAPIReplaceEmptyClearsOldUsers(t *testing.T) {
 	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, appKey)); state != subjectAPIStateReady {
 		t.Fatalf("state = %q", state)
 	}
-	if _, err := server.Get(SubjectAPIKey(cache.prefix, stale.SubjectAPIIdentity)); err == nil {
+	if raw := server.HGet(SubjectAPIKey(cache.prefix, stale.SubjectAPIIdentity), appKey); raw != "" {
 		t.Fatal("stale record survived an empty replace")
 	}
 	if members, _ := server.SMembers(subjectAPIMembersKey(cache.prefix, appKey)); len(members) != 0 {
 		t.Fatalf("members = %v", members)
 	}
-	if _, err := cache.LoadSubjectAPIs(ctx, stale.SubjectAPIIdentity); !errors.Is(err, biz.ErrNotFound) {
+	if _, err := cache.LoadSubjectAPIs(ctx, stale.SubjectAPIIdentity); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
 		t.Fatalf("cleared scope still resolved: %v", err)
+	}
+}
+
+func TestSubjectAPIApplicationsShareHashWithoutSharingData(t *testing.T) {
+	cache, server := testCache(t)
+	ctx := context.Background()
+	consoleIdentity := testSubjectAPIIdentity()
+	billingIdentity := consoleIdentity
+	billingIdentity.ApplicationKey = "billing"
+	billingIdentity.ApplicationID = uuid.New()
+
+	consolePolicy := testSubjectAPIPolicy(consoleIdentity)
+	billingPolicy := testSubjectAPIPolicy(billingIdentity)
+	billingPolicy.RoleCodes = []string{"billing-only"}
+
+	publishSubjectAPIs(t, cache, consoleIdentity.ApplicationKey, consolePolicy)
+	publishSubjectAPIs(t, cache, billingIdentity.ApplicationKey, billingPolicy)
+
+	key := SubjectAPIKey(cache.prefix, consoleIdentity)
+	if got := SubjectAPIKey(cache.prefix, billingIdentity); got != key {
+		t.Fatalf("applications use different hashes: %q != %q", got, key)
+	}
+	if got := server.Type(key); got != "hash" {
+		t.Fatalf("cached record type = %q want hash", got)
+	}
+	fields, err := server.HKeys(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fields, ","); got != "billing,console" {
+		t.Fatalf("application fields = %q want billing,console", got)
+	}
+	for _, policy := range []biz.SubjectAPIPolicy{consolePolicy, billingPolicy} {
+		if raw := server.HGet(key, policy.ApplicationKey); raw == "" {
+			t.Fatalf("%s field is missing", policy.ApplicationKey)
+		}
+		loaded, err := cache.LoadSubjectAPIs(ctx, policy.SubjectAPIIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.ApplicationKey != policy.ApplicationKey {
+			t.Fatalf("loaded application = %q want %q", loaded.ApplicationKey, policy.ApplicationKey)
+		}
+	}
+
+	// Revoking A's grants updates only A's field.
+	consolePolicy.APIs = nil
+	consolePolicy.RoleCodes = []string{"revoked"}
+	publishSubjectAPIs(t, cache, consoleIdentity.ApplicationKey, consolePolicy)
+	revoked, err := cache.LoadSubjectAPIs(ctx, consoleIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillShared, err := cache.LoadSubjectAPIs(ctx, billingIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revoked.APIs) != 0 || strings.Join(stillShared.RoleCodes, ",") != "billing-only" {
+		t.Fatalf("revoke leaked across applications: A=%+v B=%+v", revoked, stillShared)
+	}
+
+	// Replacing A with an empty set removes only A's field.
+	publishSubjectAPIs(t, cache, consoleIdentity.ApplicationKey)
+	if raw := server.HGet(key, consoleIdentity.ApplicationKey); raw != "" {
+		t.Fatal("empty replace retained A's field")
+	}
+	if raw := server.HGet(key, billingIdentity.ApplicationKey); raw == "" {
+		t.Fatal("empty replace deleted B's field")
+	}
+	if _, err := cache.LoadSubjectAPIs(ctx, consoleIdentity); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("A's removed field = %v", err)
+	}
+	stillShared, err = cache.LoadSubjectAPIs(ctx, billingIdentity)
+	if err != nil || strings.Join(stillShared.RoleCodes, ",") != "billing-only" {
+		t.Fatalf("B after A empty replace = %+v, %v", stillShared, err)
+	}
+}
+
+func TestSubjectAPIGateIsApplicationScoped(t *testing.T) {
+	cache, server := testCache(t)
+	ctx := context.Background()
+	consoleIdentity := testSubjectAPIIdentity()
+	billingIdentity := consoleIdentity
+	billingIdentity.ApplicationKey = "billing"
+	billingIdentity.ApplicationID = uuid.New()
+	consolePolicy := testSubjectAPIPolicy(consoleIdentity)
+	billingPolicy := testSubjectAPIPolicy(billingIdentity)
+
+	publishSubjectAPIs(t, cache, consoleIdentity.ApplicationKey, consolePolicy)
+	publishSubjectAPIs(t, cache, billingIdentity.ApplicationKey, billingPolicy)
+	lease := leaseFor(t, cache, consoleIdentity.ApplicationKey)
+	if err := lease.Block(ctx, []string{consoleIdentity.ApplicationKey}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cache.LoadSubjectAPIs(ctx, consoleIdentity); err == nil || errors.Is(err, biz.ErrNotFound) {
+		t.Fatalf("served gated application A: %v", err)
+	}
+	if _, err := cache.LoadSubjectAPIs(ctx, billingIdentity); err != nil {
+		t.Fatalf("gating A blocked B: %v", err)
+	}
+	key := SubjectAPIKey(cache.prefix, billingIdentity)
+	if raw := server.HGet(key, billingIdentity.ApplicationKey); raw == "" {
+		t.Fatal("gating A changed B's shared hash field")
+	}
+	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, consoleIdentity.ApplicationKey)); state != subjectAPIStateUpdating {
+		t.Fatalf("A state = %q", state)
+	}
+	if state, _ := server.Get(subjectAPIStateKey(cache.prefix, billingIdentity.ApplicationKey)); state != subjectAPIStateReady {
+		t.Fatalf("B state = %q", state)
 	}
 }
 
@@ -482,10 +640,7 @@ func TestSubjectAPILostLeaseCannotWrite(t *testing.T) {
 	if err := old.Replace(ctx, appKey, []biz.SubjectAPIPolicy{stale}); !errors.Is(err, ErrSubjectAPILeaseLost) {
 		t.Fatalf("expired lease replaced records: %v", err)
 	}
-	raw, err := server.Get(SubjectAPIKey(cache.prefix, identity))
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := server.HGet(SubjectAPIKey(cache.prefix, identity), appKey)
 	if strings.Contains(raw, "revoked-role") {
 		t.Fatal("stale rebuild overwrote the newer record")
 	}
@@ -568,9 +723,7 @@ func TestSubjectAPIStoredValueIsPlainPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := server.Set(SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity), string(raw)); err != nil {
-		t.Fatal(err)
-	}
+	server.HSet(SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity), policy.ApplicationKey, string(raw))
 	loaded, err := cache.LoadSubjectAPIs(ctx, policy.SubjectAPIIdentity)
 	if err != nil {
 		t.Fatal(err)
@@ -591,9 +744,7 @@ func TestSubjectAPIClosedOnCorruptOversizeAndMismatch(t *testing.T) {
 	key := SubjectAPIKey(cache.prefix, policy.SubjectAPIIdentity)
 	request := policy.SubjectAPIIdentity
 
-	if err := server.Set(key, "{not json"); err != nil {
-		t.Fatal(err)
-	}
+	server.HSet(key, request.ApplicationKey, "{not json")
 	if _, err := cache.LoadSubjectAPIs(ctx, request); err == nil {
 		t.Fatal("accepted corrupt JSON")
 	}
@@ -601,16 +752,12 @@ func TestSubjectAPIClosedOnCorruptOversizeAndMismatch(t *testing.T) {
 	otherIdentity := policy
 	otherIdentity.Subject = "user-9999"
 	otherRaw, _ := json.Marshal(otherIdentity)
-	if err := server.Set(key, string(otherRaw)); err != nil {
-		t.Fatal(err)
-	}
+	server.HSet(key, request.ApplicationKey, string(otherRaw))
 	if _, err := cache.LoadSubjectAPIs(ctx, request); err == nil {
 		t.Fatal("accepted an identity that does not match the key")
 	}
 
-	if err := server.Set(key, strings.Repeat("x", maxSubjectAPIBytes+1)); err != nil {
-		t.Fatal(err)
-	}
+	server.HSet(key, request.ApplicationKey, strings.Repeat("x", maxSubjectAPIBytes+1))
 	if _, err := cache.LoadSubjectAPIs(ctx, request); err == nil {
 		t.Fatal("accepted an oversized payload")
 	}
@@ -627,6 +774,29 @@ func TestSubjectAPIClosedOnCorruptOversizeAndMismatch(t *testing.T) {
 	}
 	if _, err := cache.RequestSubjectAPIRefresh(ctx, []string{policy.ApplicationKey}); err == nil {
 		t.Fatal("outage ignored on refresh request")
+	}
+}
+
+func TestSubjectAPIDoesNotReadLegacyStringKey(t *testing.T) {
+	cache, server := testCache(t)
+	ctx := context.Background()
+	identity := testSubjectAPIIdentity()
+	policy := testSubjectAPIPolicy(identity)
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyKey := cache.prefix + ":console:user-1001:orders:tenant-a"
+	if err := server.Set(legacyKey, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	markSubjectAPIReady(t, server, cache.prefix, identity.ApplicationKey)
+
+	if _, err := cache.LoadSubjectAPIs(ctx, identity); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("legacy string fallback = %v", err)
+	}
+	if raw := server.HGet(SubjectAPIKey(cache.prefix, identity), identity.ApplicationKey); raw != "" {
+		t.Fatalf("load populated a hash field from the legacy string: %s", raw)
 	}
 }
 

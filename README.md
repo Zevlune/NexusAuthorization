@@ -10,16 +10,19 @@
 | `doc/` | 使用、开发、部署、接口和设计文档 |
 | `migrations/` | PostgreSQL 首次建库、完整 schema 与既有库升级脚本 |
 | `sdk/` | Go 业务服务接入 SDK |
+| `demo/` | .NET 10 单项目示例：Swagger、NexusAuth 登录与 StackExchange.Redis 鉴权 |
 | `docker-compose-dev.yml` | 本地前后端与 PostgreSQL |
 | `docker-compose.yml` | 前后端连接外部 PostgreSQL |
 
 文档入口：[标准使用手册](doc/user-guide.md) · [系统设计](doc/system-design.md) · [运维操作手册](doc/operations-manual.md) · [开发与二次开发](doc/development-guide.md) · [文档索引](doc/README.md) · [快速开始](doc/quick-start.md)。
 
+.NET 接入示例：[Demo 启动与联调](demo/README.md)。
+
 当前系统设计和实现边界见 [系统设计](doc/system-design.md)；实际前端操作流程见 [UI 说明](doc/ui-design.md)。
 
 NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-users.md)。
 
-服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，每个「应用 key + 主体 + 服务 + 归一化 domain」保存一条 Redis 记录，key 为 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:<QUERY_ESCAPE(subject)>:<QUERY_ESCAPE(service)>`；仅当归一化 domain 非空时追加 `:<QUERY_ESCAPE(domain)>`，空域和 `global` 不加后缀。值为普通 `SubjectAPIPolicy` JSON；管理端保存业务表后同步重建记录，鉴权只读 Redis，连接失败、未就绪、记录缺失或损坏时拒绝，不回源数据库。默认前缀为 `nexusauthorization-dev`，生产为 `nexusauthorization-prod`。启用模式要求启动时 `redis.url` 非空。配置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。菜单与全策略适配器始终走独立的 current-policy 路径，不受该开关控制。数据库只保存业务配置，不保存 `policy_token`、角色/服务 revision 或发布历史。切换到新 key 结构或新前缀后需重建授权记录，旧 key 不自动读取。key、闸门、写入顺序和切换规则见 [Redis 接入说明](doc/redis-integration.md)，保存生效与撤权规则见 [权限生效设计](doc/permission-lifecycle.md)。
+服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，同一服务、主体和归一化 domain 的业务授权存为一个 Redis HASH，key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`；应用不再占据业务 key 段，而是 HASH field：`field = trim(app_key)`，field value 为原始 `SubjectAPIPolicy` JSON，无新 JSON 外壳。domain 为空或 `global` 时无后缀。该结构让共享服务按应用在 field 层隔离权限。应用 readiness、members、lock、requested 和 published 统一位于 `PREFIX:rbac:api:app:<QueryEscape(trim(app_key))>:*`。鉴权 Lua 每次原子读取内部 `state`，仅在 `ready` 时再 `HGET` 业务 HASH 的目标 field；连接失败、未就绪、field 缺失或内容损坏时拒绝，不回源数据库。field value 上限 16 MiB、Hash 不设 TTL。默认前缀为 `nexusauthorization:dev`，生产为 `nexusauthorization:prod`；配置的前缀已包含环境，key 中不再重复环境段。启用模式要求启动时 `redis.url` 非空。配置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。菜单与全策略适配器始终走独立的 current-policy 路径，不受该开关控制。数据库只保存业务配置，不保存 `policy_token`、角色/服务 revision 或发布历史。新协议不自动迁移或读取旧 String key；部署和定向清理要求见 [Redis 接入说明](doc/redis-integration.md)，保存生效与撤权规则见 [权限生效设计](doc/permission-lifecycle.md)。
 
 API 鉴权使用静态路径哈希、参数路径 Trie 和角色位图。服务 API 入口按「用户 × 服务」聚合授权并复用进程内编译索引；菜单与全策略适配器走独立的 current-policy 编译索引。数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
 

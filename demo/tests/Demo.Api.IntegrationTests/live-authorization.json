@@ -1,0 +1,20 @@
+{
+  "Subject": "51b21204-54ab-4da6-ad83-d14f72ced46f",
+  "AppKey": "bugmanager.admin",
+  "ServiceResource": "nexusauthorization.demo.api",
+  "Domain": "",
+  "ExpectedRole": "order-review",
+  "AllowedEndpoints": [
+    "GET /api/demo/orders"
+  ],
+  "DeniedReasons": {
+    "GET /api/demo/orders/1": "endpoint_not_granted",
+    "GET /api/demo/products": "endpoint_not_found",
+    "GET /api/demo/products/1": "endpoint_not_found",
+    "POST /api/demo/products": "endpoint_not_found",
+    "PUT /api/demo/products/1": "endpoint_not_found",
+    "DELETE /api/demo/products/1": "endpoint_not_found",
+    "GET /api/demo/reports/summary": "endpoint_not_found",
+    "POST /api/demo/reports/export": "endpoint_not_found"
+  }
+}

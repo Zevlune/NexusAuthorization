@@ -29,7 +29,7 @@ func (c RedisConfig) Prefix() string {
 	if value := strings.TrimSpace(c.KeyPrefix); value != "" {
 		return value
 	}
-	return "nexusauthorization-dev"
+	return "nexusauthorization:dev"
 }
 
 func (c RedisConfig) TTLDuration() (time.Duration, error) {

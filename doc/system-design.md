@@ -43,7 +43,7 @@ flowchart LR
 | Dashboard | 登录后的应用选择、资源配置、角色编辑、用户分配和权限模拟 | 浏览器 session/local storage 保存页面状态；权限数据由 API 提供 |
 | API Server | 认证、管理 API、授权决策、目录适配、事务边界和错误映射 | 无状态进程；会话密钥和数据库由外部存储提供，Redis 启用时再连接 Redis |
 | PostgreSQL | 业务配置、约束和业务保护触发器 | 业务配置的唯一事实来源；Redis 禁用时也是服务 API current-policy 鉴权的数据来源；不保存缓存标记、revision 或发布历史 |
-| Redis | 启用模式下保存服务 API 授权记录（每条「应用 key＋主体＋服务＋归一化 domain」一条记录，含 `state`/`members` 辅助 key） | 仅在 `redis.enabled=true` 时使用；记录缺失或不 ready 时拒绝，不回源数据库 |
+| Redis | 启用模式下按 `service + subject + domain` 保存共享业务 Hash，应用 key 是 field；每个应用另有 `rbac:api:app` 元数据 | 仅在 `redis.enabled=true` 时使用；应用未 ready 或 field 缺失时拒绝，不回源数据库 |
 | OIDC Provider | 管理端登录、用户身份和会话上游 | 外部身份系统 |
 | Service Catalog | 服务资源目录 | local 模式使用本地表；nexusauth 模式从远程目录读取 |
 | SCIM Directory | 管理端用户搜索和分页 | 用户资料不落库 |
@@ -124,9 +124,11 @@ flowchart LR
 
 ## 6. 运行时授权与缓存
 
-`redis.enabled` 默认 `true`，省略 YAML 时也为 `true`。启用时，运行时服务 API 授权（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）直接以 Redis 为来源。每个「应用 key＋主体＋服务＋归一化 domain」保存一条普通 `SubjectAPIPolicy` JSON，key 为 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:<QUERY_ESCAPE(subject)>:<QUERY_ESCAPE(service)>[:<QUERY_ESCAPE(normalized domain)>]`，单条上限 16 MiB、不设 TTL；空域和 `global` 不追加 domain 后缀。应用另有 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:state` 写入闸门和 `PREFIX:<QUERY_ESCAPE(trimmed app_key)>:members` 记录集合两个辅助 key。鉴权请求只读这些记录：`ready` 且有记录时校验身份、大小和 JSON，再按内容哈希复用进程内编译索引（默认上限 1024 条，并发加载用 30 秒 singleflight 合并）；记录缺失、`state=updating`、身份不匹配、损坏、超时或 Redis 不可用都直接拒绝，不读取数据库放行。启用模式要求启动时 `redis.url` 非空。
+`redis.enabled` 默认 `true`，省略 YAML 时也为 `true`。启用时，运行时服务 API 授权（`POST /api/v1/authorize` 和 `POST /api/v1/rbac-v1/simulate`）直接以 Redis 为来源。同一 `service + subject + normalized domain` 共用业务 Hash，key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`；`trim(app_key)` 是 field 名，field value 是普通 `SubjectAPIPolicy` JSON。应用没有业务 key 段；空域和 `global` 不追加 domain 后缀，具名域分别使用独立 Hash。每个 field value 上限 16 MiB，Hash 不设 TTL。
 
-管理端保存业务表后，控制面同步重建受影响应用的 Redis 记录：先把应用置为 `updating`，依据旧 `members` 删除被取代的记录，分批写入新记录（每批最多 64 条），全部写完后置为 `ready`；任何一步失败都保持 `updating`，期间并发鉴权持续拒绝。服务资源变更重建所有关联该服务的应用。
+应用级 `state`、`members`、`lock`、`requested` 和 `published` 全部位于 `PREFIX:rbac:api:app:<QueryEscape(trim(app_key))>:*`。鉴权请求用一次 Lua 原子读取内部 `state` 和目标 field：返回码 `1` 表示 field 存在，`2` 表示应用 ready 但 field 缺失，`0` 表示应用未发布，`-1` 表示应用未 ready。只有 `1` 才校验身份、大小和 JSON，再按内容哈希复用进程内编译索引（默认上限 1024 条，并发加载用 30 秒 singleflight 合并）；`2` 返回正常 deny，`0`、`-1`、身份不匹配、损坏、超时或 Redis 不可用都失败关闭。启用模式要求启动时 `redis.url` 非空。
+
+管理端保存业务表后，控制面同步重建受影响应用的 field：先把该应用内部 `state` 置为 `updating`，依据旧 `members` 只对本应用已移除的身份执行 `HDEL`，再分批对本应用新增或变化的身份执行 `HSET`（每批最多 64 条），全部写完后置为 `ready`；任何一步失败都保持 `updating`，期间并发鉴权持续拒绝。撤权只影响当前应用 field，不删除共享 Hash 中其他应用字段。服务资源变更重建所有关联该服务的应用。
 
 显式设置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 使用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。开关在重启后生效；重新启用时，先设置 `redis.enabled=true` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定以触发重建；禁用期间修改的权限不会自动进入旧 Redis 记录。
 
@@ -138,7 +140,7 @@ flowchart LR
 - 应用内角色的稀疏位图；
 - `subject + domain` 到角色位图的索引。
 
-应用级索引只服务于当前应用和当前服务目录摘要；保存提交后新的内容 token 使旧索引失效。Redis 模式的服务 API 索引只编译该服务的 Catalog 与用户 API 并集，并随 Redis 记录内容变化失效。Redis 保存路径按应用展开全部「主体 × 域 × 服务」记录，空间随绑定与服务数量增长。Redis 模式下要求 Redis 可用：不可用或不 ready 时直接拒绝，不回源；Redis 禁用时服务 API 使用数据库 current-policy。菜单 current-policy 路径始终不依赖 Redis。
+应用级索引只服务于当前应用和当前服务目录摘要；保存提交后新的内容 token 使旧索引失效。Redis 模式的服务 API 索引只编译该服务的 Catalog 与用户 API 并集，并随目标 Hash field value 变化失效。Redis 保存路径按应用展开 `subject × domain × service` field，空间随绑定与服务数量增长。Redis 模式下要求 Redis 可用：不可用或不 ready 时直接拒绝，不回源；Redis 禁用时服务 API 使用数据库 current-policy。菜单 current-policy 路径始终不依赖 Redis。
 
 详细匹配规则和基准见 [鉴权匹配与性能](authorization-matching.md) 与 [Redis 接入说明](redis-integration.md)。
 
@@ -157,8 +159,8 @@ flowchart LR
 - PostgreSQL 事务提交前的写入不会对新请求可见；提交成功后配置立即生效。
 - Redis 模式下事务回滚时不重建 Redis，服务 API 记录保持上一份一致状态；禁用模式不执行 Redis 重建。
 - 已经读到旧记录的在途请求可能完成旧判断；保存后的重建在下一次鉴权即可见。
-- Redis 模式下，角色 API 授权、接口目录、用户角色和角色启停提交后触发受影响应用的整体重建；替换期间 `state=updating`，并发鉴权直接拒绝，不会读到半写集合。
-- Redis 模式下服务 API 鉴权只读 Redis，记录缺失或不 ready 时拒绝，不回源数据库；显式禁用后使用数据库 current-policy。
+- Redis 模式下，角色 API 授权、接口目录、用户角色和角色启停提交后触发受影响应用的 field 重建；替换期间内部 `state=updating`，并发鉴权直接拒绝，不会读到半写集合，也不会删除其他应用 field。
+- Redis 模式下服务 API 鉴权只读 Redis，目标 field 缺失或应用不 ready 时拒绝，不回源数据库；显式禁用后使用数据库 current-policy。
 - 目录读取失败时不能用无法验证的旧服务目录放行请求。
 - Swagger 导入逐条写入，不是整批原子事务；中途失败时已成功写入的端点会保留，重试会跳过已存在的 `method + path_template`。
 - 删除服务资源、取消应用服务关联、删除有子节点菜单等操作在引用未清理时返回冲突。
@@ -170,7 +172,7 @@ flowchart LR
 
 1. 在 `internal/biz` 增加业务规则，在 `internal/data/db/repo` 增加持久化，不要在 HTTP Handler 中直接写 SQL。
 2. 新增管理接口时同步更新路由、统一错误映射、Swagger 文档、前端 API 封装和接口测试。
-3. 新增权限维度时同时设计数据库约束、current-policy 策略编译、Redis 启用时的记录重建、模拟接口和 SDK 输入，避免只改管理端表单。
+3. 新增权限维度时同时设计数据库约束、current-policy 策略编译、Redis 启用时的 Hash field 与应用元数据重建、模拟接口和 SDK 输入，避免只改管理端表单。
 4. 新增外部目录时实现 `ServiceResourceCatalog` 或独立客户端，并在启动配置校验阶段失败，而不是在运行时静默降级。
 5. 新增数据库字段或约束时先修改完整初始 schema，并在独立 PostgreSQL 空库上验证初始化结果。
 
@@ -179,7 +181,7 @@ flowchart LR
 - 当前默认 `/api/v1/authorize` 没有配置服务凭证，统一 Open API Token 管理接入前需要按部署环境配置服务到服务认证。
 - Dashboard 的权限中心侧栏是前端内置导航；它与业务应用的菜单资源是两套数据。
 - 用户资料和组织关系由 NexusAuth 管理，权限中心只保存主体字符串和域。
-- Redis 模式的服务 API 授权记录在保存时按应用展开「主体 × 域 × 服务」，角色成员很多时会产生 Redis 空间开销；系统不共享全应用权限位图。
+- Redis 模式的服务 API 授权 field 在保存时按应用展开 `主体 × 域 × 服务`，角色成员很多时会产生 Redis 空间开销；Hash key 可跨应用共享，但权限位图仍按应用隔离。
 - 没有审计事件查询页面、策略版本、审批和回滚。
 - 健康检查是存活检查，不是完整依赖探针。
 

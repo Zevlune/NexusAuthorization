@@ -1,0 +1,91 @@
+@baseUrl = http://localhost:5055
+@accessToken = replace-with-demo-access-token
+
+### 健康检查（匿名）
+GET {{baseUrl}}/health
+
+### 连通性检查（匿名）
+GET {{baseUrl}}/api/public/ping
+
+### Demo 信息（匿名）
+GET {{baseUrl}}/api/public/info
+
+### 当前用户（仅认证）
+# Cookie 登录请在浏览器新标签打开 http://localhost:5055/api/auth/login。
+# 此文件里的 Bearer 请求需替换 accessToken，密钥不要提交到仓库。
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{accessToken}}
+
+### 权限行为
+# 这里使用 AuthorizationCenter:AppKey=bugmanager.admin、ServiceResource=nexusauthorization.demo.api、Domain=""。
+# 业务请求会先读取 PREFIX:rbac:api:app:<escapedApp>:state，ready 后从公开业务 Hash 读取当前用户策略。
+# 当前 PREFIX=nexusauthorization:prod；公开业务 key 不含 AppKey，Hash field 为 trim 后的 AppKey（不 URL 编码）。
+# 公开业务 key 为 PREFIX:<escapedService>:<escapedSubject>[:<escapedDomain>]。
+# 未登录返回 401；已登录但没有可用的 NexusAuthorization 授权返回 403。
+# 请求方法和完整路径都会参与 Catalog 匹配，路径参数也参与鉴权。
+# 先完成 Demo 应用关联服务、Swagger 导入、角色 API 授权和 ready 发布，业务请求才能成功。
+
+### 订单列表（认证 + Redis 授权）
+GET {{baseUrl}}/api/demo/orders
+Authorization: Bearer {{accessToken}}
+
+### 订单详情：GET 方法和 /api/demo/orders/{id} 路径共同参与鉴权
+GET {{baseUrl}}/api/demo/orders/1
+Authorization: Bearer {{accessToken}}
+
+### 商品列表（认证 + Redis 授权）
+GET {{baseUrl}}/api/demo/products
+Authorization: Bearer {{accessToken}}
+
+### 商品详情：GET 方法和带路径参数的路径共同参与鉴权
+GET {{baseUrl}}/api/demo/products/1
+Authorization: Bearer {{accessToken}}
+
+### 创建商品：POST 方法参与鉴权；有权时返回 201，数据仅回显不保存
+POST {{baseUrl}}/api/demo/products
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "演示商品",
+  "price": 49.90
+}
+
+### 更新商品：PUT 方法和带路径参数的路径共同参与鉴权
+PUT {{baseUrl}}/api/demo/products/1
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "演示商品更新",
+  "price": 59.90
+}
+
+### 删除商品：DELETE 方法和带路径参数的路径共同参与鉴权
+DELETE {{baseUrl}}/api/demo/products/1
+Authorization: Bearer {{accessToken}}
+
+### 请求体验证：先通过认证和 Redis 授权，参数不合法时返回 400
+POST {{baseUrl}}/api/demo/products
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "name": "",
+  "price": -1
+}
+
+### 报表汇总（认证 + Redis 授权）
+GET {{baseUrl}}/api/demo/reports/summary
+Authorization: Bearer {{accessToken}}
+
+### 导出 CSV：POST 方法和完整路径参与 Redis 授权
+POST {{baseUrl}}/api/demo/reports/export
+Authorization: Bearer {{accessToken}}
+
+### 未登录调用业务接口返回 401
+GET {{baseUrl}}/api/demo/orders
+
+### 清除本地 Cookie，浏览器继续访问返回的 logoutUrl 结束 SSO
+# 本地 Cookie 应在浏览器中调用本接口；此处无 Cookie 时返回空 logoutUrl。
+POST {{baseUrl}}/api/auth/logout

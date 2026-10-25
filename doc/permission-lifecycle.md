@@ -8,25 +8,25 @@
 
 默认域是数据库非 NULL 空串 `''`：省略 `domain` 就是使用默认域。旧字符串 `global` 是默认域的兼容别名，与空串指向同一组绑定；其它非空具名域仍按域隔离，不会被合并，也不会因为省略 `domain` 而获得具名域权限。
 
-服务 API 鉴权默认使用 Redis，`redis.enabled` 省略时也为 `true`。启用时，管理端保存业务表后，控制面把受影响应用整体重建为新的 Redis 记录：先置 `updating` 闸门，删除被取代的旧记录、写入新记录，全部完成后再置 `ready`。鉴权请求只读 Redis，不读取数据库，也不回源；连接失败、应用未 ready、记录缺失、身份不匹配、损坏或超时都直接拒绝。启用要求启动时 `redis.url` 非空。显式配置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 后，服务 API 改用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。key、值、闸门和切换细节见 [Redis 接入说明](redis-integration.md)。
+服务 API 鉴权默认使用 Redis，`redis.enabled` 省略时也为 `true`。启用时，管理端保存业务表后，控制面把受影响应用在本应用业务 Hash 中的 field 重建到一致状态：先置内部 `updating` 闸门，按应用 `members` 对已移除身份执行 `HDEL`、对新增或更新身份分批执行 `HSET`，全部完成后再置 `ready`。鉴权请求只读 Redis，不读取数据库，也不回源；连接失败、应用未 ready、目标 field 缺失、身份不匹配、损坏或超时都直接拒绝。启用要求启动时 `redis.url` 非空。显式配置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 后，服务 API 改用数据库 current-policy 鉴权，不创建 Redis 客户端，也不发布 Redis 记录。key、值、闸门和切换细节见 [Redis 接入说明](redis-integration.md)。
 
 权限模拟与真实服务 API 鉴权走同一条当前模式对应的路径；用户菜单始终走独立的 current-policy 路径。鉴权结果包含 `allowed`、`effect`、`reason`、`matched_roles`，不返回 `release_version`。Go SDK 已适配该响应；旧 SDK 对发布版本的校验会拒绝新响应，需要同步升级。
 
 Redis 模式下，保存事务提交后控制面才会重建 Redis，因此保存成功后纳入的新身份、授权和撤权在下一次鉴权即可见。保存失败或事务回滚时不重建，Redis 保持上一份一致记录。Redis 不可用或记录读取失败时鉴权失败关闭，SDK 拒绝访问，不使用无法验证的旧结果放行。数据库 current-policy 模式直接读取已提交的当前业务表。
 
-模式切换需要重启 API。重新启用时，先设置 `redis.enabled=true` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，然后在向该实例发送服务 API 流量前保存受影响的应用、服务、角色或绑定，触发对应应用整体重建。禁用期间保存的数据库编辑不会自动进入旧 Redis 记录。
+模式切换需要重启 API。重新启用时，先设置 `redis.enabled=true` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，再等待启动发布或后台对账为该应用生成新 Hash field 与 `state`。禁用期间保存的数据库编辑不会自动进入旧 Redis 记录。String 到 Hash 的协议切换还需要按 [Redis 接入说明](redis-integration.md#协议切换与部署) 协调中心和 consumer 的顺序，不能与新中心同时保留旧读端对外鉴权。
 
 ## Redis 一致性
 
-Redis 模式的服务 API 记录按「应用 key + 主体 + 服务 + 归一化 domain」组织，值为普通 JSON，不设 TTL，也不含业务版本。一致性由每个应用的写入闸门保证，而不是数据库失效标记：
+Redis 模式的业务 Hash key 按 `service + subject + normalized domain` 组织，应用 key 是 Hash field；field value 为普通 `SubjectAPIPolicy` JSON，每个 value 上限 16 MiB，Hash 不设 TTL，也不含业务版本。内部 `state`、`members`、`lock`、`requested` 和 `published` 都位于 `PREFIX:rbac:api:app:<escaped app_key>:*`。一致性由每个应用的内部写入闸门保证，而不是数据库失效标记：
 
 1. 保存前先把该应用置为 `updating`，使并发鉴权在替换期间被拒绝。
-2. 依据旧 `members` 集合删除不再存在的记录，再分批写入新记录，每批最多 64 条。
-3. 全部记录落盘后才置为 `ready`。任何一步失败都保持 `updating`，下一次重建从干净状态重试。
+2. 依据旧 `members` 只对该应用要移除的业务身份执行 `HDEL`，再分批 `HSET` 该应用的新 field，每批最多 64 条。
+3. 全部 field 落盘后才置为 `ready`。任何一步失败都保持 `updating`，下一次重建从干净状态重试。
 
-删除先于写入且闸门最后打开，所以同一应用的新旧记录不会短暂并存，也不会暴露半写集合。Redis 启用时，`role`、`role_api_endpoint_bindings`、`subject_role_bindings`、`menus`、`role_menu_bindings`、`application_service_resources`、`api_endpoints` 和 `service_resources` 的保存都会触发受影响应用的重建：角色 API/菜单授权、主体角色绑定和应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用。纯菜单保存只影响 current-policy 路径，不改变服务 API 记录。Redis 禁用时不执行这些发布。
+删除先于写入且闸门最后打开，所以同一应用的新旧 field 不会短暂并存，也不会暴露半写集合。不同应用共享业务 Hash，但发布只增删当前应用的 field；撤销某应用权限不会删除其他应用字段。Redis 启用时，`role`、`role_api_endpoint_bindings`、`subject_role_bindings`、`menus`、`role_menu_bindings`、`application_service_resources`、`api_endpoints` 和 `service_resources` 的保存都会触发受影响应用的重建：角色 API/菜单授权、主体角色绑定和应用服务关联重建本应用；接口端点和服务资源变更重建所有关联该服务的应用。纯菜单保存只影响 current-policy 路径，不改变服务 API field。Redis 禁用时不执行这些发布。
 
-切换到新 key 结构或新前缀后需重建受影响应用的授权记录；服务只按新 key 读取，旧 key 不自动读取。
+切换到新 key 结构或新前缀后需重建受影响应用的 Hash field 与内部元数据；新服务只按新 key 读取，旧 String key 不自动迁移或读取。部署顺序和定向清理限制见 [Redis 接入说明](redis-integration.md#协议切换与部署)。
 
 数据库不再用触发器维护任何缓存版本或失效标记。`applications` 没有 `policy_token` 列，也没有 `role_api_policy_tokens` / `service_api_policy_tokens` 表；唯一保留的数据库触发器是四条业务保护触发器（防止停用有关联的服务资源、解除仍有授权的服务关联、跨应用角色 API/菜单授权）。
 
@@ -34,7 +34,7 @@ Redis 模式的服务 API 记录按「应用 key + 主体 + 服务 + 归一化 d
 
 菜单、全策略适配器和历史基准走 current-policy 路径，与服务 API 的模式开关和 Redis 记录是独立域。每次请求在一条 MVCC 语句里读取当前规范化业务表，并对规范 JSON 计算 SHA-256 作为内存内容 token；进程内按应用保留最多 64 个编译索引，命中时复用编译索引。元数据读取和记录读取之间发生保存提交时按 token 拒绝旧结果，最多重试 3 次。该路径不读取服务 API Redis 记录，因此无论 Redis 开关如何，菜单都按数据库工作。
 
-菜单 token 不进入 Redis 模式的服务 API key，也不影响其记录。各条鉴权路径都只使用运行时当前数据，不写 JSONB 快照表。
+菜单 token 不进入 Redis 模式的服务 API key，也不影响其 field。各条鉴权路径都只使用运行时当前数据，不写 JSONB 快照表。
 
 ## 管理界面与接口
 
