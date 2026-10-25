@@ -57,10 +57,6 @@ public sealed class RedisFixture : IAsyncLifetime
         }
     });
 
-    public RedisKey StateKey(AuthorizationApiFactory factory) =>
-        $"{factory.Settings.Redis.KeyPrefix}:rbac:api:app:" +
-        $"{RedisAuthorizationStore.QueryEscape(factory.Settings.AuthorizationCenter.AppKey.Trim())}:state";
-
     public RedisKey PolicyKey(AuthorizationApiFactory factory, string? subject = null)
     {
         var settings = factory.Settings;
@@ -71,20 +67,11 @@ public sealed class RedisFixture : IAsyncLifetime
         return domain.Length == 0 ? key : $"{key}:{RedisAuthorizationStore.QueryEscape(domain)}";
     }
 
-    public RedisValue PolicyField(AuthorizationApiFactory factory) =>
-        factory.Settings.AuthorizationCenter.AppKey.Trim();
-
     public async Task PublishAsync(AuthorizationApiFactory factory, JsonObject policy,
-        string? subject = null, string state = "ready")
+        string? subject = null)
     {
-        var transaction = Database.CreateTransaction();
-        var fieldAppKey = PolicyField(factory);
-        var record = transaction.HashSetAsync(
-            PolicyKey(factory, subject), fieldAppKey, policy.ToJsonString());
-        var gate = transaction.StringSetAsync(StateKey(factory), state);
-        if (!await transaction.ExecuteAsync())
+        if (!await Database.StringSetAsync(PolicyKey(factory, subject), policy.ToJsonString()))
             throw new InvalidOperationException("测试授权发布失败。");
-        await Task.WhenAll(record, gate);
     }
 
     public async Task DisposeAsync()
@@ -141,7 +128,7 @@ internal static class TestPolicies
             });
         return new JsonObject
         {
-            ["application_key"] = scope.AppKey.Trim(), ["subject"] = subject.Trim(),
+            ["subject"] = subject.Trim(),
             ["service_resource"] = scope.ServiceResource.Trim(),
             ["domain"] = RedisAuthorizationStore.NormalizeDomain(scope.Domain),
             ["service_active"] = true, ["roles"] = new JsonArray("integration-test"),

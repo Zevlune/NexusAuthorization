@@ -19,9 +19,8 @@ type RedisConfig struct {
 	// records never expire and are kept current by publication.
 	CacheTTL string `yaml:"cache_ttl"`
 	Timeout  string `yaml:"timeout"`
-	// ReconcileInterval is how often the background reconciler repairs Redis
-	// publication (applications not ready, behind a save, or affected by a
-	// service catalog change).
+	// ReconcileInterval is how often the background publisher rebuilds the
+	// full service/user snapshot, repairing failed saves and catalog changes.
 	ReconcileInterval string `yaml:"reconcile_interval"`
 }
 

@@ -22,7 +22,7 @@
 | `src/internal/auth` | OIDC 配置、会话和认证中间件 |
 | `src/internal/biz` | 领域模型、授权规则、目录适配和策略编译 |
 | `src/internal/data/db/repo` | PostgreSQL 仓储和事务 |
-| `src/internal/data/rediscache` | Redis 服务 API 授权记录、`state` 闸门与批量替换 |
+| `src/internal/data/rediscache` | Redis 服务 API 授权 String、严格 key 识别、SCAN 与全量替换 |
 | `src/internal/server/http` | 路由、请求解析和响应映射 |
 | `dashboard/src` | React 页面、路由、API 和样式 |
 | `sdk/rbac` | 业务服务 Go SDK |
@@ -131,7 +131,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 1. HTTP Handler 只负责读取路径/查询/JSON、调用业务服务和映射错误；
 2. `internal/biz` 负责校验、领域规则、授权决策和外部目录接口；
 3. Repository 负责 SQL、事务、行映射和数据库约束协作；
-4. Redis 启用时，Redis 层保存共享业务 Hash 的应用 field 与应用级内部元数据，控制面在保存业务表后只重建受影响应用的 field，不保存业务版本；禁用时业务入口走数据库 current-policy，不访问 Redis；
+4. Redis 启用时，控制面先取 PostgreSQL advisory lock，在同一 repeatable-read 快照中合并所有启用应用，预验证完整输出后全量替换业务 String；每条用户 SET 原子但批次不整体原子，禁用时业务入口走数据库 current-policy，不访问 Redis；
 5. Dashboard API 统一走 `dashboard/src/api/request.ts`，页面不自行创建 Axios 实例；
 6. SDK 保持失败关闭，并且禁止把用户可控输入当作 app/service/subject 的可信来源。
 
@@ -145,7 +145,7 @@ NEXUSAUTHORIZATION_TEST_DATABASE_URL='postgres://.../nexus_test?sslmode=disable'
 - Repository 查询和事务；
 - `CurrentPolicy` 数据装载；
 - `compiledRBACPolicy` 的编译和匹配；
-- Redis 启用时的保存后服务 API Hash field 与应用内部元数据重建，以及禁用时的数据库 current-policy 读取；
+- Redis 启用时的服务 API String JSON、全量合并、SCAN 替换与失败对账，以及禁用时的数据库 current-policy 读取；
 - `/api/v1/rbac-v1/simulate` 输入和结果；
 - `/api/v1/authorize` 请求字段及 SDK；
 - 管理端 API、表单、回显和错误处理；
@@ -228,7 +228,7 @@ docker build -t nexusauthorization-dashboard:local .
 4. 角色是否启用、是否授权该 API、主体是否绑定该角色；
 5. domain 是否和绑定记录一致；
 6. 实际 path 是否符合固定/参数路径规则；
-7. 确认 `redis.enabled`；启用时检查 `PREFIX:rbac:api:app:<escaped app_key>:state` 是否为 `ready`、共享业务 Hash 的目标应用 field 是否可读及前缀是否正确，禁用时检查数据库 current-policy；
+7. 确认 `redis.enabled`；启用时检查业务 String 的 key、类型、JSON、身份和前缀，并确认最近一次发布没有 `PUBLISH_PENDING`；禁用时检查数据库 current-policy；
 8. 用 `/api/v1/rbac-v1/simulate` 复现同一组输入。
 
 若页面无法登录，先用 `/api/healthz` 和 `/api/auth/config` 区分进程问题、反向代理问题与 OIDC 配置问题。若服务目录或 SCIM 失败，直接检查外部 URL、凭证和超时，不要修改权限表来绕过依赖故障。

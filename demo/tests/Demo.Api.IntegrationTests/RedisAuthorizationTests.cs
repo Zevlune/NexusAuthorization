@@ -75,7 +75,7 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Revocation_takes_effect_immediately_and_regrant_is_allowed()
+    public async Task Revocation_by_policy_update_or_key_deletion_takes_effect_immediately()
     {
         using var factory = _fixture.CreateFactory();
         await _fixture.PublishAsync(factory, TestPolicies.Create(factory));
@@ -93,45 +93,23 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
         await _fixture.PublishAsync(factory, TestPolicies.Create(factory));
         using var afterRegrant = await client.GetAsync("/api/demo/products");
         Assert.Equal(HttpStatusCode.OK, afterRegrant.StatusCode);
+
+        await _fixture.Database.KeyDeleteAsync(_fixture.PolicyKey(factory));
+        using var afterDeletion = await client.GetAsync("/api/demo/products");
+        Assert.Equal(HttpStatusCode.Forbidden, afterDeletion.StatusCode);
     }
 
     [Fact]
-    public async Task Updating_state_is_denied_even_when_policy_exists()
+    public async Task Missing_string_policy_is_denied_as_endpoint_not_granted()
     {
         using var factory = _fixture.CreateFactory();
-        await _fixture.PublishAsync(factory, TestPolicies.Create(factory), state: "updating");
-        using var client = factory.CreateAuthenticatedClient();
+        var store = factory.Services.GetRequiredService<RedisAuthorizationStore>();
 
-        using var response = await client.GetAsync("/api/demo/products");
+        var decision = await store.AuthorizeAsync(
+            TestIdentity.Subject, "GET", "/api/demo/products", CancellationToken.None);
 
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Missing_state_is_denied_even_when_policy_exists()
-    {
-        using var factory = _fixture.CreateFactory();
-        await _fixture.PublishAsync(factory, TestPolicies.Create(factory));
-        await _fixture.Database.KeyDeleteAsync(_fixture.StateKey(factory));
-        using var client = factory.CreateAuthenticatedClient();
-
-        using var response = await client.GetAsync("/api/demo/products");
-
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-    }
-
-    [Fact]
-    public async Task Missing_policy_record_is_denied()
-    {
-        using var factory = _fixture.CreateFactory();
-        await _fixture.PublishAsync(factory, TestPolicies.Create(factory));
-        await _fixture.Database.HashDeleteAsync(
-            _fixture.PolicyKey(factory), _fixture.PolicyField(factory));
-        using var client = factory.CreateAuthenticatedClient();
-
-        using var response = await client.GetAsync("/api/demo/products");
-
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.False(decision.Allowed);
+        Assert.Equal("endpoint_not_granted", decision.Reason);
     }
 
     [Fact]
@@ -139,8 +117,7 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     {
         using var factory = _fixture.CreateFactory();
         await _fixture.PublishAsync(factory, TestPolicies.Create(factory));
-        await _fixture.Database.HashSetAsync(
-            _fixture.PolicyKey(factory), _fixture.PolicyField(factory), "{not-json");
+        await _fixture.Database.StringSetAsync(_fixture.PolicyKey(factory), "{not-json");
         using var client = factory.CreateAuthenticatedClient();
 
         using var response = await client.GetAsync("/api/demo/products");
@@ -149,13 +126,89 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Policy_stored_under_wrong_subject_key_is_denied()
+    public async Task Legacy_hash_policy_is_denied()
     {
         using var factory = _fixture.CreateFactory();
-        var otherSubject = Guid.NewGuid().ToString();
+        await _fixture.Database.HashSetAsync(
+            _fixture.PolicyKey(factory), factory.Settings.AuthorizationCenter.AppKey,
+            TestPolicies.Create(factory).ToJsonString());
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("legacy.application")]
+    [InlineData(" ")]
+    public async Task Non_empty_application_identity_in_string_policy_is_denied(
+        string applicationKey)
+    {
+        using var factory = _fixture.CreateFactory();
         var policy = TestPolicies.Create(factory);
-        policy["subject"] = otherSubject;
-        await _fixture.PublishAsync(factory, policy, subject: TestIdentity.Subject);
+        policy["application_key"] = applicationKey;
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Empty_application_identity_remains_compatible_and_is_ignored()
+    {
+        using var factory = _fixture.CreateFactory();
+        var policy = TestPolicies.Create(factory);
+        policy["application_key"] = "";
+        policy["application_id"] = Guid.Empty.ToString();
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Non_zero_application_id_in_string_policy_is_denied()
+    {
+        using var factory = _fixture.CreateFactory();
+        var policy = TestPolicies.Create(factory);
+        policy["application_id"] = Guid.NewGuid().ToString();
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("subject")]
+    [InlineData("service_resource")]
+    [InlineData("domain")]
+    public async Task Policy_identity_must_exactly_match_the_request_scope(string field)
+    {
+        using var factory = _fixture.CreateFactory(domain: "tenant-a");
+        var policy = TestPolicies.Create(factory);
+        policy[field] = field == "domain" ? "tenant-b" : $"other-{field}";
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Invalid_json_field_types_are_denied()
+    {
+        using var factory = _fixture.CreateFactory();
+        var policy = TestPolicies.Create(factory);
+        policy["service_active"] = "true";
+        await _fixture.PublishAsync(factory, policy);
         using var client = factory.CreateAuthenticatedClient();
 
         using var response = await client.GetAsync("/api/demo/products");
@@ -265,10 +318,8 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
         var globalPolicy = TestPolicies.Create(factory);
         globalPolicy["domain"] = "";
         var globalKey = GlobalPolicyKey(factory);
-        await _fixture.Database.HashSetAsync(
-            globalKey, _fixture.PolicyField(factory), globalPolicy.ToJsonString());
-        await _fixture.Database.HashDeleteAsync(
-            _fixture.PolicyKey(factory), _fixture.PolicyField(factory));
+        await _fixture.Database.StringSetAsync(globalKey, globalPolicy.ToJsonString());
+        await _fixture.Database.KeyDeleteAsync(_fixture.PolicyKey(factory));
         using var withoutScopedRecord = await client.GetAsync("/api/demo/products");
 
         Assert.Equal(HttpStatusCode.Forbidden, withoutScopedRecord.StatusCode);
@@ -303,9 +354,8 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Go_compatible_escaped_keys_are_used_by_the_real_http_pipeline()
+    public async Task Go_compatible_escaped_string_key_works_without_auxiliary_keys()
     {
-        const string escapedAppKey = "demo+app%2B%E6%B5%8B%E8%AF%95%3F%3A";
         const string escapedService = "demo+api%2F%E6%B5%8B%E8%AF%95%3Fx%3D1%26y%3D2";
         const string escapedDomain = "%E7%A7%9F%E6%88%B7+A%2F%E4%B8%80%E5%8F%B7";
 
@@ -314,18 +364,13 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
             serviceResource: "demo api/测试?x=1&y=2",
             domain: "租户 A/一号");
         var prefix = factory.Settings.Redis.KeyPrefix;
-        var expectedStateKey = $"{prefix}:rbac:api:app:{escapedAppKey}:state";
         var expectedPolicyKey =
             $"{prefix}:{escapedService}:{TestIdentity.Subject}:{escapedDomain}";
 
-        Assert.Equal(expectedStateKey, _fixture.StateKey(factory).ToString());
         Assert.Equal(expectedPolicyKey, _fixture.PolicyKey(factory).ToString());
-        Assert.DoesNotContain(escapedAppKey, expectedPolicyKey, StringComparison.Ordinal);
 
         var policy = TestPolicies.Create(factory);
-        await _fixture.Database.HashSetAsync(
-            new RedisKey(expectedPolicyKey), _fixture.PolicyField(factory), policy.ToJsonString());
-        await _fixture.Database.StringSetAsync(new RedisKey(expectedStateKey), "ready");
+        await _fixture.Database.StringSetAsync(expectedPolicyKey, policy.ToJsonString());
         using var client = factory.CreateAuthenticatedClient();
         using var response = await client.GetAsync("/api/demo/orders");
 
@@ -334,34 +379,77 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Shared_service_hash_keeps_application_revocations_isolated()
+    public async Task Escaped_service_subject_and_domain_isolate_policies()
     {
         var prefix = $"nexusauthorization:integration:{Guid.NewGuid():N}";
-        using var firstFactory = _fixture.CreateFactory(appKey: "demo.first", keyPrefix: prefix);
-        using var secondFactory = _fixture.CreateFactory(appKey: "demo.second", keyPrefix: prefix);
-        var policyKey = _fixture.PolicyKey(firstFactory);
+        const string service = "订单 api/主?x=1&y=2";
+        const string firstSubject = "用户 A/一号";
+        const string secondSubject = "用户 B/二号";
+        var unpublishedSubject = Guid.NewGuid().ToString();
+        const string domain = "租户 C/东区";
 
-        Assert.Equal(policyKey, _fixture.PolicyKey(secondFactory));
-        Assert.NotEqual(_fixture.StateKey(firstFactory), _fixture.StateKey(secondFactory));
-        Assert.NotEqual(_fixture.PolicyField(firstFactory), _fixture.PolicyField(secondFactory));
+        using var firstFactory = _fixture.CreateFactory(
+            serviceResource: service, domain: domain, keyPrefix: prefix);
+        using var secondFactory = _fixture.CreateFactory(
+            serviceResource: service, domain: domain, keyPrefix: prefix);
+        using var otherDomainFactory = _fixture.CreateFactory(
+            serviceResource: service, domain: "租户 D/西区", keyPrefix: prefix);
+        using var otherServiceFactory = _fixture.CreateFactory(
+            serviceResource: "库存 api/备?z=3", domain: domain, keyPrefix: prefix);
 
-        await _fixture.PublishAsync(firstFactory, TestPolicies.Create(firstFactory));
-        await _fixture.PublishAsync(secondFactory, TestPolicies.Create(secondFactory));
-        using var firstClient = firstFactory.CreateAuthenticatedClient();
-        using var secondClient = secondFactory.CreateAuthenticatedClient();
+        await _fixture.PublishAsync(
+            firstFactory, TestPolicies.Create(firstFactory, firstSubject), firstSubject);
+        await _fixture.PublishAsync(
+            secondFactory, TestPolicies.Create(secondFactory, secondSubject), secondSubject);
+
+        var firstExpectedKey = $"{prefix}:{RedisAuthorizationStore.QueryEscape(service)}:" +
+            $"{RedisAuthorizationStore.QueryEscape(firstSubject)}:" +
+            RedisAuthorizationStore.QueryEscape(domain);
+        var secondExpectedKey = $"{prefix}:{RedisAuthorizationStore.QueryEscape(service)}:" +
+            $"{RedisAuthorizationStore.QueryEscape(secondSubject)}:" +
+            RedisAuthorizationStore.QueryEscape(domain);
+        Assert.Equal(firstExpectedKey, _fixture.PolicyKey(firstFactory, firstSubject).ToString());
+        Assert.Equal(secondExpectedKey, _fixture.PolicyKey(secondFactory, secondSubject).ToString());
+        Assert.NotEqual(firstExpectedKey, secondExpectedKey);
+
+        using var firstClient = firstFactory.CreateAuthenticatedClient(firstSubject);
+        using var secondClient = secondFactory.CreateAuthenticatedClient(secondSubject);
+        using var wrongSubjectClient =
+            secondFactory.CreateAuthenticatedClient(unpublishedSubject);
+        using var wrongDomainClient = otherDomainFactory.CreateAuthenticatedClient(firstSubject);
+        using var wrongServiceClient = otherServiceFactory.CreateAuthenticatedClient(firstSubject);
         using var firstAllowed = await firstClient.GetAsync("/api/demo/products");
         using var secondAllowed = await secondClient.GetAsync("/api/demo/products");
+        using var wrongSubject = await wrongSubjectClient.GetAsync("/api/demo/products");
+        using var wrongDomain = await wrongDomainClient.GetAsync("/api/demo/products");
+        using var wrongService = await wrongServiceClient.GetAsync("/api/demo/products");
 
         Assert.Equal(HttpStatusCode.OK, firstAllowed.StatusCode);
         Assert.Equal(HttpStatusCode.OK, secondAllowed.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, wrongSubject.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, wrongDomain.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, wrongService.StatusCode);
+    }
 
-        await _fixture.Database.HashDeleteAsync(
-            policyKey, _fixture.PolicyField(secondFactory));
-        using var firstAfterSecondRevocation = await firstClient.GetAsync("/api/demo/products");
-        using var secondAfterRevocation = await secondClient.GetAsync("/api/demo/products");
+    [Fact]
+    public async Task Same_service_permissions_do_not_depend_on_application_configuration()
+    {
+        var prefix = $"nexusauthorization:integration:{Guid.NewGuid():N}";
+        using var withoutAppFactory = _fixture.CreateFactory(
+            appKey: "", keyPrefix: prefix);
+        using var legacyAppFactory = _fixture.CreateFactory(
+            appKey: "legacy.application", keyPrefix: prefix);
 
-        Assert.Equal(HttpStatusCode.OK, firstAfterSecondRevocation.StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, secondAfterRevocation.StatusCode);
+        Assert.Equal(_fixture.PolicyKey(withoutAppFactory), _fixture.PolicyKey(legacyAppFactory));
+
+        await _fixture.PublishAsync(withoutAppFactory, TestPolicies.Create(withoutAppFactory));
+        using var withoutAppClient = withoutAppFactory.CreateAuthenticatedClient();
+        using var legacyAppClient = legacyAppFactory.CreateAuthenticatedClient();
+        using var withoutAppResponse = await withoutAppClient.GetAsync("/api/demo/products");
+        using var legacyAppResponse = await legacyAppClient.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.OK, withoutAppResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, legacyAppResponse.StatusCode);
     }
 
     [Fact]

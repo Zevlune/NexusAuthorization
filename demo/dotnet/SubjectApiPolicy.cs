@@ -4,8 +4,12 @@ namespace Demo.Api;
 
 public sealed class SubjectApiPolicy
 {
+    // 仅用于识别并拒绝旧协议；零值和缺失值按空应用元数据处理。
     [JsonPropertyName("application_key")]
     public string? ApplicationKey { get; init; }
+
+    [JsonPropertyName("application_id")]
+    public Guid? ApplicationId { get; init; }
 
     [JsonPropertyName("subject")]
     public string? Subject { get; init; }

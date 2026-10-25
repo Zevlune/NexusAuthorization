@@ -18,12 +18,12 @@ Authorization: Bearer {{accessToken}}
 
 ### 权限行为
 # 这里使用 AuthorizationCenter:AppKey=bugmanager.admin、ServiceResource=nexusauthorization.demo.api、Domain=""。
-# 业务请求会先读取 PREFIX:rbac:api:app:<escapedApp>:state，ready 后从公开业务 Hash 读取当前用户策略。
-# 当前 PREFIX=nexusauthorization:prod；公开业务 key 不含 AppKey，Hash field 为 trim 后的 AppKey（不 URL 编码）。
-# 公开业务 key 为 PREFIX:<escapedService>:<escapedSubject>[:<escapedDomain>]。
+# 新协议读取 PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(trim(domain))>]。
+# String 值是完整 policy JSON；AppKey/ApplicationID 不参与权限 key 或身份校验，没有 gate、Lua 或 Hash。
+# 现网 Redis 尚未部署新 String 协议时，不要运行这些授权请求。
 # 未登录返回 401；已登录但没有可用的 NexusAuthorization 授权返回 403。
 # 请求方法和完整路径都会参与 Catalog 匹配，路径参数也参与鉴权。
-# 先完成 Demo 应用关联服务、Swagger 导入、角色 API 授权和 ready 发布，业务请求才能成功。
+# 先完成服务 Swagger 导入和各启用应用的角色 API 授权，业务请求才能成功。
 
 ### 订单列表（认证 + Redis 授权）
 GET {{baseUrl}}/api/demo/orders

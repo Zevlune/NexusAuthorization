@@ -2,9 +2,11 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -16,17 +18,18 @@ import (
 	"github.com/luck/nexus-authorization/internal/data/rediscache"
 )
 
-// publicationFixture is one application with a linked service, one granted
-// endpoint and one role, published to an isolated miniredis instance.
+// publicationFixture is an isolated database/cache scope. Each application
+// contributes to the same globally aggregated service policies.
 type publicationFixture struct {
-	repo     *RBACV1Repository
-	rbac     *biz.RBACV1Service
-	cache    *rediscache.PolicyCache
-	server   *miniredis.Miniredis
-	app      string
-	service  string
-	role     biz.RBACRole
-	endpoint biz.RBACEndpoint
+	repo        *RBACV1Repository
+	rbac        *biz.RBACV1Service
+	cache       *rediscache.PolicyCache
+	server      *miniredis.Miniredis
+	app         string
+	service     string
+	role        biz.RBACRole
+	endpoint    biz.RBACEndpoint
+	application biz.Application
 }
 
 func newPublicationFixture(t *testing.T) publicationFixture {
@@ -42,7 +45,11 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	}
 	t.Cleanup(pool.Close)
 	server := miniredis.RunT(t)
-	cache, err := rediscache.New(config.RedisConfig{URL: "redis://" + server.Addr(), KeyPrefix: "nexusauthorization:test:" + uuid.NewString()})
+	cache, err := rediscache.New(config.RedisConfig{
+		URL:       "redis://" + server.Addr(),
+		KeyPrefix: "nexusauthorization:test:" + uuid.NewString(),
+		CacheTTL:  "1h",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +66,7 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	})
 	f.repo = NewRBACV1Repository(pool).WithPolicyCache(cache)
 	f.rbac = biz.NewRBACV1Service(f.repo)
-	if _, err := f.repo.SaveApplication(ctx, biz.Application{Key: f.app, DisplayName: f.app, Enabled: true}); err != nil {
+	if f.application, err = f.repo.SaveApplication(ctx, biz.Application{Key: f.app, DisplayName: f.app, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.repo.ReplaceApplicationServices(ctx, f.app, []string{f.service}); err != nil {
@@ -74,6 +81,53 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	return f
 }
 
+type publicationApplication struct {
+	application biz.Application
+	service     string
+	role        biz.RBACRole
+	endpoint    biz.RBACEndpoint
+}
+
+func (f publicationFixture) addApplication(t *testing.T, service, path string) publicationApplication {
+	t.Helper()
+	ctx := context.Background()
+	if service == "" {
+		service = f.service
+	}
+	if service != f.service {
+		if _, err := f.repo.pool.Exec(ctx, `INSERT INTO service_resources(resource_key,display_name) VALUES($1,$1)`, service); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			f.repo.pool.Exec(ctx, `DELETE FROM api_endpoints WHERE service_resource_key=$1`, service)
+			f.repo.pool.Exec(ctx, `DELETE FROM service_resources WHERE resource_key=$1`, service)
+		})
+	}
+
+	appKey := "pub-app-" + uuid.NewString()
+	application, err := f.repo.SaveApplication(ctx, biz.Application{Key: appKey, DisplayName: appKey, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		f.repo.pool.Exec(ctx, `DELETE FROM applications WHERE app_key=$1`, appKey)
+	})
+	if err := f.repo.ReplaceApplicationServices(ctx, appKey, []string{service}); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := f.repo.SaveEndpoint(ctx, service, biz.RBACEndpoint{Method: "GET", PathTemplate: path, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	role, err := f.repo.SaveRole(ctx, appKey, biz.RBACRole{
+		Code: "reader", Name: "Reader", Enabled: true, EndpointIDs: []uuid.UUID{endpoint.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return publicationApplication{application: application, service: service, role: role, endpoint: endpoint}
+}
+
 func (f publicationFixture) allowed(t *testing.T, subject string) bool {
 	t.Helper()
 	decision, err := f.rbac.Authorize(context.Background(), f.app, map[string]any{"service_resource": f.service, "subject": subject, "method": "GET", "path": "/orders"})
@@ -83,9 +137,171 @@ func (f publicationFixture) allowed(t *testing.T, subject string) bool {
 	return decision.Allowed
 }
 
+func (f publicationFixture) allowedAt(t *testing.T, app, service, subject, domain, path string) bool {
+	t.Helper()
+	decision, err := f.rbac.Authorize(context.Background(), app, map[string]any{
+		"service_resource": service,
+		"subject":          subject,
+		"domain":           domain,
+		"method":           "GET",
+		"path":             path,
+	})
+	if err != nil {
+		t.Fatalf("authorize %s %s %s %s: %v", app, subject, domain, path, err)
+	}
+	return decision.Allowed
+}
+
+func (f publicationFixture) loadPolicy(t *testing.T, service, subject, domain string) (biz.SubjectAPIPolicy, error) {
+	t.Helper()
+	return f.cache.LoadSubjectAPIs(context.Background(), biz.SubjectAPIIdentity{
+		ServiceResource: service,
+		Subject:         subject,
+		Domain:          domain,
+	})
+}
+
+func policyPaths(policy biz.SubjectAPIPolicy) []string {
+	paths := make([]string, 0, len(policy.APIs))
+	for _, endpoint := range policy.APIs {
+		paths = append(paths, endpoint.PathTemplate)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func pathSet(policy biz.SubjectAPIPolicy) map[string]bool {
+	paths := make(map[string]bool, len(policy.APIs))
+	for _, endpoint := range policy.APIs {
+		paths[endpoint.PathTemplate] = true
+	}
+	return paths
+}
+
+func assertNoApplicationMetadata(t *testing.T, policy biz.SubjectAPIPolicy) {
+	t.Helper()
+	if policy.ApplicationKey != "" || policy.ApplicationID != uuid.Nil {
+		t.Fatalf("published policy retained application metadata: %+v", policy.SubjectAPIIdentity)
+	}
+}
+
+func policyForMerge(service, subject, domain string, active bool, apis, catalog []biz.SubjectAPIEndpoint, roles ...string) biz.SubjectAPIPolicy {
+	return biz.SubjectAPIPolicy{
+		SubjectAPIIdentity: biz.SubjectAPIIdentity{
+			ServiceResource: service,
+			Subject:         subject,
+			Domain:          domain,
+			ServiceActive:   active,
+		},
+		APIs:      apis,
+		Catalog:   catalog,
+		RoleCodes: roles,
+	}
+}
+
+func TestMergeServiceSubjectAPIPoliciesUnionsApplicationsAndDeduplicates(t *testing.T) {
+	first := biz.SubjectAPIEndpoint{ID: uuid.New(), Method: "GET", PathTemplate: "/orders", Enabled: true}
+	second := biz.SubjectAPIEndpoint{ID: uuid.New(), Method: "GET", PathTemplate: "/reports", Enabled: true}
+	merged, err := mergeServiceSubjectAPIPolicies([]biz.SubjectAPIPolicy{
+		policyForMerge("orders", "alice", "tenant", true, []biz.SubjectAPIEndpoint{first}, []biz.SubjectAPIEndpoint{first, second}, "reader"),
+		policyForMerge("orders", "alice", "tenant", true, []biz.SubjectAPIEndpoint{second}, []biz.SubjectAPIEndpoint{first, second}, "reader"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 1 {
+		t.Fatalf("merged policies = %+v", merged)
+	}
+	policy := merged[0]
+	assertNoApplicationMetadata(t, policy)
+	if got, want := policyPaths(policy), []string{"/orders", "/reports"}; !equalStrings(got, want) {
+		t.Fatalf("union paths = %v, want %v", got, want)
+	}
+	if len(policy.RoleCodes) != 1 || policy.RoleCodes[0] != "reader" {
+		t.Fatalf("role union = %v", policy.RoleCodes)
+	}
+}
+
+func TestMergeServiceSubjectAPIPoliciesIgnoresDisabledApplicationGrants(t *testing.T) {
+	allowed := biz.SubjectAPIEndpoint{ID: uuid.New(), Method: "GET", PathTemplate: "/orders", Enabled: true}
+	disabled := biz.SubjectAPIEndpoint{ID: uuid.New(), Method: "POST", PathTemplate: "/orders", Enabled: true}
+	merged, err := mergeServiceSubjectAPIPolicies([]biz.SubjectAPIPolicy{
+		policyForMerge("orders", "alice", "", true, []biz.SubjectAPIEndpoint{allowed}, []biz.SubjectAPIEndpoint{allowed, disabled}, "reader"),
+		policyForMerge("orders", "alice", "", false, []biz.SubjectAPIEndpoint{disabled}, []biz.SubjectAPIEndpoint{allowed, disabled}, "writer"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 1 {
+		t.Fatalf("merged policies = %+v", merged)
+	}
+	policy := merged[0]
+	if !policy.ServiceActive {
+		t.Fatalf("active contribution was lost: %+v", policy)
+	}
+	if got := pathSet(policy); len(got) != 1 || !got["/orders"] ||
+		len(policy.APIs) != 1 || policy.APIs[0].Method != "GET" {
+		t.Fatalf("disabled application contributed grants: %+v", policy.APIs)
+	}
+	if len(policy.Catalog) != 2 {
+		t.Fatalf("catalog should remain complete: %+v", policy.Catalog)
+	}
+	if len(policy.RoleCodes) != 1 || policy.RoleCodes[0] != "reader" {
+		t.Fatalf("disabled application contributed roles: %v", policy.RoleCodes)
+	}
+}
+
+func TestMergeServiceSubjectAPIPoliciesDeduplicatesRolesAndIsolatesDomains(t *testing.T) {
+	endpoint := biz.SubjectAPIEndpoint{ID: uuid.New(), Method: "GET", PathTemplate: "/orders", Enabled: true}
+	merged, err := mergeServiceSubjectAPIPolicies([]biz.SubjectAPIPolicy{
+		policyForMerge("orders", "alice", "", true, []biz.SubjectAPIEndpoint{endpoint}, []biz.SubjectAPIEndpoint{endpoint}, "reader"),
+		policyForMerge("orders", "alice", " global ", true, nil, nil, "reader", "writer"),
+		policyForMerge("orders", "alice", "tenant-a", true, []biz.SubjectAPIEndpoint{endpoint}, []biz.SubjectAPIEndpoint{endpoint}, "tenant-reader"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged) != 2 {
+		t.Fatalf("domain grouping = %+v", merged)
+	}
+	byDomain := make(map[string]biz.SubjectAPIPolicy, len(merged))
+	for _, policy := range merged {
+		byDomain[policy.Domain] = policy
+	}
+	if got := byDomain[""].RoleCodes; !equalStrings(got, []string{"reader", "writer"}) {
+		t.Fatalf("default/global roles = %v", got)
+	}
+	if got := byDomain["tenant-a"].RoleCodes; !equalStrings(got, []string{"tenant-reader"}) {
+		t.Fatalf("tenant roles = %v", got)
+	}
+}
+
+func TestMergeServiceSubjectAPIPoliciesRejectsConflictingCatalogIdentity(t *testing.T) {
+	id := uuid.New()
+	_, err := mergeServiceSubjectAPIPolicies([]biz.SubjectAPIPolicy{
+		policyForMerge("orders", "alice", "", true, nil, []biz.SubjectAPIEndpoint{{ID: id, Method: "GET", PathTemplate: "/orders", Enabled: true}}),
+		policyForMerge("orders", "alice", "", true, nil, []biz.SubjectAPIEndpoint{{ID: id, Method: "GET", PathTemplate: "/other", Enabled: true}}),
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicting service API catalog") {
+		t.Fatalf("conflicting catalog identity = %v", err)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // Concurrent saves of one application must converge on the final database
-// state; before the rebuild lease, a slower rebuild could publish an older
-// snapshot over a newer one and resurrect revoked grants.
+// state. Every save republishes one global snapshot, so no application-scoped
+// helper records are needed to fence a stale rebuild.
 func TestSubjectAPIConcurrentSavesConverge(t *testing.T) {
 	f := newPublicationFixture(t)
 	ctx := context.Background()
@@ -125,14 +341,32 @@ func TestSubjectAPIConcurrentSavesConverge(t *testing.T) {
 			t.Fatalf("user-%d allowed = %v, want %v (Redis diverged from the database)", i, got, want)
 		}
 	}
-	statuses, err := f.cache.SubjectAPIStatuses(ctx, []string{f.app})
-	if err != nil || !statuses[f.app].Ready() {
-		t.Fatalf("publication not ready after concurrent saves: %+v, %v", statuses[f.app], err)
+	keys := f.server.Keys()
+	matchingServiceKeys := 0
+	for _, key := range keys {
+		if f.server.Type(key) != "string" {
+			t.Fatalf("subject API key %q has Redis type %q", key, f.server.Type(key))
+		}
+		raw, err := f.server.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var policy biz.SubjectAPIPolicy
+		if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+			t.Fatalf("decode business string %q: %v", key, err)
+		}
+		assertNoApplicationMetadata(t, policy)
+		if policy.ServiceResource == f.service {
+			matchingServiceKeys++
+		}
+	}
+	if matchingServiceKeys != subjects/2 {
+		t.Fatalf("business string count for service %q = %d, want %d; all keys: %v", f.service, matchingServiceKeys, subjects/2, keys)
 	}
 }
 
 // A save whose publication fails reports PUBLISH_PENDING, and the reconciler
-// repairs it, as well as a wiped Redis and a gate left in "updating".
+// repairs it, as well as a wiped Redis. Reconciliation has no readiness state.
 func TestSubjectAPIReconcileRepairsFailedPublication(t *testing.T) {
 	f := newPublicationFixture(t)
 	ctx := context.Background()
@@ -157,23 +391,20 @@ func TestSubjectAPIReconcileRepairsFailedPublication(t *testing.T) {
 	if !f.allowed(t, "alice") {
 		t.Fatal("expected the stale grant before reconciling (test precondition)")
 	}
-	// The shared test database may hold other applications, so assert on this
-	// application's state rather than on the number republished.
-	if _, err := f.repo.ReconcileSubjectAPIs(ctx, false); err != nil {
+	var applicationCount int
+	if err := f.repo.pool.QueryRow(ctx, `SELECT count(*) FROM applications`).Scan(&applicationCount); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := f.repo.ReconcileSubjectAPIs(ctx, false); err != nil || got != applicationCount {
+		t.Fatalf("reconcile = %d, %v; want %d applications", got, err, applicationCount)
 	}
 	if f.allowed(t, "alice") {
 		t.Fatal("reconcile did not publish the revoke")
 	}
 
-	// Nothing is pending for this application: an incremental pass leaves it alone.
-	before, _ := f.cache.SubjectAPIStatuses(ctx, []string{f.app})
-	if _, err := f.repo.ReconcileSubjectAPIs(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := f.cache.SubjectAPIStatuses(ctx, []string{f.app})
-	if after[f.app] != before[f.app] || !after[f.app].Ready() {
-		t.Fatalf("idle reconcile republished a current application: %+v -> %+v", before[f.app], after[f.app])
+	// Even an apparently current database is recomputed in full.
+	if got, err := f.repo.ReconcileSubjectAPIs(ctx, true); err != nil || got != applicationCount {
+		t.Fatalf("full reconcile = %d, %v; want %d applications", got, err, applicationCount)
 	}
 
 	// Redis is wiped (restart without persistence, FLUSHALL).
@@ -181,36 +412,15 @@ func TestSubjectAPIReconcileRepairsFailedPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.server.FlushAll()
-	if _, err := f.rbac.Authorize(ctx, f.app, map[string]any{"service_resource": f.service, "subject": "bob", "method": "GET", "path": "/orders"}); !errors.Is(err, biz.ErrNotFound) {
-		t.Fatalf("authorize against wiped Redis = %v", err)
+	decision, err := f.rbac.Authorize(ctx, f.app, map[string]any{"service_resource": f.service, "subject": "bob", "method": "GET", "path": "/orders"})
+	if err != nil || decision.Allowed || decision.Reason != "endpoint_not_granted" {
+		t.Fatalf("authorize against wiped Redis = %+v, %v; want ordinary deny", decision, err)
 	}
 	if _, err := f.repo.ReconcileSubjectAPIs(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	if !f.allowed(t, "bob") {
 		t.Fatal("reconcile did not rebuild a wiped application")
-	}
-
-	// A rebuild died after closing the gate.
-	statuses, _ := f.cache.SubjectAPIStatuses(ctx, []string{f.app})
-	if !statuses[f.app].Ready() {
-		t.Fatalf("not ready before the stuck-gate check: %+v", statuses[f.app])
-	}
-	for _, key := range f.server.Keys() {
-		if strings.HasSuffix(key, ":state") {
-			if err := f.server.Set(key, "updating"); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if _, err := f.rbac.Authorize(ctx, f.app, map[string]any{"service_resource": f.service, "subject": "bob", "method": "GET", "path": "/orders"}); err == nil {
-		t.Fatal("authorize served a gated application")
-	}
-	if _, err := f.repo.ReconcileSubjectAPIs(ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	if !f.allowed(t, "bob") {
-		t.Fatal("reconcile did not reopen a stuck gate")
 	}
 }
 
@@ -221,6 +431,136 @@ func TestSubjectAPIUnboundSubjectIsDenied(t *testing.T) {
 	decision, err := f.rbac.Authorize(context.Background(), f.app, map[string]any{"service_resource": f.service, "subject": "nobody", "method": "GET", "path": "/orders"})
 	if err != nil || decision.Allowed || decision.Reason != "endpoint_not_granted" {
 		t.Fatalf("unbound subject = %+v, %v", decision, err)
+	}
+}
+
+func TestSubjectAPIMultiApplicationUnionAndRevokeIntegration(t *testing.T) {
+	f := newPublicationFixture(t)
+	ctx := context.Background()
+	subject := "shared-user"
+	if err := f.repo.ReplaceSubjectRoles(ctx, f.app, subject, "", []uuid.UUID{f.role.ID}); err != nil {
+		t.Fatal(err)
+	}
+	second := f.addApplication(t, "", "/reports")
+	if err := f.repo.ReplaceSubjectRoles(ctx, second.application.Key, subject, "", []uuid.UUID{second.role.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	policy, err := f.loadPolicy(t, f.service, subject, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoApplicationMetadata(t, policy)
+	if got := policyPaths(policy); !equalStrings(got, []string{"/orders", "/reports"}) {
+		t.Fatalf("cross-application grant union = %v", got)
+	}
+	if !equalStrings(policy.RoleCodes, []string{"reader"}) {
+		t.Fatalf("cross-application role union = %v", policy.RoleCodes)
+	}
+	if !f.allowedAt(t, f.app, f.service, subject, "", "/reports") {
+		t.Fatal("second application did not contribute its API grant")
+	}
+
+	second.application.Enabled = false
+	if _, err := f.repo.SaveApplication(ctx, second.application); err != nil {
+		t.Fatal(err)
+	}
+	if !f.allowedAt(t, f.app, f.service, subject, "", "/orders") {
+		t.Fatal("disabling one application removed another application's contribution")
+	}
+	if f.allowedAt(t, f.app, f.service, subject, "", "/reports") {
+		t.Fatal("disabled application still contributed an API grant")
+	}
+
+	second.application.Enabled = true
+	if _, err := f.repo.SaveApplication(ctx, second.application); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.ReplaceSubjectRoles(ctx, second.application.Key, subject, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !f.allowedAt(t, f.app, f.service, subject, "", "/orders") {
+		t.Fatal("revoking one application removed another application's contribution")
+	}
+	if f.allowedAt(t, f.app, f.service, subject, "", "/reports") {
+		t.Fatal("revoked application still contributed an API grant")
+	}
+}
+
+func TestSubjectAPIRemovingServiceAssociationRemovesBusinessRecordIntegration(t *testing.T) {
+	f := newPublicationFixture(t)
+	ctx := context.Background()
+	subject := "service-removal-user"
+	service := "removed-service-" + uuid.NewString()
+	second := f.addApplication(t, service, "/reports")
+	if err := f.repo.ReplaceSubjectRoles(ctx, second.application.Key, subject, "", []uuid.UUID{second.role.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if policy, err := f.loadPolicy(t, service, subject, ""); err != nil || len(policy.APIs) != 1 {
+		t.Fatalf("initial service policy = %+v, %v", policy, err)
+	}
+
+	// Remove the grant first because the database keeps service links that are
+	// still referenced by role grants. The binding remains, so only the link
+	// removal can eliminate this application's contribution.
+	if _, err := f.repo.pool.Exec(ctx, `DELETE FROM role_api_endpoint_bindings WHERE role_id=$1`, second.role.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.repo.ReplaceApplicationServices(ctx, second.application.Key, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.loadPolicy(t, service, subject, ""); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("removed service record = %v, want ErrSubjectAPIRecordNotFound", err)
+	}
+	if f.allowedAt(t, second.application.Key, service, subject, "", "/reports") {
+		t.Fatal("removed service association still authorized its old grant")
+	}
+}
+
+func TestSubjectAPIDomainIsolationAndRevokeIntegration(t *testing.T) {
+	f := newPublicationFixture(t)
+	ctx := context.Background()
+	subject := "domain-user"
+	firstDomain := "tenant-a"
+	secondDomain := "tenant-b"
+	if err := f.repo.ReplaceSubjectRoles(ctx, f.app, subject, firstDomain, []uuid.UUID{f.role.ID}); err != nil {
+		t.Fatal(err)
+	}
+	second := f.addApplication(t, "", "/reports")
+	if err := f.repo.ReplaceSubjectRoles(ctx, second.application.Key, subject, secondDomain, []uuid.UUID{second.role.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := f.loadPolicy(t, f.service, subject, firstDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.loadPolicy(t, f.service, subject, secondDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := policyPaths(first); !equalStrings(got, []string{"/orders"}) {
+		t.Fatalf("%s grants = %v", firstDomain, got)
+	}
+	if got := policyPaths(other); !equalStrings(got, []string{"/reports"}) {
+		t.Fatalf("%s grants = %v", secondDomain, got)
+	}
+	if f.allowedAt(t, f.app, f.service, subject, firstDomain, "/reports") ||
+		f.allowedAt(t, f.app, f.service, subject, secondDomain, "/orders") {
+		t.Fatal("named-domain grants leaked into another domain")
+	}
+
+	if err := f.repo.ReplaceSubjectRoles(ctx, f.app, subject, firstDomain, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.loadPolicy(t, f.service, subject, firstDomain); !errors.Is(err, biz.ErrSubjectAPIRecordNotFound) {
+		t.Fatalf("revoked domain record = %v, want ErrSubjectAPIRecordNotFound", err)
+	}
+	if f.allowedAt(t, f.app, f.service, subject, firstDomain, "/orders") {
+		t.Fatal("revoked domain grant still authorized")
+	}
+	if !f.allowedAt(t, f.app, f.service, subject, secondDomain, "/reports") {
+		t.Fatal("revoking one domain removed another domain's contribution")
 	}
 }
 

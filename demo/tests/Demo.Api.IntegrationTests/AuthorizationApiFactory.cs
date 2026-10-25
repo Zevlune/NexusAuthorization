@@ -12,7 +12,7 @@ using Microsoft.Extensions.Options;
 
 namespace Demo.Api.IntegrationTests;
 
-// 仅替换登录身份来源；保留应用的 DI、授权策略、Redis Lua 和真实 Controller。
+// 仅替换登录身份来源；保留应用的 DI、授权策略、Redis String 读取和真实 Controller。
 public sealed class AuthorizationApiFactory(DemoSettings settings) : WebApplicationFactory<Program>
 {
     public DemoSettings Settings { get; } = settings;
