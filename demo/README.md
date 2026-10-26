@@ -2,13 +2,13 @@
 
 解决方案入口为 `demo/NexusAuthorization.Demo.sln`，可使用 Visual Studio 或 Rider 直接打开。在仓库根目录执行 `dotnet build demo/NexusAuthorization.Demo.sln` 构建，使用 `dotnet run --project demo/dotnet` 启动。
 
-这是一个采用 Controllers 模式的 .NET 10 示例。Demo 使用 OpenID Connect 完成统一登录，继续通过 introspection 校验 Cookie 或 Bearer 所代表的访问令牌，并使用 StackExchange.Redis 2.13.1 直接读取 NexusAuthorization 发布的业务 String 策略。Demo 不访问数据库，也不需要权限中心服务调用凭证。
+这是一个采用 Controllers 模式的 .NET 10 示例。Demo 使用 OpenID Connect 完成统一登录，继续通过 introspection 校验 Cookie 或 Bearer 所代表的访问令牌，并引用 [.NET SDK](../sdk/dotnet/README.md) 读取 NexusAuthorization 发布的业务 String 策略。默认 Redis 模式不访问数据库，也不需要权限中心服务调用凭证。
 
 ## 项目结构
 
 `demo/dotnet/Controllers` 放置全部入口和业务接口，包括 Home、Health、Auth、Orders、Products、Reports 和 Public。`Program.cs` 通过 `AddControllers()` 和 `MapControllers()` 注册控制器，并配置登录、认证、令牌 introspection 和 Redis 授权策略。OIDC 协议回调 `/signin-oidc` 由认证中间件处理。
 
-`Program.cs` 通过 `AddSingleton<IConnectionMultiplexer>(sp => ConnectionMultiplexer.Connect(options))` 注册共享 Redis 连接，由 DI 容器负责创建和释放。`RedisAuthorizationStore` 通过构造函数注入 `IConnectionMultiplexer`，在每次受保护请求中直接对业务 key 执行 `GET`，读取并严格解析完整策略 JSON；不读取 readiness、Lua 或其他 RBAC 辅助 key。
+`Program.cs` 通过 `AddNexusAuthorization(settings.ConfigureAuthorization).UseRedis(settings.ConfigureRedis)` 注册 SDK。共享 Redis 连接、策略解析、匹配器和授权 handler 均由 `sdk/dotnet` 中的核心库和 Redis 实现库提供，Demo 不再包含这些实现。SDK 由 DI 容器创建和释放共享连接，在每次受保护请求中对业务 key 执行 `GET`，读取并严格解析完整策略 JSON。
 
 StackExchange.Redis 的 multiplexer 线程安全，适合在整个应用内共享复用；`GetDatabase()` 只返回轻量数据库句柄，不必另行缓存。可参考[官方基础用法](https://stackexchange.github.io/StackExchange.Redis/Basics.html)。
 
@@ -47,6 +47,8 @@ StackExchange.Redis 的 multiplexer 线程安全，适合在整个应用内共�
 ```
 
 `AuthorizationCenter` 使用 `AppKey`、`ServiceResource` 和 `Domain`。`AppKey` 仍是运行时请求上下文，但不再出现在 Redis 业务 key 或策略 JSON 中，也不是授权隔离维度；中心会合并所有启用应用对该服务的用户权限。Demo 当前配置为应用 `bugmanager.admin`、服务资源 `nexusauthorization.demo.api`、空域策略。配置在启动时读取，修改后需重启 Demo。
+
+Demo 保留 `AuthorizationCenter` 和 `Redis` 两个配置节，以兼容已有 user-secrets。Demo.Api 只引用 `NexusAuthorization.Sdk.Redis`，并传递引用核心库；Redis 读取、路径匹配和 ASP.NET Core 授权 handler 均由 SDK 提供。通用上下文使用 `NexusAuthorizationOptions`，Redis 连接使用独立的 `RedisAuthorizationOptions`。其他项目可通过 Builder 的 `UseRedis(configure)` 或 `UseHttp(configure)` 选择实现；这两个方法仅接收配置 Action，返回 `void`。HTTP 实现位于独立的 `NexusAuthorization.Sdk.Http` 类库；接入方式见 [SDK 文档](../sdk/dotnet/README.md)。
 
 通过 Demo 项目的 .NET user-secrets 或环境变量提供 `Redis:Password`、`Auth:ClientSecret` 等敏感值。文档不记录实际密钥：
 
@@ -208,6 +210,8 @@ Demo 不依赖数据库直连，也不需要配置权限中心的 `BaseUrl`、`S
 ## 集成测试
 
 测试用户固定为 `51b21204-54ab-4da6-ad83-d14f72ced46f`。本地测试在 testhost 中注入该 `sub`，覆盖真实 Controller、身份 handler、JSON 解析和 StackExchange.Redis 路径。
+
+SDK 三类库验证（2026-10-26）：144 项 SDK 单元测试、30 项真实 HTTP 集成测试及 49 项临时 Redis 集成测试通过，共 223 项，0 失败；4 项现网 Redis 测试未启用。新增覆盖规则匹配边界、宿主启动校验、Provider 释放与外部连接所有权、MVC 过滤器上下文，以及完整 HTTP 授权链路中的拒绝/撤销、超时、重定向、响应限制和用户隔离。测试发现并修复空模板可能匹配根路径、可释放 Provider 被重复释放的问题。TRX 报告位于 `demo/TestResults/sdk-expanded-20261026/release-final`。此次验证没有访问现网 Redis。
 
 本轮验证（2026-10-25）：Go `go test -race -count=1 ./...` 使用隔离临时 PostgreSQL 与 miniredis 全部包通过，覆盖多应用 union、服务移除、跨实例锁和单连接池；`go vet ./...` 通过。Demo 构建成功，0 个警告、0 个错误；修正一个测试预期后，45 项本地 String 协议集成测试全部通过。本轮没有访问现网 Redis，新版中心与 Demo 尚未部署，因此旧 12 项现网记录不能作为新协议通过结论。
 

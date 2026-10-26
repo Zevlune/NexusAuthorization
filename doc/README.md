@@ -29,5 +29,6 @@
 | [前端开发](frontend-development.md) | 实际入口、路由、导航模型、构建、代理和测试 |
 | [接口参考](reference-api-rbac-v1.md) | 当前注册接口、认证、请求响应、错误码与当前权限语义 |
 | [Go SDK 接入](sdk-application-integration.md) | `Check`、`Require`、身份解析、应用/服务上下文与失败处理 |
+| [.NET SDK 接入](../sdk/dotnet/README.md) | Builder、Redis / HTTP 实现、统一权限接口与 NuGet 打包 |
 
 以上设计说明描述当前实现。尚未实现的能力会明确标记，不作为现有功能承诺。`ui/` 中的设计源文件与历史截图用于参考，实际操作以当前界面及使用手册为准。

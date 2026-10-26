@@ -10,7 +10,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
-using StackExchange.Redis;
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 var settings = builder.Configuration.Get<DemoSettings>() ?? throw new InvalidOperationException("缺少配置。");
@@ -18,29 +19,11 @@ var auth = settings.Auth;
 if (auth.TokenEndpointAuthMethod is not ("client_secret_basic" or "client_secret_post"))
     throw new InvalidOperationException(
         "Auth:TokenEndpointAuthMethod 必须为 client_secret_basic 或 client_secret_post。");
-RedisAuthorizationStore.ValidateSettings(settings);
 builder.Services.AddSingleton(settings);
-// 全应用共享连接，由 DI 容器创建，并在应用关闭时释放。
-builder.Services.AddSingleton<IConnectionMultiplexer>(services =>
-{
-    var redis = services.GetRequiredService<DemoSettings>().Redis;
-    var options = new ConfigurationOptions
-    {
-        AbortOnConnectFail = false,
-        ConnectRetry = 0,
-        ConnectTimeout = redis.TimeoutMilliseconds,
-        AsyncTimeout = redis.TimeoutMilliseconds,
-        SyncTimeout = redis.TimeoutMilliseconds,
-        DefaultDatabase = redis.Database,
-        User = string.IsNullOrEmpty(redis.User) ? null : redis.User,
-        Password = redis.Password,
-        ClientName = "NexusAuthorization.Demo",
-        BacklogPolicy = BacklogPolicy.FailFast
-    };
-    options.EndPoints.Add(redis.Host, redis.Port);
-    return ConnectionMultiplexer.Connect(options);
-});
-builder.Services.AddSingleton<RedisAuthorizationStore>();
+
+builder.Services.AddNexusAuthorization(settings.ConfigureAuthorization)
+    .UseRedis(settings.ConfigureRedis);
+
 builder.Services.AddHttpClient<NexusAuthClient>(client => client.Timeout = TimeSpan.FromSeconds(5));
 
 builder.Services.AddAuthentication("CookieOrBearer")
@@ -160,9 +143,6 @@ builder.Services.AddAuthentication("CookieOrBearer")
         };
     });
 
-builder.Services.AddAuthorization(options => options.AddPolicy(DemoAuthenticationDefaults.PermissionPolicy, policy =>
-    policy.RequireAuthenticatedUser().AddRequirements(new NexusAuthorizationRequirement())));
-builder.Services.AddScoped<IAuthorizationHandler, NexusAuthorizationHandler>();
 builder.Services.AddControllers();
 builder.Services.AddSwaggerGen(options =>
 {

@@ -1,10 +1,34 @@
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
+
 namespace Demo.Api;
 
 public sealed class DemoSettings
 {
     public AuthSettings Auth { get; init; } = new();
     public AuthorizationCenterSettings AuthorizationCenter { get; init; } = new();
-    public RedisSettings Redis { get; init; } = new();
+    public RedisAuthorizationOptions Redis { get; init; } = new();
+
+    // 保留 Demo 现有配置节及 user-secrets 路径；其他项目可直接绑定 SDK 配置类。
+    public void ConfigureAuthorization(NexusAuthorizationOptions options)
+    {
+        options.ServiceResource = AuthorizationCenter.ServiceResource;
+        options.Domain = AuthorizationCenter.Domain;
+        options.SubjectClaimType = AuthorizationCenter.SubjectClaimType;
+    }
+
+    public void ConfigureRedis(RedisAuthorizationOptions options)
+    {
+        options.Host = Redis.Host;
+        options.Port = Redis.Port;
+        options.User = Redis.User;
+        options.Password = Redis.Password;
+        options.Database = Redis.Database;
+        options.KeyPrefix = Redis.KeyPrefix;
+        options.TimeoutMilliseconds = Redis.TimeoutMilliseconds;
+        options.Ssl = Redis.Ssl;
+        options.SslHost = Redis.SslHost;
+    }
 }
 
 public sealed class AuthSettings
@@ -22,18 +46,8 @@ public sealed class AuthSettings
 
 public sealed class AuthorizationCenterSettings
 {
+    public string SubjectClaimType { get; init; } = "sub";
     public string AppKey { get; init; } = "";
     public string ServiceResource { get; init; } = "";
     public string Domain { get; init; } = "";
-}
-
-public sealed class RedisSettings
-{
-    public string Host { get; init; } = "192.168.31.200";
-    public int Port { get; init; } = 8433;
-    public string User { get; init; } = "";
-    public string Password { get; init; } = "";
-    public int Database { get; init; }
-    public string KeyPrefix { get; init; } = "nexusauthorization:dev";
-    public int TimeoutMilliseconds { get; init; } = 2000;
 }

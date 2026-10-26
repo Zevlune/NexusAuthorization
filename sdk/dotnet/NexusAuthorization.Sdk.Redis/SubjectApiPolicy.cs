@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace Demo.Api;
+namespace NexusAuthorization.Sdk.Redis;
 
 public sealed class SubjectApiPolicy
 {
@@ -56,5 +56,3 @@ public sealed class SubjectApiEndpoint
     [JsonPropertyName("enabled")]
     public bool Enabled { get; }
 }
-
-public sealed record AuthorizationDecision(bool Allowed, string Effect, string Reason);

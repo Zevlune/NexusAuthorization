@@ -12,6 +12,7 @@
 **/bin/
 **/obj/
 **/TestResults/
+/artifacts/packages/
 
 # Test binary, built with `go test -c`
 *.test
