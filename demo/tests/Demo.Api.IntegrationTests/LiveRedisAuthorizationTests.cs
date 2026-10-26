@@ -1,3 +1,5 @@
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -56,7 +58,8 @@ public sealed class LiveRedisAuthorizationTests(LiveRedisFixture fixture, ITestO
         using var response = await client.SendAsync(request);
         Assert.Equal(allowed ? successStatus : 403, (int)response.StatusCode);
 
-        var store = fixture.Factory.Services.GetRequiredService<RedisAuthorizationStore>();
+        using var scope = fixture.Factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
         var decision = await store.AuthorizeAsync(profile.Subject, method, path, CancellationToken.None);
         Assert.Equal(allowed, decision.Allowed);
         Assert.Equal(allowed ? "allow" : "deny", decision.Effect);
@@ -120,7 +123,6 @@ public sealed class LiveRedisFixture : IAsyncLifetime
             .AddEnvironmentVariables()
             .Build();
         var settings = configuration.Get<DemoSettings>() ?? throw new InvalidOperationException("缺少 Demo 配置。");
-        RedisAuthorizationStore.ValidateSettings(settings);
         Factory = new AuthorizationApiFactory(settings);
         return Task.CompletedTask;
     }

@@ -1,4 +1,4 @@
-namespace Demo.Api;
+namespace NexusAuthorization.Sdk.Redis;
 
 public static class SubjectApiPolicyMatcher
 {
@@ -82,7 +82,7 @@ public static class SubjectApiPolicyMatcher
             if (endpoint is null ||
                 endpoint.Id == Guid.Empty ||
                 string.IsNullOrEmpty(endpoint.Method) ||
-                endpoint.PathTemplate is null)
+                string.IsNullOrWhiteSpace(endpoint.PathTemplate))
             {
                 return false;
             }

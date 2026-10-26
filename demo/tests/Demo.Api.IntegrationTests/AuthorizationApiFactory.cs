@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Demo.Api;
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -25,6 +27,8 @@ public sealed class AuthorizationApiFactory(DemoSettings settings) : WebApplicat
         {
             services.RemoveAll<DemoSettings>();
             services.AddSingleton(Settings);
+            services.Configure<NexusAuthorizationOptions>(Settings.ConfigureAuthorization);
+            services.Configure<RedisAuthorizationOptions>(Settings.ConfigureRedis);
             services.AddAuthentication(options =>
             {
                 options.DefaultScheme = TestAuthenticationHandler.SchemeName;

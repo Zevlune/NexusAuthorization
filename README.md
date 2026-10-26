@@ -16,7 +16,7 @@
 
 文档入口：[标准使用手册](doc/user-guide.md) · [系统设计](doc/system-design.md) · [运维操作手册](doc/operations-manual.md) · [开发与二次开发](doc/development-guide.md) · [文档索引](doc/README.md) · [快速开始](doc/quick-start.md)。
 
-.NET 接入示例：[Demo 启动与联调](demo/README.md)。
+.NET 接入：[可复用 SDK（Redis / HTTP）](sdk/dotnet/README.md) · [Demo 启动与联调](demo/README.md)。
 
 当前系统设计和实现边界见 [系统设计](doc/system-design.md)；实际前端操作流程见 [UI 说明](doc/ui-design.md)。
 

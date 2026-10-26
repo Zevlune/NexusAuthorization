@@ -1,3 +1,5 @@
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Demo.Api;
@@ -49,7 +51,7 @@ public sealed class RedisFixture : IAsyncLifetime
         {
             AppKey = appKey, ServiceResource = serviceResource, Domain = domain
         },
-        Redis = new RedisSettings
+        Redis = new RedisAuthorizationOptions
         {
             Host = "127.0.0.1", Port = port,
             KeyPrefix = keyPrefix ?? $"nexusauthorization:integration:{Guid.NewGuid():N}",

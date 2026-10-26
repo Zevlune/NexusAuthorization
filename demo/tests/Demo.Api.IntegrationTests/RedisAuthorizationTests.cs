@@ -1,3 +1,5 @@
+using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Redis;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
@@ -103,7 +105,8 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     public async Task Missing_string_policy_is_denied_as_endpoint_not_granted()
     {
         using var factory = _fixture.CreateFactory();
-        var store = factory.Services.GetRequiredService<RedisAuthorizationStore>();
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
 
         var decision = await store.AuthorizeAsync(
             TestIdentity.Subject, "GET", "/api/demo/products", CancellationToken.None);
@@ -341,16 +344,25 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public void Connection_multiplexer_is_singleton_across_di_scopes()
+    public async Task Scoped_providers_share_a_connection_that_survives_scope_disposal()
     {
         using var factory = _fixture.CreateFactory();
-        using var firstScope = factory.Services.CreateScope();
-        using var secondScope = factory.Services.CreateScope();
+        INexusAuthorizationProvider firstProvider;
+        IConnectionMultiplexer first;
+        using (var firstScope = factory.Services.CreateScope())
+        {
+            firstProvider = firstScope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
+            Assert.Same(firstProvider, firstScope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>());
+            first = firstScope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>();
+        }
 
-        var first = firstScope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>();
+        using var secondScope = factory.Services.CreateScope();
+        var secondProvider = secondScope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
         var second = secondScope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>();
 
+        Assert.NotSame(firstProvider, secondProvider);
         Assert.Same(first, second);
+        await second.GetDatabase().PingAsync();
     }
 
     [Fact]
