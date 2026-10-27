@@ -14,8 +14,10 @@ public sealed class SubjectApiPolicy
     [JsonPropertyName("subject")]
     public string? Subject { get; init; }
 
+    // 仅兼容校验中心发布的默认域元数据，不作为 SDK 对外配置。
+    [JsonInclude]
     [JsonPropertyName("domain")]
-    public string? Domain { get; init; }
+    internal string? StoredDomain { get; init; }
 
     [JsonPropertyName("service_resource")]
     public string? ServiceResource { get; init; }

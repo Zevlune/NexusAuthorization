@@ -1,6 +1,6 @@
 using System.Text;
 using Demo.Api;
-using Microsoft.AspNetCore.Authorization;
+using NexusAuthorization.Sdk;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,7 +8,7 @@ namespace Demo.Api.Controllers;
 
 [ApiController]
 [Route("api/demo/reports")]
-[Authorize(Policy = DemoAuthenticationDefaults.PermissionPolicy)]
+[NexusAuthorize]
 [Tags("Reports")]
 public sealed class ReportsController : ControllerBase
 {

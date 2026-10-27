@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Claims;
+using System.Text.Json;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -26,7 +27,7 @@ public sealed class HttpAuthorizationIntegrationTests
     [Fact]
     public async Task Attribute_and_real_http_provider_authorize_the_actual_authenticated_request()
     {
-        await using var application = await HttpSdkApplication.StartAsync(domain: " global ");
+        await using var application = await HttpSdkApplication.StartAsync();
         using var client = application.CreateClient();
 
         using var response = await client.PostAsync("/sdk/orders/42?subject=untrusted-query", null);
@@ -40,9 +41,9 @@ public sealed class HttpAuthorizationIntegrationTests
         Assert.Equal("orders-app", received.Payload.AppKey);
         Assert.Equal("orders.api", received.Payload.ServiceResource);
         Assert.Equal("trusted-user", received.Payload.Subject);
-        Assert.Equal("", received.Payload.Domain);
         Assert.Equal("POST", received.Payload.Method);
         Assert.Equal("/sdk/orders/42", received.Payload.Path);
+        AssertRawAuthorizationPayloadHasNoDomain(received.RawJson);
     }
 
     [Theory]
@@ -246,9 +247,9 @@ public sealed class HttpAuthorizationIntegrationTests
     }
 
     [Fact]
-    public async Task Concurrent_subjects_use_independent_remote_decisions_and_the_configured_domain()
+    public async Task Concurrent_subjects_use_independent_remote_decisions_and_outbound_payloads_have_no_domain()
     {
-        await using var application = await HttpSdkApplication.StartAsync(domain: " tenant-a ");
+        await using var application = await HttpSdkApplication.StartAsync();
         application.Respond = context =>
         {
             var input = (AuthorizationWireRequest)context.Items[typeof(AuthorizationWireRequest)]!;
@@ -267,7 +268,8 @@ public sealed class HttpAuthorizationIntegrationTests
         Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
         Assert.Equal(1, application.Executions.Count);
         Assert.Equal(2, application.Requests.Count);
-        Assert.All(application.Requests, input => Assert.Equal("tenant-a", input.Payload.Domain));
+        Assert.All(application.Requests, input =>
+            AssertRawAuthorizationPayloadHasNoDomain(input.RawJson));
         Assert.Equal(new[] { "allowed-user", "denied-user" },
             application.Requests.Select(input => input.Payload.Subject).Order().ToArray());
     }
@@ -380,6 +382,13 @@ public sealed class HttpAuthorizationIntegrationTests
         Assert.Empty(application.Requests);
         Assert.Equal(0, application.Executions.Count);
     }
+
+    private static void AssertRawAuthorizationPayloadHasNoDomain(string rawJson)
+    {
+        using var document = JsonDocument.Parse(rawJson);
+        Assert.DoesNotContain(document.RootElement.EnumerateObject(), property =>
+            string.Equals(property.Name, "domain", StringComparison.OrdinalIgnoreCase));
+    }
 }
 
 // 入站业务请求使用 TestServer；SDK 的出站请求通过真实 socket 访问临时 Kestrel 授权服务。
@@ -398,7 +407,6 @@ internal sealed class HttpSdkApplication : IAsyncDisposable
         new AuthorizationDecision(true, "allow", "allowed"), context.RequestAborted);
 
     public static async Task<HttpSdkApplication> StartAsync(
-        string domain = "",
         int timeoutMilliseconds = 3000,
         string? serviceCredential = null)
     {
@@ -411,10 +419,15 @@ internal sealed class HttpSdkApplication : IAsyncDisposable
             application.authorization = builder.Build();
             application.authorization.MapPost("/api/v1/authorize", async context =>
             {
-                var payload = await context.Request.ReadFromJsonAsync<AuthorizationWireRequest>(context.RequestAborted)
+                using var reader = new StreamReader(context.Request.Body);
+                var rawJson = await reader.ReadToEndAsync(context.RequestAborted);
+                var payload = JsonSerializer.Deserialize<AuthorizationWireRequest>(
+                        rawJson,
+                        new JsonSerializerOptions(JsonSerializerDefaults.Web))
                     ?? throw new InvalidOperationException("Expected authorization JSON.");
                 application.Requests.Enqueue(new(context.Request.Method, context.Request.Path,
-                    context.Request.Headers.Authorization.ToString(), context.Request.Headers.Cookie.ToString(), payload));
+                    context.Request.Headers.Authorization.ToString(), context.Request.Headers.Cookie.ToString(),
+                    rawJson, payload));
                 context.Items[typeof(AuthorizationWireRequest)] = payload;
                 try { await application.Respond(context); }
                 catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
@@ -439,7 +452,6 @@ internal sealed class HttpSdkApplication : IAsyncDisposable
                     services.AddNexusAuthorization(options =>
                     {
                         options.ServiceResource = " orders.api ";
-                        options.Domain = domain;
                     }).UseHttp(options =>
                     {
                         options.BaseUrl = address;
@@ -499,9 +511,9 @@ internal sealed class HttpSdkApplication : IAsyncDisposable
 }
 
 internal sealed record AuthorizationWireRequest(string AppKey, string ServiceResource, string Subject,
-    string Domain, string Method, string Path);
+    string Method, string Path);
 internal sealed record ReceivedAuthorizationRequest(string TransportMethod, string TransportPath,
-    string Authorization, string Cookie, AuthorizationWireRequest Payload);
+    string Authorization, string Cookie, string RawJson, AuthorizationWireRequest Payload);
 
 public sealed class BusinessExecutions
 {

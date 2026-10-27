@@ -6,6 +6,5 @@ public sealed class NexusAuthorizationOptions
     public const string SectionName = "NexusAuthorization";
 
     public string ServiceResource { get; set; } = "";
-    public string Domain { get; set; } = "";
     public string SubjectClaimType { get; set; } = "sub";
 }

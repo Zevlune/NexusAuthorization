@@ -2,7 +2,6 @@
   "Subject": "51b21204-54ab-4da6-ad83-d14f72ced46f",
   "AppKey": "bugmanager.admin",
   "ServiceResource": "nexusauthorization.demo.api",
-  "Domain": "",
   "ExpectedRole": "order-review",
   "AllowedEndpoints": [
     "GET /api/demo/orders"

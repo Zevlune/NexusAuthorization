@@ -1,12 +1,12 @@
 using System.Security.Claims;
 using System.Text.Encodings.Web;
+using System.Text.Json;
 using Demo.Api;
-using NexusAuthorization.Sdk;
-using NexusAuthorization.Sdk.Redis;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -14,7 +14,7 @@ using Microsoft.Extensions.Options;
 
 namespace Demo.Api.IntegrationTests;
 
-// 仅替换登录身份来源；保留应用的 DI、授权策略、Redis String 读取和真实 Controller。
+// 替换测试配置和登录身份来源，保留 Program 的 Provider 选择、SDK 和真实 Controller。
 public sealed class AuthorizationApiFactory(DemoSettings settings) : WebApplicationFactory<Program>
 {
     public DemoSettings Settings { get; } = settings;
@@ -23,12 +23,20 @@ public sealed class AuthorizationApiFactory(DemoSettings settings) : WebApplicat
     {
         builder.UseEnvironment("Testing");
         builder.UseContentRoot(DemoProjectPaths.ApiDirectory);
+        // 在 Program 选择 Provider 前设置配置，避免在测试里另行注册 SDK。
+        using var json = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Settings.AuthorizationCenter, Settings.Redis, Settings.Http
+        }));
+        var configuration = new ConfigurationBuilder().AddJsonStream(json).Build();
+        using var configurationLifetime = (IDisposable)configuration;
+        foreach (var entry in configuration.AsEnumerable())
+            if (entry.Value is not null)
+                builder.UseSetting(entry.Key, entry.Value);
         builder.ConfigureTestServices(services =>
         {
             services.RemoveAll<DemoSettings>();
             services.AddSingleton(Settings);
-            services.Configure<NexusAuthorizationOptions>(Settings.ConfigureAuthorization);
-            services.Configure<RedisAuthorizationOptions>(Settings.ConfigureRedis);
             services.AddAuthentication(options =>
             {
                 options.DefaultScheme = TestAuthenticationHandler.SchemeName;

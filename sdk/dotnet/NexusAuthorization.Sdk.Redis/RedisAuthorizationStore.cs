@@ -19,17 +19,10 @@ public sealed class RedisAuthorizationStore(
     // Go url.QueryEscape 使用 '+' 表示空格，其余按 UTF-8 百分号编码。
     public static string QueryEscape(string value) => Uri.EscapeDataString(value).Replace("%20", "+");
 
-    public static string NormalizeDomain(string? value)
-    {
-        var domain = value?.Trim() ?? "";
-        return domain == "global" ? "" : domain;
-    }
-
     public async Task<AuthorizationDecision> AuthorizeAsync(
         string subject, string method, string path, CancellationToken cancellationToken = default)
     {
         var service = common.ServiceResource.Trim();
-        var domain = NormalizeDomain(common.Domain);
         if (cancellationToken.IsCancellationRequested)
             return Deny("request_cancelled");
         subject = subject?.Trim() ?? "";
@@ -37,8 +30,6 @@ public sealed class RedisAuthorizationStore(
             return Deny("subject_required");
 
         var policyKey = $"{settings.KeyPrefix}:{QueryEscape(service)}:{QueryEscape(subject)}";
-        if (domain.Length != 0)
-            policyKey += $":{QueryEscape(domain)}";
 
         try
         {
@@ -59,7 +50,7 @@ public sealed class RedisAuthorizationStore(
                 policy.ApplicationId is { } applicationId && applicationId != Guid.Empty)
                 return Deny("policy_identity_mismatch");
             if (policy.Subject != subject ||
-                policy.ServiceResource != service || NormalizeDomain(policy.Domain) != domain)
+                policy.ServiceResource != service || !IsDefaultDomain(policy.StoredDomain))
                 return Deny("policy_identity_mismatch");
 
             return SubjectApiPolicyMatcher.Evaluate(policy, method, path);
@@ -79,6 +70,8 @@ public sealed class RedisAuthorizationStore(
             return Deny("invalid_policy_payload");
         }
     }
+
+    private static bool IsDefaultDomain(string? value) => value?.Trim() is null or "" or "global";
 
     private static AuthorizationDecision Deny(string reason) => new(false, "deny", reason);
 }

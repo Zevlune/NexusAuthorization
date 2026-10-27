@@ -194,7 +194,7 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     [InlineData("domain")]
     public async Task Policy_identity_must_exactly_match_the_request_scope(string field)
     {
-        using var factory = _fixture.CreateFactory(domain: "tenant-a");
+        using var factory = _fixture.CreateFactory();
         var policy = TestPolicies.Create(factory);
         policy[field] = field == "domain" ? "tenant-b" : $"other-{field}";
         await _fixture.PublishAsync(factory, policy);
@@ -203,6 +203,11 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
         using var response = await client.GetAsync("/api/demo/products");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var provider = scope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
+        var decision = await provider.AuthorizeAsync(TestIdentity.Subject, "GET", "/api/demo/products");
+        Assert.Equal("policy_identity_mismatch", decision.Reason);
     }
 
     [Fact]
@@ -307,33 +312,35 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Domain_scoped_request_does_not_use_global_policy()
+    public async Task Named_domain_key_cannot_replace_the_default_policy()
     {
-        using var factory = _fixture.CreateFactory(domain: "tenant-a");
+        using var factory = _fixture.CreateFactory();
         var scopedPolicy = TestPolicies.Create(factory);
         scopedPolicy["domain"] = "tenant-a";
-        await _fixture.PublishAsync(factory, scopedPolicy);
+        await _fixture.Database.StringSetAsync($"{_fixture.PolicyKey(factory)}:tenant-a", scopedPolicy.ToJsonString());
         using var client = factory.CreateAuthenticatedClient();
 
-        using var scopedAllowed = await client.GetAsync("/api/demo/products");
-        Assert.Equal(HttpStatusCode.OK, scopedAllowed.StatusCode);
+        using var withoutDefaultRecord = await client.GetAsync("/api/demo/products");
+        Assert.Equal(HttpStatusCode.Forbidden, withoutDefaultRecord.StatusCode);
 
         var globalPolicy = TestPolicies.Create(factory);
-        globalPolicy["domain"] = "";
-        var globalKey = GlobalPolicyKey(factory);
-        await _fixture.Database.StringSetAsync(globalKey, globalPolicy.ToJsonString());
-        await _fixture.Database.KeyDeleteAsync(_fixture.PolicyKey(factory));
-        using var withoutScopedRecord = await client.GetAsync("/api/demo/products");
+        await _fixture.PublishAsync(factory, globalPolicy);
+        using var withDefaultRecord = await client.GetAsync("/api/demo/products");
 
-        Assert.Equal(HttpStatusCode.Forbidden, withoutScopedRecord.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, withDefaultRecord.StatusCode);
     }
 
-    [Fact]
-    public async Task Global_domain_is_normalized_to_the_empty_domain_key()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("global")]
+    [InlineData(" global ")]
+    public async Task Existing_default_domain_metadata_is_compatible(string? storedDomain)
     {
-        using var factory = _fixture.CreateFactory(domain: "global");
+        using var factory = _fixture.CreateFactory();
         var policy = TestPolicies.Create(factory);
-        policy["domain"] = "global";
+        policy["domain"] = storedDomain;
         await _fixture.PublishAsync(factory, policy);
         using var client = factory.CreateAuthenticatedClient();
 
@@ -341,6 +348,42 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
 
         Assert.Equal(GlobalPolicyKey(factory), _fixture.PolicyKey(factory).ToString());
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Missing_domain_metadata_is_compatible_with_the_default_policy()
+    {
+        using var factory = _fixture.CreateFactory();
+        var policy = TestPolicies.Create(factory);
+        policy.Remove("domain");
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("42")]
+    [InlineData("true")]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    public async Task Invalid_stored_domain_metadata_is_denied(string json)
+    {
+        using var factory = _fixture.CreateFactory();
+        var policy = TestPolicies.Create(factory);
+        policy["domain"] = JsonNode.Parse(json);
+        await _fixture.PublishAsync(factory, policy);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.GetAsync("/api/demo/products");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var provider = scope.ServiceProvider.GetRequiredService<INexusAuthorizationProvider>();
+        var decision = await provider.AuthorizeAsync(TestIdentity.Subject, "GET", "/api/demo/products");
+        Assert.Equal("invalid_policy_payload", decision.Reason);
     }
 
     [Fact]
@@ -369,15 +412,13 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     public async Task Go_compatible_escaped_string_key_works_without_auxiliary_keys()
     {
         const string escapedService = "demo+api%2F%E6%B5%8B%E8%AF%95%3Fx%3D1%26y%3D2";
-        const string escapedDomain = "%E7%A7%9F%E6%88%B7+A%2F%E4%B8%80%E5%8F%B7";
 
         using var factory = _fixture.CreateFactory(
             appKey: "demo app+测试?:",
-            serviceResource: "demo api/测试?x=1&y=2",
-            domain: "租户 A/一号");
+            serviceResource: "demo api/测试?x=1&y=2");
         var prefix = factory.Settings.Redis.KeyPrefix;
         var expectedPolicyKey =
-            $"{prefix}:{escapedService}:{TestIdentity.Subject}:{escapedDomain}";
+            $"{prefix}:{escapedService}:{TestIdentity.Subject}";
 
         Assert.Equal(expectedPolicyKey, _fixture.PolicyKey(factory).ToString());
 
@@ -391,23 +432,20 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task Escaped_service_subject_and_domain_isolate_policies()
+    public async Task Escaped_service_and_subject_isolate_policies()
     {
         var prefix = $"nexusauthorization:integration:{Guid.NewGuid():N}";
         const string service = "订单 api/主?x=1&y=2";
         const string firstSubject = "用户 A/一号";
         const string secondSubject = "用户 B/二号";
         var unpublishedSubject = Guid.NewGuid().ToString();
-        const string domain = "租户 C/东区";
 
         using var firstFactory = _fixture.CreateFactory(
-            serviceResource: service, domain: domain, keyPrefix: prefix);
+            serviceResource: service, keyPrefix: prefix);
         using var secondFactory = _fixture.CreateFactory(
-            serviceResource: service, domain: domain, keyPrefix: prefix);
-        using var otherDomainFactory = _fixture.CreateFactory(
-            serviceResource: service, domain: "租户 D/西区", keyPrefix: prefix);
+            serviceResource: service, keyPrefix: prefix);
         using var otherServiceFactory = _fixture.CreateFactory(
-            serviceResource: "库存 api/备?z=3", domain: domain, keyPrefix: prefix);
+            serviceResource: "库存 api/备?z=3", keyPrefix: prefix);
 
         await _fixture.PublishAsync(
             firstFactory, TestPolicies.Create(firstFactory, firstSubject), firstSubject);
@@ -415,11 +453,9 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
             secondFactory, TestPolicies.Create(secondFactory, secondSubject), secondSubject);
 
         var firstExpectedKey = $"{prefix}:{RedisAuthorizationStore.QueryEscape(service)}:" +
-            $"{RedisAuthorizationStore.QueryEscape(firstSubject)}:" +
-            RedisAuthorizationStore.QueryEscape(domain);
+            RedisAuthorizationStore.QueryEscape(firstSubject);
         var secondExpectedKey = $"{prefix}:{RedisAuthorizationStore.QueryEscape(service)}:" +
-            $"{RedisAuthorizationStore.QueryEscape(secondSubject)}:" +
-            RedisAuthorizationStore.QueryEscape(domain);
+            RedisAuthorizationStore.QueryEscape(secondSubject);
         Assert.Equal(firstExpectedKey, _fixture.PolicyKey(firstFactory, firstSubject).ToString());
         Assert.Equal(secondExpectedKey, _fixture.PolicyKey(secondFactory, secondSubject).ToString());
         Assert.NotEqual(firstExpectedKey, secondExpectedKey);
@@ -428,18 +464,15 @@ public sealed class RedisAuthorizationTests(RedisFixture fixture) : IClassFixtur
         using var secondClient = secondFactory.CreateAuthenticatedClient(secondSubject);
         using var wrongSubjectClient =
             secondFactory.CreateAuthenticatedClient(unpublishedSubject);
-        using var wrongDomainClient = otherDomainFactory.CreateAuthenticatedClient(firstSubject);
         using var wrongServiceClient = otherServiceFactory.CreateAuthenticatedClient(firstSubject);
         using var firstAllowed = await firstClient.GetAsync("/api/demo/products");
         using var secondAllowed = await secondClient.GetAsync("/api/demo/products");
         using var wrongSubject = await wrongSubjectClient.GetAsync("/api/demo/products");
-        using var wrongDomain = await wrongDomainClient.GetAsync("/api/demo/products");
         using var wrongService = await wrongServiceClient.GetAsync("/api/demo/products");
 
         Assert.Equal(HttpStatusCode.OK, firstAllowed.StatusCode);
         Assert.Equal(HttpStatusCode.OK, secondAllowed.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, wrongSubject.StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, wrongDomain.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, wrongService.StatusCode);
     }
 

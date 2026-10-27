@@ -44,12 +44,12 @@ public sealed class RedisFixture : IAsyncLifetime
     }
 
     public AuthorizationApiFactory CreateFactory(string appKey = "demo",
-        string serviceResource = "nexusauthorization.demo.api", string domain = "",
+        string serviceResource = "nexusauthorization.demo.api",
         string? keyPrefix = null) => new(new DemoSettings
     {
         AuthorizationCenter = new AuthorizationCenterSettings
         {
-            AppKey = appKey, ServiceResource = serviceResource, Domain = domain
+            AppKey = appKey, ServiceResource = serviceResource
         },
         Redis = new RedisAuthorizationOptions
         {
@@ -65,8 +65,7 @@ public sealed class RedisFixture : IAsyncLifetime
         var scope = settings.AuthorizationCenter;
         var key = $"{settings.Redis.KeyPrefix}:{RedisAuthorizationStore.QueryEscape(scope.ServiceResource.Trim())}:" +
             RedisAuthorizationStore.QueryEscape((subject ?? TestIdentity.Subject).Trim());
-        var domain = RedisAuthorizationStore.NormalizeDomain(scope.Domain);
-        return domain.Length == 0 ? key : $"{key}:{RedisAuthorizationStore.QueryEscape(domain)}";
+        return key;
     }
 
     public async Task PublishAsync(AuthorizationApiFactory factory, JsonObject policy,
@@ -132,7 +131,7 @@ internal static class TestPolicies
         {
             ["subject"] = subject.Trim(),
             ["service_resource"] = scope.ServiceResource.Trim(),
-            ["domain"] = RedisAuthorizationStore.NormalizeDomain(scope.Domain),
+            ["domain"] = "",
             ["service_active"] = true, ["roles"] = new JsonArray("integration-test"),
             ["catalog"] = catalog, ["apis"] = catalog.DeepClone()
         };

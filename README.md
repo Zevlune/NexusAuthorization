@@ -9,8 +9,8 @@
 | `ui/` | UI 设计源文件、导出图及视觉验证截图 |
 | `doc/` | 使用、开发、部署、接口和设计文档 |
 | `migrations/` | PostgreSQL 首次建库、完整 schema 与既有库升级脚本 |
-| `sdk/` | Go 业务服务接入 SDK |
-| `demo/` | .NET 10 单项目示例：Swagger、NexusAuth 登录与 StackExchange.Redis 鉴权 |
+| `sdk/` | Go 业务服务 SDK，以及由核心 / Redis / Http 三库组成的 .NET SDK |
+| `demo/` | .NET 10 单项目示例：Swagger、NexusAuth 登录，以及启动时切换 Redis / Http 的 NexusAuthorization 鉴权 |
 | `docker-compose-dev.yml` | 本地前后端与 PostgreSQL |
 | `docker-compose.yml` | 前后端连接外部 PostgreSQL |
 
@@ -22,7 +22,9 @@
 
 NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-users.md)。
 
-服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，中心把一个用户、一个服务和归一化 domain 的完整策略写为 Redis String，key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`。JSON 只含 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含应用标识；权限合并所有启用应用对该服务的授权，具名 domain 相互隔离。Demo 和中心运行时直接严格解析该 String，不读 `state`/Lua，也不依赖 `rbac:api:app` 辅助 key。开发和生产默认前缀为 `nexusauthorization:dev`、`nexusauthorization:prod`，可按部署配置并要求中心与消费者一致。
+服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，中心把一个用户、一个服务和归一化 domain 的完整策略写为 Redis String，key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`。JSON 只含 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含应用标识；权限合并所有启用应用对该服务的授权，具名 domain 相互隔离。Redis 模式的 Demo 直接严格解析该 String，不读 `state`/Lua，也不依赖 `rbac:api:app` 辅助 key；Http 模式的 Demo 改为调用中心 `/api/v1/authorize`。开发和生产默认前缀为 `nexusauthorization:dev`、`nexusauthorization:prod`，可按部署配置并要求中心与消费者一致。
+
+.NET SDK/Demo 仅支持默认域：配置不包含 Domain，HTTP 请求不发送 domain，Redis 读取 key 固定为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>`，不含 domain 后缀；策略 JSON 中已有的默认域元数据仍用于兼容校验，具名 domain 会以 `policy_identity_mismatch` 拒绝。
 
 控制面先取得 PostgreSQL session advisory lock，再在同一 repeatable-read 快照中合并全部来源；Redis 层预验证完整输出后，按专用前缀 `SCAN` 严格识别业务 key、删除本轮不存在的旧用户记录，最后逐用户 `SET` 完整 JSON 并覆盖同名旧结构。每条用户写入原子，环境或应用批次不整体原子；部分失败可能让旧权限保留到下一轮对账，接口返回 `PUBLISH_PENDING`。启动和每次定时对账都全量重建；不新增数据库表或 migration，也不需要 Redis 锁、索引或计数器。该模型不承诺撤权零窗口或强 fail-closed 闸门。`redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 改用数据库 current-policy，不创建 Redis 客户端，也不发布记录；菜单与全策略适配器始终走独立的 current-policy 路径。数据库只保存业务配置，不保存发布版本或历史。旧 Hash/state key 本轮不连接现网、不清理、不部署；切换和定向清理要求见 [Redis 接入说明](doc/redis-integration.md)，保存生效与失败语义见 [权限生效设计](doc/permission-lifecycle.md)。
 

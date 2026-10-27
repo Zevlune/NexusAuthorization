@@ -11,6 +11,7 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 using NexusAuthorization.Sdk;
+using NexusAuthorization.Sdk.Http;
 using NexusAuthorization.Sdk.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,8 +22,18 @@ if (auth.TokenEndpointAuthMethod is not ("client_secret_basic" or "client_secret
         "Auth:TokenEndpointAuthMethod 必须为 client_secret_basic 或 client_secret_post。");
 builder.Services.AddSingleton(settings);
 
-builder.Services.AddNexusAuthorization(settings.ConfigureAuthorization)
-    .UseRedis(settings.ConfigureRedis);
+var authorization = builder.Services.AddNexusAuthorization(settings.ConfigureAuthorization);
+switch (settings.AuthorizationCenter.Provider.Trim().ToUpperInvariant())
+{
+    case "REDIS":
+        authorization.UseRedis(settings.ConfigureRedis);
+        break;
+    case "HTTP":
+        authorization.UseHttp(settings.ConfigureHttp);
+        break;
+    default:
+        throw new InvalidOperationException("AuthorizationCenter:Provider 必须为 Redis 或 Http。");
+}
 
 builder.Services.AddHttpClient<NexusAuthClient>(client => client.Timeout = TimeSpan.FromSeconds(5));
 

@@ -83,17 +83,10 @@ public sealed class HttpAuthorizationProvider(
             var baseUrl = http.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
             using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/api/v1/authorize");
 
-            var domain = options.Domain?.Trim() ?? string.Empty;
-            if (domain == "global")
-            {
-                domain = string.Empty;
-            }
-
             var payload = new AuthorizationRequest(
                 http.AppKey?.Trim() ?? string.Empty,
                 options.ServiceResource?.Trim() ?? string.Empty,
                 normalizedSubject,
-                domain,
                 method,
                 path);
 
@@ -348,7 +341,6 @@ public sealed class HttpAuthorizationProvider(
         string AppKey,
         string ServiceResource,
         string Subject,
-        string Domain,
         string Method,
         string Path);
 }

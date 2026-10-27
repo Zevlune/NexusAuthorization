@@ -21,7 +21,6 @@ public sealed class RegistrationTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["NexusAuthorization:ServiceResource"] = "orders.api",
-            ["NexusAuthorization:Domain"] = "tenant-a",
             ["NexusAuthorization:SubjectClaimType"] = "uid"
         }).Build();
         var services = new ServiceCollection();
@@ -37,8 +36,15 @@ public sealed class RegistrationTests
         Assert.NotNull(provider.GetRequiredService<ILogger<CustomProvider>>());
         var options = provider.GetRequiredService<IOptions<NexusAuthorizationOptions>>().Value;
         Assert.Equal("orders.api", options.ServiceResource);
-        Assert.Equal("tenant-a", options.Domain);
         Assert.Equal("uid", options.SubjectClaimType);
+    }
+
+    [Fact]
+    public void Public_authorization_contracts_do_not_expose_domain()
+    {
+        Assert.Null(typeof(NexusAuthorizationOptions).GetProperty("Domain"));
+        Assert.Null(typeof(SubjectApiPolicy).GetProperty("Domain"));
+        Assert.Null(typeof(RedisAuthorizationStore).GetMethod("NormalizeDomain"));
     }
 
     [Fact]

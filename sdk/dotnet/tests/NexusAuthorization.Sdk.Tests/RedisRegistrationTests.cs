@@ -63,7 +63,6 @@ public sealed class RedisRegistrationTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["NexusAuthorization:ServiceResource"] = "orders.api",
-                ["NexusAuthorization:Domain"] = "tenant-a",
                 ["NexusAuthorization:Redis:Host"] = "redis.internal",
                 ["NexusAuthorization:Redis:Port"] = "6380",
                 ["NexusAuthorization:Redis:Database"] = "3"
@@ -84,7 +83,6 @@ public sealed class RedisRegistrationTests
         var redis = provider.GetRequiredService<IOptions<RedisAuthorizationOptions>>().Value;
 
         Assert.Equal("orders.api", common.ServiceResource);
-        Assert.Equal("tenant-a", common.Domain);
         Assert.Equal("redis.internal", redis.Host);
         Assert.Equal(6380, redis.Port);
         Assert.Equal(3, redis.Database);

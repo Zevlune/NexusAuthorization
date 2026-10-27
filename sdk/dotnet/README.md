@@ -63,7 +63,6 @@ Redis 与 HTTP 的配置文件绑定也在 Action 中完成：
 {
   "NexusAuthorization": {
     "ServiceResource": "orders.api",
-    "Domain": "",
     "SubjectClaimType": "sub",
     "Redis": {
       "Host": "redis.example.internal",
@@ -88,7 +87,7 @@ Redis 与 HTTP 的配置文件绑定也在 Action 中完成：
 
 实际应用通常只保留所选 Provider 的子节。示例同时列出两者，是为了说明各自的
 配置位置。SDK 没有 `Provider` 配置枚举，也不会根据配置值自动切换 Redis 和
-HTTP。
+HTTP；选择哪个 `UseRedis` 或 `UseHttp` 由接入应用的启动代码决定。
 
 ## ASP.NET Core 快速接入
 
@@ -142,6 +141,12 @@ public sealed record Order(int Id, string Number);
 `NexusAuthorization`。未认证请求返回 `401`；已认证但缺少配置的主体声明，或
 Provider 没有给出明确 allow 决策的请求返回 `403`。
 
+`AddNexusAuthorization` 注册命名 policy 及对应的 `NexusAuthorizationHandler`，
+它与宿主的其他 handler 一起参与授权，不会替换框架 handler。SDK 不设置默认或
+fallback policy；仅使用 `[Authorize]` 执行宿主默认策略，未标注授权策略的端点
+不会自动启用 Nexus 检查。Controller 上的 Nexus 策略会作用于其 Action，
+`[AllowAnonymous]` 可以跳过授权。
+
 handler 使用当前 HTTP 方法、完整请求路径和认证主体中的
 `NexusAuthorization:SubjectClaimType` 调用统一接口。身份认证、subject 来源和
 其他业务 authorization policy 仍由应用维护。
@@ -155,7 +160,6 @@ builder.Services
     .AddNexusAuthorization(options =>
     {
         options.ServiceResource = "orders.api";
-        options.Domain = "";
         options.SubjectClaimType = "sub";
     })
     .UseRedis(options =>
@@ -169,8 +173,9 @@ builder.Services
 公共 `NexusAuthorizationOptions` 只有：
 
 - `ServiceResource`：必填，当前应用的服务资源标识。
-- `Domain`：业务域；空值表示默认域。
 - `SubjectClaimType`：认证主体中可信 subject 的声明类型，默认 `sub`。
+
+SDK 仅支持默认域，不提供可配置域，也不对外暴露 `NormalizeDomain` API。
 
 Redis 的 `RedisAuthorizationOptions` 和 HTTP 的
 `HttpAuthorizationOptions` 与公共选项分属各自程序集。
@@ -191,7 +196,6 @@ builder.Services
     .AddNexusAuthorization(options =>
     {
         options.ServiceResource = "orders.api";
-        options.Domain = "";
         options.SubjectClaimType = "sub";
     })
     .UseHttp(options =>
@@ -297,9 +301,11 @@ SDK 当前不提供 `UseGrpc` API、服务端 proto 或内置 gRPC Provider。
 HTTP 模式的 `HttpAuthorizationOptions` 包含：
 
 - `BaseUrl`：授权中心根地址。
-- `AppKey`：调用方应用标识。
+- `AppKey`：调用方应用标识，作为请求 JSON 的 `appKey` 发送。
 - `ServiceCredential`：可选的固定 Bearer 凭证；默认空值，转发当前请求的 Bearer Token。
 - `TimeoutMilliseconds`：默认 `3000` 毫秒；非正数在调用时使用默认值。
+
+SDK 将 `AppKey` 放在 HTTP 实现选项中；Redis 实现的业务 key 和策略身份不使用它。
 
 SDK 向以下地址发起 `POST`：
 
@@ -314,11 +320,12 @@ SDK 向以下地址发起 `POST`：
   "appKey": "orders",
   "serviceResource": "orders.api",
   "subject": "user-123",
-  "domain": "",
   "method": "GET",
   "path": "/api/orders/1"
 }
 ```
+
+请求 JSON 不发送 `domain`。现有授权中心服务端会把缺失字段按默认域处理。
 
 默认从当前业务请求读取 `Authorization`，向下游发送：
 
@@ -326,17 +333,22 @@ SDK 向以下地址发起 `POST`：
 Authorization: Bearer <当前请求的 Token>
 ```
 
-`UseHttp` 自动注册 `IHttpContextAccessor`，应用无需额外注册。Provider 每次调用时
-读取当前请求，令牌只写入这次出站请求，不保存在共享客户端中。Bearer 方案名不区分
-大小写；缺少上下文、没有 Bearer Token、多个 Authorization 值或令牌格式错误时，
-返回 `bearer_token_required`，不会调用下游。只存在登录 Cookie 时不会自动提取 Token。
-`subject` 仍来自应用已经验证的认证主体。
+HTTP 模式默认转发当前入站 `Authorization: Bearer`。`UseHttp` 自动注册
+`IHttpContextAccessor`；ASP.NET Core 宿主已提供 Logging，无需额外注册。Provider 每次调用时读取当前请求，令牌只写入
+这次出站请求，不保存在共享客户端中。Bearer 方案名不区分大小写；缺少上下文、
+没有 Bearer Token、多个 Authorization 值或令牌格式错误时，返回
+`bearer_token_required`，不会调用下游。Cookie 不会被自动提取或转换成 Bearer
+Token；只存在登录 Cookie 时仍按缺少 Token 处理。`subject` 仍来自应用已经验证的
+认证主体。
 
 例如，ASP.NET Core 应用无需配置固定凭证：
 
 ```csharp
 builder.Services
-    .AddNexusAuthorization(options => options.ServiceResource = "orders.api")
+    .AddNexusAuthorization(options =>
+    {
+        options.ServiceResource = "orders.api";
+    })
     .UseHttp(options =>
     {
         options.BaseUrl = "https://authorization.example.com";
@@ -344,11 +356,12 @@ builder.Services
     });
 ```
 
-下游需要接受并验证转发的用户令牌。当前仓库 Go 服务的 `/api/v1/authorize`
-仍校验 `authorization.service_credential`，尚不接受用户访问令牌；直接对接该接口时，
-需显式配置匹配的 `ServiceCredential`。设置后，SDK 优先使用该固定凭证，覆盖入站
-Token，也支持没有 HTTP 上下文的后台任务。固定凭证通过环境变量、user-secrets
-或部署平台的 secret 机制注入。
+固定 Bearer 凭证一旦设置就覆盖入站 Token，也支持没有 HTTP 上下文的后台任务。
+当前仓库 Go 服务的 `/api/v1/authorize` 仍只认匹配的
+`authorization.service_credential`，尚不支持用用户访问令牌代替服务凭证。因此，
+直接调用该接口时必须显式配置与中心一致的 `ServiceCredential`，包括 Demo 使用
+Cookie 登录的场景；Cookie 不会自动提取并保存为可用于调用该接口的令牌。固定
+凭证应通过环境变量、user-secrets 或部署平台的 secret 机制注入。
 
 授权中心应返回 `200 OK` 和合法决策 JSON，例如：
 
@@ -370,15 +383,16 @@ SDK 只接受一致的决策：
 重复或矛盾字段、网络错误和超时都会 fail closed。SDK 不跟随 HTTP 重定向，
 也不发送 Cookie。
 
-HTTP 配置直接使用调用方设置的值，SDK 不再对 `BaseUrl`、`AppKey`、
-`ServiceCredential` 或超时添加选项校验。
+HTTP 配置直接使用调用方设置的值。SDK 不注册
+`HttpAuthorizationOptions` validator，也不对 `BaseUrl`、`AppKey`、`ServiceCredential`
+或超时添加实现层启动校验。
 
 ## Redis 读取契约
 
 Redis 模式的业务键格式为：
 
 ```text
-{KeyPrefix}:{QueryEscape(trim(ServiceResource))}:{QueryEscape(trim(subject))}[:{QueryEscape(normalizedDomain)}]
+{KeyPrefix}:{QueryEscape(trim(ServiceResource))}:{QueryEscape(trim(subject))}
 ```
 
 - SDK 对每个受保护请求直接执行一次 Redis `GET`，对应
@@ -386,11 +400,15 @@ Redis 模式的业务键格式为：
   发布号或其他辅助 key。
 - `QueryEscape` 与 Go `url.QueryEscape` 的编码约定一致：先对输入执行 `trim`，
   按 UTF-8 做百分号编码，并使用 `+` 表示空格。
-- 空字符串和字面量 `global` 都归一化为空域，键不追加 domain 后缀；具名
-  domain 保留原值，经 `trim` 和 `QueryEscape` 后追加。
-- STRING 值必须是对应 `subject`、`service_resource` 和归一化 `domain` 的完整
-  策略 JSON，最大为 `16 MiB`。业务 key 不设 TTL。
-- 中心的授权策略合并所有启用应用对该用户、服务和 domain 的贡献；应用不是
+- 业务 key 不含 domain 段或 domain 后缀。SDK 只支持默认域。
+- STRING 值必须是对应 `subject` 和 `service_resource` 的完整策略 JSON，最大为
+  `16 MiB`。业务 key 不设 TTL。
+- 为兼容中心已有的默认域 String 策略，JSON 中的 `domain` 可以缺失、为 `null`、
+  为空字符串或为字面量 `global`；经 `trim` 后这些值都等价于默认域。SDK 内部
+  仍会检查这份元数据，非默认具名 domain 会以 `policy_identity_mismatch` 拒绝。
+- `SubjectApiPolicy` 不对外暴露 `Domain` 属性；内部仍映射该 JSON 字段，仅用于上述
+  兼容校验，不表示 SDK 支持具名域。
+- 中心写入默认域业务 key 的策略仍合并所有启用应用对该用户和服务的贡献；应用不是
   Redis key 或策略身份的隔离维度。某个应用没有授权时，不会覆盖其他启用应用
   已合并的授权。
 - 旧应用级策略不会被当作兼容值读取。策略中出现非空
@@ -435,38 +453,67 @@ Redis 连接；已有的 `IHttpContextAccessor` 注册会被保留。
 
 ## 配置注册
 
-公共配置要求非空 `ServiceResource` 和非空 `SubjectClaimType`。
-公共配置通过核心库的启动校验。`UseRedis` 和 `UseHttp` 只应用各自的配置 Action，
-并注册 Provider 及所需依赖；两者均不注册选项校验器或启动校验。
+公共配置要求非空 `ServiceResource` 和非空 `SubjectClaimType`，并通过核心库的
+启动校验。`UseRedis` 和 `UseHttp` 只应用各自的配置 Action，并注册 Scoped
+Provider 及所需依赖；两者均不注册 `IValidateOptions<T>` 或实现层启动校验。
 
 配置在启动时绑定，修改配置后应重启应用。
 
 ## 仓库内 Demo
 
-仓库 Demo 保留现有的 `AuthorizationCenter` 和顶层 `Redis` 配置节，继续兼容原有
-配置路径和 user-secrets。它不保留 `Provider` 配置切换，而是直接在
-`demo/dotnet/Program.cs` 中显式选择 Redis：
+仓库 Demo 保留 `AuthorizationCenter` 和顶层 `Redis` 的既有配置路径及 user-secrets，
+并新增顶层 `Http`。`AuthorizationCenter:Provider` 默认 `Redis`，比较时忽略大小写
+和首尾空白，只接受 `Redis`、`Http`；未知值在启动时直接报错。这个开关属于 Demo，
+SDK 本身没有 Provider 配置枚举或自动切换逻辑。
+
+`demo/dotnet/Program.cs` 先保存 `AddNexusAuthorization(...)` 返回的 Builder，
+再用 `switch` 显式调用 Action-only、`void` 返回的 `UseRedis` 或 `UseHttp`：
 
 ```csharp
 using NexusAuthorization.Sdk;
 using NexusAuthorization.Sdk.Redis;
+using NexusAuthorization.Sdk.Http;
 
 var settings = builder.Configuration.Get<DemoSettings>()
     ?? throw new InvalidOperationException("缺少配置。");
 
-builder.Services
-    .AddNexusAuthorization(settings.ConfigureAuthorization)
-    .UseRedis(settings.ConfigureRedis);
+var nexus = builder.Services
+    .AddNexusAuthorization(settings.ConfigureAuthorization);
+
+switch (settings.AuthorizationCenter.Provider.Trim().ToUpperInvariant())
+{
+    case "REDIS":
+        nexus.UseRedis(settings.ConfigureRedis);
+        break;
+    case "HTTP":
+        nexus.UseHttp(settings.ConfigureHttp);
+        break;
+    default:
+        throw new InvalidOperationException(
+            "AuthorizationCenter:Provider 必须为 Redis 或 Http。");
+}
 ```
 
-`DemoSettings.ConfigureAuthorization` 把旧
-`AuthorizationCenter.ServiceResource`、`Domain` 和 `SubjectClaimType` 映射到公共
-`NexusAuthorizationOptions`；`DemoSettings.ConfigureRedis` 把顶层 `Redis` 映射到
-`RedisAuthorizationOptions`。`AuthorizationCenter.AppKey` 为兼容现有 Demo
-配置而保留，不会被解释成 SDK 的通用 Provider 选择。
+`DemoSettings.ConfigureAuthorization` 把 `AuthorizationCenter.ServiceResource`
+和 `SubjectClaimType` 映射到公共 `NexusAuthorizationOptions`；
+`ConfigureRedis` 映射顶层 `Redis`；`ConfigureHttp` 映射顶层 `Http` 的连接选项，
+并把 `AuthorizationCenter.AppKey` 赋给 `HttpAuthorizationOptions.AppKey`。
+Demo 沿用已有的 `AuthorizationCenter:AppKey` 配置路径，因此 Demo 的 `Http:AppKey`
+不会生效；其他项目直接绑定 SDK HTTP 选项时可以在该选项所在配置节设置 `AppKey`。
 
-Demo 项目只引用 `NexusAuthorization.Sdk.Redis`，通过项目依赖传递引用核心项目；
-不需要再单独引用核心项目或旧 ASP.NET Core 包。
+Demo 同时项目引用 `NexusAuthorization.Sdk.Redis` 和
+`NexusAuthorization.Sdk.Http`。两个实现项目都传递引用
+`NexusAuthorization.Sdk` 核心项目，因此 Demo 不需要再单独引用核心项目或旧
+ASP.NET Core 包。
+
+在 `demo/dotnet/appsettings.json` 设置 `AuthorizationCenter:Provider` 为 `Redis`
+或 `Http`，并填写所选实现的连接配置；也可在启动时覆盖：
+
+```sh
+AuthorizationCenter__Provider=Http dotnet run --project demo/dotnet
+```
+
+完整配置及 Cookie / 服务凭证说明见 [Demo README](../../demo/README.md)。
 
 ## 打包与引用
 
@@ -557,7 +604,7 @@ HTTP 请求、Controller 属性、拒绝/撤销、超时、重定向、响应限
 dotnet test sdk/dotnet/tests/NexusAuthorization.Sdk.IntegrationTests/NexusAuthorization.Sdk.IntegrationTests.csproj
 ```
 
-Demo 的 Redis 集成测试项目位于：
+Demo 的 Redis / Http 集成测试项目位于：
 
 ```text
 demo/tests/Demo.Api.IntegrationTests
@@ -579,9 +626,16 @@ Docker 可用；HTTP 集成测试只监听本机随机端口，不访问外部�
 dotnet test demo/NexusAuthorization.Demo.sln
 ```
 
-2026-10-26 验证结果：144 项 SDK 单元测试、30 项真实 HTTP 集成测试、49 项临时
-Redis 集成测试通过，0 项失败。4 项现网 Redis 测试未启用，不计入通过数量。
-新增测试同时修复了空路径模板被当作根路径匹配、可释放 Provider 重复释放的问题。
+2026-10-27 验证结果：145 项 SDK 单元测试、30 项 SDK 真实 HTTP 集成测试、
+76 项 Demo 集成测试通过，共 251 项通过、0 项失败。Demo 包含 58 项临时 Redis
+测试及 18 项 HTTP / Provider 配置测试；4 项现网 Redis 测试未启用。
+报告位于 `demo/TestResults/sdk-remove-domain-20261027/verified`，本次未访问现网服务。
+本次补充验证公开契约不再提供 Domain、原始 HTTP JSON 不含 domain、Redis 默认域
+元数据兼容、具名域策略拒绝及非法域字段类型拒绝；保留服务和用户隔离检查。
+新增 Demo 测试通过实际 `Program` 的配置分支和真实 Controller 验证 HTTP 请求，
+覆盖九个业务端点、Bearer 转发、固定凭证、缺少令牌、撤权、匿名和仅认证端点，
+并检查 HTTP 模式不注册 Redis 连接、未知 Provider 启动失败。
+此前测试已修复空路径模板被当作根路径匹配、可释放 Provider 重复释放的问题。
 HTTP 测试覆盖默认 Bearer 转发、固定凭证覆盖、缺少或非法 Token 拒绝、并发用户令牌
 隔离，以及后续请求不会复用上一次 Token。
 生命周期测试验证 Scoped Provider 的实例隔离、Scoped 依赖注入、作用域结束时只释放

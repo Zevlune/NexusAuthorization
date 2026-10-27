@@ -2,17 +2,17 @@
 
 解决方案入口为 `demo/NexusAuthorization.Demo.sln`，可使用 Visual Studio 或 Rider 直接打开。在仓库根目录执行 `dotnet build demo/NexusAuthorization.Demo.sln` 构建，使用 `dotnet run --project demo/dotnet` 启动。
 
-这是一个采用 Controllers 模式的 .NET 10 示例。Demo 使用 OpenID Connect 完成统一登录，继续通过 introspection 校验 Cookie 或 Bearer 所代表的访问令牌，并引用 [.NET SDK](../sdk/dotnet/README.md) 读取 NexusAuthorization 发布的业务 String 策略。默认 Redis 模式不访问数据库，也不需要权限中心服务调用凭证。
+这是一个采用 Controllers 模式的 .NET 10 示例。Demo 使用 OpenID Connect 完成统一登录，继续通过 introspection 校验 Cookie 或 Bearer 所代表的访问令牌，并通过 [.NET SDK](../sdk/dotnet/README.md) 执行业务授权。`AuthorizationCenter:Provider` 默认选择 Redis，也可切换到 Http 调用授权中心 `/api/v1/authorize`。Redis 模式直接读取中心发布的业务 String，不访问数据库；Http 模式需要中心服务凭证。Demo 本身不访问授权中心数据库。
 
 ## 项目结构
 
-`demo/dotnet/Controllers` 放置全部入口和业务接口，包括 Home、Health、Auth、Orders、Products、Reports 和 Public。`Program.cs` 通过 `AddControllers()` 和 `MapControllers()` 注册控制器，并配置登录、认证、令牌 introspection 和 Redis 授权策略。OIDC 协议回调 `/signin-oidc` 由认证中间件处理。
+`demo/dotnet/Controllers` 放置全部入口和业务接口，包括 Home、Health、Auth、Orders、Products、Reports 和 Public。`Program.cs` 通过 `AddControllers()` 和 `MapControllers()` 注册控制器，并配置登录、认证、令牌 introspection 和可切换的 NexusAuthorization Provider。OIDC 协议回调 `/signin-oidc` 由认证中间件处理。
 
-`Program.cs` 通过 `AddNexusAuthorization(settings.ConfigureAuthorization).UseRedis(settings.ConfigureRedis)` 注册 SDK。共享 Redis 连接、策略解析、匹配器和授权 handler 均由 `sdk/dotnet` 中的核心库和 Redis 实现库提供，Demo 不再包含这些实现。SDK 由 DI 容器创建和释放共享连接，在每次受保护请求中对业务 key 执行 `GET`，读取并严格解析完整策略 JSON。
+`Program.cs` 先保存 `AddNexusAuthorization(settings.ConfigureAuthorization)` 返回的 Builder，再用 `switch` 显式调用 Action-only、返回 `void` 的 `UseRedis(settings.ConfigureRedis)` 或 `UseHttp(settings.ConfigureHttp)`。Provider 选择开关只存在于 Demo 启动代码，SDK 自己没有 Provider 配置。通用契约、ASP.NET Core policy/handler 位于核心项目，Redis 和 Http 分别由两个实现项目提供；核心、Redis、Http 三个项目都通过项目引用进入 Demo。
 
-StackExchange.Redis 的 multiplexer 线程安全，适合在整个应用内共享复用；`GetDatabase()` 只返回轻量数据库句柄，不必另行缓存。可参考[官方基础用法](https://stackexchange.github.io/StackExchange.Redis/Basics.html)。
+Redis 模式下，SDK 通过 DI 创建或复用共享连接，在每次受保护请求中对业务 key 执行 `GET`。StackExchange.Redis 的 multiplexer 线程安全，适合在整个应用内共享；`GetDatabase()` 只返回轻量数据库句柄，不必另行缓存。可参考[官方基础用法](https://stackexchange.github.io/StackExchange.Redis/Basics.html)。
 
-`SubjectApiPolicyMatcher` 根据请求方法和完整请求路径，从策略中的 `Catalog` 选择接口并检查授权。Demo 不缓存授权结果，也不回源数据库或权限中心 HTTP API。
+Redis 模式下，`SubjectApiPolicyMatcher` 根据请求方法和完整请求路径，从策略中的 `Catalog` 选择接口并检查授权。Http 模式把主体、方法、路径、应用和服务发送给授权中心；请求不包含 domain。两种模式都不由 Demo 缓存授权结果；Demo 始终不直接访问数据库。
 
 `demo/dotnet/Demo.Api.http` 提供匿名访问、Bearer 调用、商品增删改查、参数校验和 CSV 导出的请求示例，可在支持 `.http` 文件的 IDE 中运行，也可在 Swagger 中测试。
 
@@ -21,45 +21,61 @@ StackExchange.Redis 的 multiplexer 线程安全，适合在整个应用内共�
 默认地址：
 
 - Demo：`http://localhost:5055`
+- Http Provider 示例 BaseUrl：`http://localhost:8080`
 - NexusAuth：以 `Auth:Authority` 的实际配置为准
 
 ## 配置
 
-`demo/dotnet/appsettings.json` 中的非敏感配置应与下面一致：
+配置结构与下面一致，具体主机和密钥按本地环境填写：
 
 ```json
 {
   "AuthorizationCenter": {
+    "Provider": "Redis",
     "AppKey": "bugmanager.admin",
     "ServiceResource": "nexusauthorization.demo.api",
-    "Domain": ""
+    "SubjectClaimType": "sub"
   },
   "Redis": {
-    "Host": "192.168.31.200",
-    "Port": 8433,
+    "Host": "redis.example.internal",
+    "Port": 6379,
     "User": "",
     "Password": "",
     "Database": 0,
     "KeyPrefix": "nexusauthorization:prod",
     "TimeoutMilliseconds": 2000
+  },
+  "Http": {
+    "BaseUrl": "http://localhost:8080",
+    "ServiceCredential": "",
+    "TimeoutMilliseconds": 3000
   }
 }
 ```
 
-`AuthorizationCenter` 使用 `AppKey`、`ServiceResource` 和 `Domain`。`AppKey` 仍是运行时请求上下文，但不再出现在 Redis 业务 key 或策略 JSON 中，也不是授权隔离维度；中心会合并所有启用应用对该服务的用户权限。Demo 当前配置为应用 `bugmanager.admin`、服务资源 `nexusauthorization.demo.api`、空域策略。配置在启动时读取，修改后需重启 Demo。
+`AuthorizationCenter:Provider` 默认 `Redis`，比较时忽略大小写及首尾空白，只接受 `Redis`、`Http`；其他值会让 Demo 在启动时直接报错。配置在启动时读取，修改后需重启 Demo。
 
-Demo 保留 `AuthorizationCenter` 和 `Redis` 两个配置节，以兼容已有 user-secrets。Demo.Api 只引用 `NexusAuthorization.Sdk.Redis`，并传递引用核心库；Redis 读取、路径匹配和 ASP.NET Core 授权 handler 均由 SDK 提供。通用上下文使用 `NexusAuthorizationOptions`，Redis 连接使用独立的 `RedisAuthorizationOptions`。其他项目可通过 Builder 的 `UseRedis(configure)` 或 `UseHttp(configure)` 选择实现；这两个方法仅接收配置 Action，返回 `void`。HTTP 实现位于独立的 `NexusAuthorization.Sdk.Http` 类库；接入方式见 [SDK 文档](../sdk/dotnet/README.md)。
+例如在配置好 `Http:BaseUrl` 和调用凭证后，通过环境变量切换并启动：
+
+```sh
+AuthorizationCenter__Provider=Http dotnet run --project demo/dotnet
+```
+
+`AuthorizationCenter` 保留 `AppKey`、`ServiceResource` 和 `SubjectClaimType`。`ConfigureAuthorization` 只把服务和主体声明映射到公共 `NexusAuthorizationOptions`；核心选项和 Demo 配置都不再有 Domain。`ConfigureHttp` 把 `AuthorizationCenter:AppKey` 映射到 `HttpAuthorizationOptions.AppKey`。因此 Demo 的 `Http:AppKey` 不会生效，应用标识沿用原配置路径。
+
+顶层 `Redis` 保持既有路径，映射到 `RedisAuthorizationOptions`。新增顶层 `Http` 映射到 `HttpAuthorizationOptions`，其中 `BaseUrl` 默认示例为 `http://localhost:8080`，`ServiceCredential` 默认为空，`TimeoutMilliseconds` 默认 `3000`。Demo.Api 同时项目引用 `NexusAuthorization.Sdk.Redis` 和 `NexusAuthorization.Sdk.Http`，两者都会传递引用核心库。
 
 通过 Demo 项目的 .NET user-secrets 或环境变量提供 `Redis:Password`、`Auth:ClientSecret` 等敏感值。文档不记录实际密钥：
 
 ```sh
 dotnet user-secrets set --project demo/dotnet "Auth:ClientSecret" "替换为 NexusAuth 客户端密钥"
 dotnet user-secrets set --project demo/dotnet "Redis:Password" "替换为 Redis 密码"
+dotnet user-secrets set --project demo/dotnet "Http:ServiceCredential" "替换为授权中心服务凭证"
 ```
 
 Redis 若需要 ACL 用户名，可在本机配置 `Redis:User`；当前默认值为空。
 
-默认启动配置使用 Development 环境，会自动加载 user-secrets；也可使用 `Redis__Password`、`Auth__ClientSecret` 环境变量提供密钥。
+默认启动配置使用 Development 环境，会自动加载 user-secrets；也可使用 `Redis__Password`、`Http__ServiceCredential`、`Auth__ClientSecret` 环境变量提供密钥。使用当前仓库 Go 服务的 `/api/v1/authorize` 时必须设置与中心一致的 `Http:ServiceCredential`，因为该接口只接受 `authorization.service_credential`。Cookie 不会被 SDK 自动提取或保存为服务令牌，不能替代这个固定凭证。
 
 ## 登录与鉴权流程
 
@@ -68,7 +84,7 @@ Redis 若需要 ACL 用户名，可在本机配置 `Redis:User`；当前默认�
 1. 浏览器通过 `/api/auth/login` 进入 ASP.NET Core OpenID Connect Authorization Code + PKCE。
 2. Cookie 请求由 OIDC 验证身份；Bearer 请求校验 JWT 的签名、issuer、audience 和有效期。
 3. 两种身份都会通过 `/connect/introspect` 检查 `sub`、client、issuer、scope 和撤销状态。
-4. 受保护业务接口再把 token 中的 `sub` 与配置的 service、domain 组合成业务 key，直接读取并严格解析 NexusAuthorization Redis String 策略。
+4. 受保护业务接口通过启动时选定的 Provider 执行 NexusAuthorization 检查。Redis 模式用 token 中的 `sub` 和 service 组成业务 key 并读取完整策略；Http 模式向授权中心发送不含 domain 的授权请求。
 
 令牌与 introspection 请求的客户端认证方式由 `Auth:TokenEndpointAuthMethod` 控制。默认 `client_secret_basic` 必须与 NexusAuth 中登记的方式一致；也可以把两端同步改为 `client_secret_post`，无需修改代码。
 
@@ -89,23 +105,25 @@ Swagger 的 Authorize 输入框可直接填入不带 `Bearer ` 前缀的 access 
 记配置中的 `KeyPrefix` 为 `prefix`。业务 key 中不包含应用段：
 
 ```text
-prefix:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(sub))>[:<QueryEscape(normalizedDomain)>]
+prefix:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(sub))>
 ```
 
-- 类型为 Redis STRING，值为一个用户、一个服务和归一化 domain 的完整策略 JSON。
+- 类型为 Redis STRING，值为一个用户和一个服务的完整策略 JSON。
 - JSON 字段为 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含 `application_key` 或 `application_id`。
 - JSON 由中心合并所有启用应用对该服务的授权；app 不覆盖其他 app，也不参与业务 key。
 - `ServiceResource` 和 `sub` 都先 `trim`，再按 Go `url.QueryEscape` 编码。Go `QueryEscape` 使用 `+` 表示空格。
-- `Domain` 也先 `trim`；空字符串和字面量 `global` 都归一化为空域，且不追加后缀。具名 domain 经 `QueryEscape` 后追加。
+- 业务 key 不含 domain 段或 domain 后缀；.NET SDK/Demo 仅支持默认域，不暴露 `NormalizeDomain` API，也没有可配置域。
+- 为兼容中心已有的默认域 String 策略，JSON 的 `domain` 可以缺失、为 `null`、为空字符串或为字面量 `global`；经 `trim` 后都等价于默认域。非默认具名 domain 会以 `policy_identity_mismatch` 拒绝。
+- `SubjectApiPolicy` 不对外暴露 `Domain` 属性；内部仍映射该 JSON 字段，只用于默认域兼容校验。
 - 每个 String value 上限 16 MiB，key 不设 TTL。
 
-当前 Demo 配置下，`sub = 51b21204-54ab-4da6-ad83-d14f72ced46f`、服务 `nexusauthorization.demo.api`、空域的业务 key 为：
+当前 Demo 配置下，`sub = 51b21204-54ab-4da6-ad83-d14f72ced46f`、服务 `nexusauthorization.demo.api`、默认域的业务 key 为：
 
 ```text
 nexusauthorization:prod:nexusauthorization.demo.api:51b21204-54ab-4da6-ad83-d14f72ced46f
 ```
 
-Demo 对该 key 直接执行 `GET`。读取后要求 JSON 合法，`subject`、`service_resource` 和归一化 `domain` 与请求身份完全一致，并检查 `service_active`。String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB、Redis 超时或不可用时拒绝请求。Demo 不读取 `rbac:api:app:*`、`state`、members、锁或发布号，不执行 Lua，也不接受旧应用级 JSON 的 fallback。
+Provider 为 Redis 时，Demo 对该 key 直接执行 `GET`。读取后要求 JSON 合法，`subject` 和 `service_resource` 与请求身份完全一致，内部 domain 元数据属于默认域，并检查 `service_active`。String 缺失、类型错误、JSON 损坏、身份不匹配、具名 domain、超过 16 MiB、Redis 超时或不可用时拒绝请求。Demo 不读取 `rbac:api:app:*`、`state`、members、锁或发布号，不执行 Lua，也不接受旧应用级 JSON 的 fallback。
 
 ## Catalog API 匹配
 
@@ -124,7 +142,7 @@ Demo 对该 key 直接执行 `GET`。读取后要求 JSON 合法，`subject`、`
 按当前配置，新 String 协议下的目标记录为：
 
 - 用户 `51b21204-54ab-4da6-ad83-d14f72ced46f` 拥有角色 `order-review`。
-- 服务资源为 `nexusauthorization.demo.api`，domain 为空，因此使用无域业务 key。
+- 服务资源为 `nexusauthorization.demo.api`；策略的 domain 元数据为默认域，业务 key 不含 domain 后缀。
 - 完整 JSON 位于 `nexusauthorization:prod:nexusauthorization.demo.api:51b21204-54ab-4da6-ad83-d14f72ced46f`，类型为 String；JSON 不含应用标识。
 - 该策略合并所有启用应用对该用户的授权，`service_active=true`。
 - Catalog 只有 `GET /api/demo/orders` 和 `GET /api/demo/orders/{id}` 两项。
@@ -141,19 +159,19 @@ Demo 对该 key 直接执行 `GET`。读取后要求 JSON 合法，`subject`、`
 | `GET` | `/api/auth/login` | 浏览器登录；未登录时直接 `302` 到 NexusAuth |
 | `GET` | `/api/auth/me` | 仅要求已认证 |
 | `POST` | `/api/auth/logout` | 清除 Demo Cookie，返回 `{ "logoutUrl": "..." }`；浏览器需继续打开该地址完成 SSO 登出 |
-| `GET` | `/api/demo/orders` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权 |
-| `GET` | `/api/demo/orders/{id:int}` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权；路径参数参与匹配 |
-| `GET` | `/api/demo/products` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权 |
-| `GET` | `/api/demo/products/{id:int}` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权；路径参数参与匹配 |
-| `POST` | `/api/demo/products` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权 |
-| `PUT` | `/api/demo/products/{id:int}` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权；路径参数参与匹配 |
-| `DELETE` | `/api/demo/products/{id:int}` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权；路径参数参与匹配 |
-| `GET` | `/api/demo/reports/summary` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权 |
-| `POST` | `/api/demo/reports/export` | 已认证，并通过 Redis `Catalog` 与 `apis` 授权 |
+| `GET` | `/api/demo/orders` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查 |
+| `GET` | `/api/demo/orders/{id:int}` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查；路径参数参与匹配 |
+| `GET` | `/api/demo/products` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查 |
+| `GET` | `/api/demo/products/{id:int}` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查；路径参数参与匹配 |
+| `POST` | `/api/demo/products` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查 |
+| `PUT` | `/api/demo/products/{id:int}` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查；路径参数参与匹配 |
+| `DELETE` | `/api/demo/products/{id:int}` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查；路径参数参与匹配 |
+| `GET` | `/api/demo/reports/summary` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查 |
+| `POST` | `/api/demo/reports/export` | 已认证，并通过所选 Provider 的 NexusAuthorization 检查 |
 | `GET` | `/api/public/ping` | 匿名 |
 | `GET` | `/api/public/info` | 匿名 |
 
-控制器迁移后，健康检查、认证、订单等原有端点路径保持不变。
+业务 Controller 使用核心库的 `[NexusAuthorize]` 展示 SDK 接入方式。它等价于原生 `[Authorize(Policy = NexusAuthorizationDefaults.PolicyName)]`。只写 `[Authorize]` 不会执行 NexusAuthorization 检查；标记 `[AllowAnonymous]` 的接口也不会检查 Nexus。健康检查、认证、订单等原有端点路径保持不变。
 
 商品创建和更新的请求体格式如下：
 
@@ -164,13 +182,17 @@ Demo 对该 key 直接执行 `GET`。读取后要求 JSON 合法，`subject`、`
 }
 ```
 
-`name` 必填且最长 100 个字符；`price` 必须在 `0.01` 到 `1000000` 之间。请求先通过认证和 Redis 授权，再由数据注解和 `[ApiController]` 自动校验；不符合约束时返回 `400`。
+`name` 必填且最长 100 个字符；`price` 必须在 `0.01` 到 `1000000` 之间。请求先通过认证和所选 Provider 的 NexusAuthorization 检查，再由数据注解和 `[ApiController]` 自动校验；不符合约束时返回 `400`。
 
 `POST /api/demo/products` 返回 `201 Created`，`Location` 指向 `/api/demo/products/3`，响应体包含 id 为 `3` 的回显数据及 `persisted=false`。Demo 只回显请求，不保存数据，因此随后访问该详情仍会返回 `404`。更新和删除响应同样包含 `persisted=false`，删除只返回“演示删除，不保存数据”。
 
 `POST /api/demo/reports/export` 下载文件名 `demo-orders.csv` 的 UTF-8 CSV，媒体类型为 `text/csv`。文件包含 `id,number,amount` 表头和 `DEMO-001`、`DEMO-002` 两条固定订单数据。
 
-匿名接口不要求 Redis；`/api/auth/me` 只要求认证；订单、商品和报表接口使用 `DemoAuthenticationDefaults.PermissionPolicy`，未登录返回 `401`，已登录但没有可放行的 Redis 策略返回 `403`。
+匿名接口不要求 NexusAuthorization；`/api/auth/me` 只要求认证；订单、商品和报表接口使用 `[NexusAuthorize]`，未登录返回 `401`，已登录但没有明确 allow 决策返回 `403`。
+
+`[NexusAuthorize]` 等价于 `[Authorize(Policy = NexusAuthorizationDefaults.PolicyName)]`。
+Demo 未设置全局或 fallback 授权策略；`[AllowAnonymous]` 跳过授权，裸 `[Authorize]`
+执行默认认证策略，不会调用 Nexus Provider。Controller 上的策略也适用于其 Action。
 
 Swagger UI 位于 `/swagger`，OpenAPI 文档位于 `/swagger/v1/swagger.json`。
 
@@ -195,25 +217,25 @@ Demo 客户端的登记项保持不变：
 3. 角色和 API 授予必须同时满足；当前用户角色为 `order-review`，订单列表已授予，订单详情未授予。
 4. 新版中心完成全量重建且发布没有返回 `PUBLISH_PENDING` 后，确认业务 key 是可严格解析的 String，JSON 身份、`service_active`、`Catalog`、`apis` 和 `roles` 符合上述目标。
 
-Demo 不依赖数据库直连，也不需要配置权限中心的 `BaseUrl`、`ServiceCredential` 或服务调用凭证。登录完成后，可通过 `GET /api/auth/me` 确认当前 token 的 `sub`。
+Demo 不依赖数据库直连。Redis Provider 需要使用顶层 `Redis`；Http Provider 需要使用顶层 `Http:BaseUrl` 和与中心一致的 `Http:ServiceCredential`。当前 Go 服务的 `/api/v1/authorize` 只认服务凭证，不接受用户访问令牌；Cookie 登录后也不会由 SDK 自动提取并保存令牌。登录完成后，可通过 `GET /api/auth/me` 确认当前 token 的 `sub`。
 
 ## 推荐启动与切换顺序
 
 1. 在 NexusAuth 确认 Demo 客户端、回调地址、scope 和 audience 已登记，并让令牌认证方式与 Demo 配置一致。
-2. 将中心 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 与 Demo `Redis:KeyPrefix` / `Redis__KeyPrefix` 配成同一个值。默认生产值为 `nexusauthorization:prod`，默认开发值为 `nexusauthorization:dev`；前缀可按部署配置。
-3. 进入维护窗口，停止旧 Hash reader/writer 的鉴权流量，包括旧中心、旧 Demo、旧 SDK 和其他读写进程；新旧协议不能混跑。
-4. 启动新版中心并执行全量重建，确认新 String 写入专用业务 key 且没有发布失败。不要读取旧 `rbac:api:app` 辅助 key 作为 readiness。
-5. 中心发布成功后启动新版 Demo：`dotnet run --project demo/dotnet`，默认监听 `http://localhost:5055`。启动前在本机设置 `Auth:ClientSecret` 和 `Redis:Password`，并确认 `AuthorizationCenter` 与 `Redis` 的非敏感配置正确。
+2. 选择 `AuthorizationCenter:Provider`。Redis 模式需将中心 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 与 Demo `Redis:KeyPrefix` / `Redis__KeyPrefix` 配成同一个值；Http 模式需设置 `Http:BaseUrl` 和匹配的 `Http:ServiceCredential`。
+3. Redis 模式按 String 协议准备中心发布；Http 模式确认授权中心 `/api/v1/authorize` 可访问且服务凭证有效。Http 请求使用 `AuthorizationCenter:AppKey` 且不发送 domain，Redis 策略按服务和主体隔离。
+4. 从旧 Hash 协议升级的环境，先按 [Redis 接入说明](../doc/redis-integration.md) 完成迁移。
+5. 启动 Demo：`dotnet run --project demo/dotnet`，默认监听 `http://localhost:5055`。启动前设置 `Auth:ClientSecret`，并按所选 Provider 设置 Redis 或 Http 配置；未知 Provider 值会阻止启动。
 6. 打开 `http://localhost:5055/swagger`；使用 Cookie 时，在新标签页直接访问 `http://localhost:5055/api/auth/login`。不使用 Cookie 时，在 Swagger Authorize 或 `.http` 文件中填入原始 access token。
-7. 先验收允许、拒绝、String 缺失、类型/JSON 损坏和身份不匹配。确认旧 reader 已全部停止后，才可按旧 key 形状定向清理旧 Hash/state key；本次文档同步不连接现网、不清理、不部署。
+7. 验收允许、拒绝和 Provider 故障时的拒绝行为。Redis 模式还应验证 String 缺失、类型/JSON 损坏和身份不匹配。
 
 ## 集成测试
 
 测试用户固定为 `51b21204-54ab-4da6-ad83-d14f72ced46f`。本地测试在 testhost 中注入该 `sub`，覆盖真实 Controller、身份 handler、JSON 解析和 StackExchange.Redis 路径。
 
-SDK 三类库验证（2026-10-26）：144 项 SDK 单元测试、30 项真实 HTTP 集成测试及 49 项临时 Redis 集成测试通过，共 223 项，0 失败；4 项现网 Redis 测试未启用。新增覆盖规则匹配边界、宿主启动校验、Provider 释放与外部连接所有权、MVC 过滤器上下文，以及完整 HTTP 授权链路中的拒绝/撤销、超时、重定向、响应限制和用户隔离。测试发现并修复空模板可能匹配根路径、可释放 Provider 被重复释放的问题。TRX 报告位于 `demo/TestResults/sdk-expanded-20261026/release-final`。此次验证没有访问现网 Redis。
+2026-10-27 验证：145 项 SDK 单元测试、30 项 SDK 真实 HTTP 集成测试及 76 项 Demo 集成测试通过，共 251 项通过、0 项失败；4 项现网 Redis 测试未启用。Demo 包含 58 项临时 Redis 测试和 18 项 HTTP / Provider 配置测试，覆盖九个实际业务接口、默认 Bearer 转发、固定凭证、缺少令牌、即时撤权、匿名与仅认证端点、HTTP 模式不注册 Redis 连接及未知 Provider 启动失败。本次还验证 HTTP JSON 不含 domain、Redis 默认域元数据兼容、具名域策略拒绝和非法域字段类型拒绝。测试配置在 Program 选择 Provider 前注入，测试不另行注册 SDK。TRX 报告位于 `demo/TestResults/sdk-remove-domain-20261027/verified`。此次验证没有访问现网 Redis 或授权中心。
 
-本轮验证（2026-10-25）：Go `go test -race -count=1 ./...` 使用隔离临时 PostgreSQL 与 miniredis 全部包通过，覆盖多应用 union、服务移除、跨实例锁和单连接池；`go vet ./...` 通过。Demo 构建成功，0 个警告、0 个错误；修正一个测试预期后，45 项本地 String 协议集成测试全部通过。本轮没有访问现网 Redis，新版中心与 Demo 尚未部署，因此旧 12 项现网记录不能作为新协议通过结论。
+历史验证（2026-10-25）：Go `go test -race -count=1 ./...` 使用隔离临时 PostgreSQL 与 miniredis 全部包通过，覆盖多应用 union、服务移除、跨实例锁和单连接池；`go vet ./...` 通过。Demo 构建成功，0 个警告、0 个错误；修正一个测试预期后，45 项本地 String 协议集成测试全部通过。本轮没有访问现网 Redis，新版中心与 Demo 尚未部署，因此旧 12 项现网记录不能作为新协议通过结论。
 
 历史记录仅用于说明上轮工作，均属于旧 Hash/field/Lua 契约，不是新 String 协议结果：
 
@@ -237,22 +259,22 @@ dotnet test demo/NexusAuthorization.Demo.sln
 NEXUS_DEMO_RUN_LIVE_TESTS=1 dotnet test demo/NexusAuthorization.Demo.sln --filter 'Category=LiveRedis'
 ```
 
-`Category=LiveRedis` 只运行只读现网测试，不启动临时 Docker Redis，也不发布、清理或改写现网授权数据。新协议切换后，应以 String 业务 key 和严格身份解析路径重新执行并单独记录结果。`demo/tests/Demo.Api.IntegrationTests/live-authorization.json` 记录业务期望，仍应验证：
+`Category=LiveRedis` 固定选择 Redis Provider，只运行只读现网测试，不启动临时 Docker Redis，也不发布、清理或改写现网授权数据。新协议切换后，应以 String 业务 key 和严格身份解析路径重新执行并单独记录结果。`demo/tests/Demo.Api.IntegrationTests/live-authorization.json` 记录业务期望，仍应验证：
 
 - `GET /api/demo/orders` 返回 `200`。
 - `GET /api/demo/orders/1` 返回 `403`，鉴权决策原因为 `endpoint_not_granted`。
 - 其余七个受保护端点返回 `403`，鉴权决策原因为 `endpoint_not_found`。
 
-这些期望用于避免“所有请求都被拒绝”被误判为测试成功。调整用户、应用、服务、domain、角色或授权后，需要根据目标状态手工修改 `live-authorization.json`；不得按测试实际结果自动改写期望。
+这些期望用于避免“所有请求都被拒绝”被误判为测试成功。调整用户、应用、服务、角色或授权后，需要根据目标状态手工修改 `live-authorization.json`；不得按测试实际结果自动改写期望。
 
 ## 状态码与限制
 
 - 未登录调用 `/api/auth/me`、订单、商品或报表接口返回 `401`；Public、Health 和首页路由保持匿名。
-- 已登录但业务 String 缺失、Redis 类型错误、JSON 损坏、身份不匹配、超过 16 MiB、Redis 超时或不可用时，业务接口返回 `403`，不回退授权。
-- 已登录但 `Catalog` 无匹配项、目录歧义、目录项禁用或获胜 API ID 未授权时返回 `403`。
+- 已登录但所选 Provider 没有返回明确 allow 决策、请求超时或不可用时，业务接口返回 `403`，不自动回退到另一 Provider。
+- Redis 模式下，业务 String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB 时返回 `403`；`Catalog` 无匹配项、目录歧义、目录项禁用或获胜 API ID 未授权时也返回 `403`。
 - 商品请求体缺少 `name`、`name` 超过 100 个字符或 `price` 超出范围时，在已获授权后返回 `400`。
 - 未设置 `Auth:ClientSecret` 时，登录入口返回 `503`；令牌 introspection 失败或身份不满足要求时，受保护请求返回 `401`。
-- Demo 不保存数据库状态，也不缓存 Redis 授权结果；每个受保护请求都会直接读取完整业务 String，不访问 readiness、Lua 或其他 RBAC 辅助 key。
+- Demo 不保存数据库状态，也不缓存授权结果。Redis 模式每个受保护请求直接读取完整业务 String；Http 模式每个受保护请求调用一次授权中心 API。
 - access token 到期后需重新执行登录流程；SSO 登出需要浏览器继续打开 `/api/auth/logout` 返回的 `logoutUrl`。
 
 ## invalid_client 排查

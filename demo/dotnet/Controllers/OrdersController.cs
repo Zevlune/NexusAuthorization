@@ -1,10 +1,10 @@
-using Microsoft.AspNetCore.Authorization;
+using NexusAuthorization.Sdk;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Demo.Api.Controllers;
 
 [ApiController]
-[Authorize(Policy = DemoAuthenticationDefaults.PermissionPolicy)]
+[NexusAuthorize]
 [Route("api/demo/orders")]
 [Tags("Orders")]
 [ProducesResponseType(StatusCodes.Status401Unauthorized)]
@@ -12,7 +12,7 @@ namespace Demo.Api.Controllers;
 public sealed class OrdersController : ControllerBase
 {
     [HttpGet]
-    [EndpointSummary("订单列表：登录认证 + Redis 权限校验")]
+    [EndpointSummary("订单列表：登录认证 + SDK 权限校验")]
     [ProducesResponseType<DemoOrder[]>(StatusCodes.Status200OK)]
     public ActionResult<DemoOrder[]> List() => Ok(new[]
     {

@@ -165,7 +165,7 @@ public sealed class HttpAuthorizationProviderTests
     }
 
     [Fact]
-    public async Task AuthorizeAsync_PostsNormalizedCamelCaseRequestWithDedicatedBearer()
+    public async Task AuthorizeAsync_PostsNormalizedCamelCaseRequestWithoutDomainAndWithDedicatedBearer()
     {
         string? body = null;
         using var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
@@ -180,7 +180,7 @@ public sealed class HttpAuthorizationProviderTests
             return JsonResponse(AllowedJson);
         });
         var factory = new StubHttpClientFactory(handler);
-        var provider = CreateProvider(factory, domain: " global ");
+        var provider = CreateProvider(factory);
 
         var decision = await provider.AuthorizeAsync(
             " user-1 ",
@@ -193,13 +193,14 @@ public sealed class HttpAuthorizationProviderTests
 
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
-        Assert.Equal(6, root.EnumerateObject().Count());
+        Assert.Equal(5, root.EnumerateObject().Count());
         Assert.Equal("books", root.GetProperty("appKey").GetString());
         Assert.Equal("book-service", root.GetProperty("serviceResource").GetString());
         Assert.Equal("user-1", root.GetProperty("subject").GetString());
-        Assert.Equal(string.Empty, root.GetProperty("domain").GetString());
         Assert.Equal("GET", root.GetProperty("method").GetString());
         Assert.Equal("/orders/42", root.GetProperty("path").GetString());
+        Assert.DoesNotContain(root.EnumerateObject(), property =>
+            string.Equals(property.Name, "domain", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -445,15 +446,13 @@ public sealed class HttpAuthorizationProviderTests
 
     private static HttpAuthorizationProvider CreateProvider(
         StubHttpClientFactory factory,
-        string domain = "tenant-a",
         int timeoutMilliseconds = 3000,
         string? serviceCredential = "service-secret",
         IHttpContextAccessor? httpContextAccessor = null)
     {
         var options = new NexusAuthorizationOptions
         {
-            ServiceResource = " book-service ",
-            Domain = domain
+            ServiceResource = " book-service "
         };
         var httpOptions = new HttpAuthorizationOptions
         {

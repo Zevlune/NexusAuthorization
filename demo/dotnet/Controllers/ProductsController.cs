@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using Demo.Api;
-using Microsoft.AspNetCore.Authorization;
+using NexusAuthorization.Sdk;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,7 +8,7 @@ namespace Demo.Api.Controllers;
 
 [ApiController]
 [Route("api/demo/products")]
-[Authorize(Policy = DemoAuthenticationDefaults.PermissionPolicy)]
+[NexusAuthorize]
 [Tags("Products")]
 public sealed class ProductsController : ControllerBase
 {

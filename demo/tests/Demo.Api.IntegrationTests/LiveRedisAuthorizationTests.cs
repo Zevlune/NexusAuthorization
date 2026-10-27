@@ -24,7 +24,6 @@ public sealed class LiveRedisAuthorizationTests(LiveRedisFixture fixture, ITestO
         var profile = fixture.Profile;
         var settings = fixture.Factory.Settings.AuthorizationCenter;
         Assert.Equal(profile.ServiceResource, settings.ServiceResource);
-        Assert.Equal(profile.Domain, RedisAuthorizationStore.NormalizeDomain(settings.Domain));
 
         var connection = fixture.Factory.Services.GetRequiredService<IConnectionMultiplexer>();
         var database = connection.GetDatabase(fixture.Factory.Settings.Redis.Database);
@@ -34,7 +33,9 @@ public sealed class LiveRedisAuthorizationTests(LiveRedisFixture fixture, ITestO
         Assert.NotNull(policy);
         Assert.Equal(profile.Subject, policy.Subject);
         Assert.Equal(profile.ServiceResource, policy.ServiceResource);
-        Assert.Equal(profile.Domain, RedisAuthorizationStore.NormalizeDomain(policy.Domain));
+        using var document = JsonDocument.Parse(raw.ToString());
+        if (document.RootElement.TryGetProperty("domain", out var storedDomain))
+            Assert.True(storedDomain.GetString()?.Trim() is null or "" or "global");
         Assert.True(policy.ServiceActive);
         Assert.Contains(profile.ExpectedRole, policy.Roles ?? []);
         output.WriteLine($"已核对：{fixture.PolicyKey}，角色={profile.ExpectedRole}。");
@@ -98,10 +99,7 @@ public sealed class LiveRedisFixture : IAsyncLifetime
             var key = $"{Factory.Settings.Redis.KeyPrefix}:" +
                 $"{RedisAuthorizationStore.QueryEscape(Profile.ServiceResource.Trim())}:" +
                 RedisAuthorizationStore.QueryEscape(Profile.Subject.Trim());
-            var domain = RedisAuthorizationStore.NormalizeDomain(Profile.Domain);
-            return domain.Length == 0
-                ? key
-                : $"{key}:{RedisAuthorizationStore.QueryEscape(domain)}";
+            return key;
         }
     }
 
@@ -121,6 +119,10 @@ public sealed class LiveRedisFixture : IAsyncLifetime
             .AddJsonFile(Path.Combine(DemoProjectPaths.ApiDirectory, "appsettings.json"))
             .AddUserSecrets<Program>(optional: true)
             .AddEnvironmentVariables()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["AuthorizationCenter:Provider"] = "Redis"
+            })
             .Build();
         var settings = configuration.Get<DemoSettings>() ?? throw new InvalidOperationException("缺少 Demo 配置。");
         Factory = new AuthorizationApiFactory(settings);
@@ -138,7 +140,6 @@ public sealed class LiveAuthorizationProfile
 {
     public string Subject { get; init; } = "";
     public string ServiceResource { get; init; } = "";
-    public string Domain { get; init; } = "";
     public string ExpectedRole { get; init; } = "";
     public List<string> AllowedEndpoints { get; init; } = [];
     public Dictionary<string, string> DeniedReasons { get; init; } = [];
