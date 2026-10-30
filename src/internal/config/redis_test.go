@@ -136,7 +136,7 @@ func TestLoadRedisEnvironmentOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Redis.Enabled || cfg.Redis.URL != "rediss://redis.example.com:6380/2" || cfg.Redis.Prefix() != "nexusauthorization:prod" || cfg.Redis.CacheTTL != "12h" || cfg.Redis.Timeout != "100ms" {
+	if !cfg.Redis.Enabled || cfg.Redis.URL != "rediss://redis.example.com:6380/2" || cfg.Redis.Prefix() != "nexusauthorization:test" || cfg.Redis.CacheTTL != "12h" || cfg.Redis.Timeout != "100ms" {
 		t.Fatalf("Redis env override failed: %#v", cfg.Redis)
 	}
 }
@@ -158,6 +158,8 @@ redis: ` + redis + `
 
 func clearRedisEnv(t *testing.T) {
 	t.Helper()
+	t.Setenv("SERVICEUK", "test.service")
+	t.Setenv("LUCKENV", "test")
 	for _, key := range []string{
 		"NEXUSAUTHORIZATION_REDIS_ENABLED",
 		"NEXUSAUTHORIZATION_REDIS_URL",

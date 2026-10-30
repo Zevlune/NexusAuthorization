@@ -20,6 +20,8 @@ func mapDBError(err error) error {
 		return err
 	}
 	switch pgErr.Code {
+	case "22001": // string_data_right_truncation
+		return biz.ErrInvalidArgument
 	case "23505": // unique_violation
 		return biz.ErrAlreadyExists
 	case "23503", "23514": // foreign_key_violation/check_violation

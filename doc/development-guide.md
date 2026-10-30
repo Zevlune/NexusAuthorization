@@ -37,24 +37,28 @@
 开发 Compose 会启动 PostgreSQL、API 和 Dashboard。空数据卷首次启动时自动执行 `001_init.sql`：
 
 ```sh
+export LUCKENV=dev
+export SERVICEUK=permission.center.api
 docker compose -f docker-compose-dev.yml up -d
 docker compose -f docker-compose-dev.yml ps
 ```
 
-默认 Dashboard 地址为 `http://127.0.0.1:5274`，PostgreSQL 地址为 `localhost:55434`。默认关闭 OIDC，适合本地页面和 API 开发；需要联调统一认证时，通过 `.env.dev` 覆盖 OIDC、服务目录和 SCIM 配置。
+`LUCKENV` 和 `SERVICEUK` 都是 Luck.Framework 必填身份变量，且没有默认值。Redis 前缀为 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，管理接口使用 `SERVICEUK` 对应的服务策略。旧的 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 已移除；已有本地环境应设置对应的 `LUCKENV` 后重启，由启动发布按新命名重建记录，并同步消费者前缀配置。旧前缀记录只在新记录验收且旧读写者停止后定向清理。默认 Dashboard 地址为 `http://127.0.0.1:5274`，PostgreSQL 地址为 `localhost:55434`。默认关闭 OIDC，适合本地页面和 API 开发；需要联调统一认证时，通过 `.env.dev` 覆盖 OIDC、服务目录和 SCIM 配置。
 
 服务 API 的 `redis.enabled` 默认为 `true`，启用时必须提供非空 Redis URL：
 
 ```sh
 NEXUSAUTHORIZATION_REDIS_ENABLED=true \
 NEXUSAUTHORIZATION_REDIS_URL='redis://localhost:6379/0' \
+LUCKENV=dev \
+SERVICEUK=permission.center.api \
 docker compose -f docker-compose-dev.yml up -d
 ```
 
 本地不需要 Redis 时，显式禁用后重启 API：
 
 ```sh
-NEXUSAUTHORIZATION_REDIS_ENABLED=false docker compose -f docker-compose-dev.yml up -d
+LUCKENV=dev SERVICEUK=permission.center.api NEXUSAUTHORIZATION_REDIS_ENABLED=false docker compose -f docker-compose-dev.yml up -d
 ```
 
 ### 2.2 独立运行后端
@@ -63,10 +67,10 @@ NEXUSAUTHORIZATION_REDIS_ENABLED=false docker compose -f docker-compose-dev.yml 
 
 ```sh
 cd src
-go run ./cmd/api-server
+LUCKENV=dev SERVICEUK=permission.center.api go run ./cmd/api-server
 ```
 
-默认读取 `src/configs/app.yaml`。数据库 URL、OIDC、服务目录、SCIM 和 Redis 均可以通过 `NEXUSAUTHORIZATION_*` 环境变量覆盖。`redis.enabled` 省略时仍为 `true`；启用时 `redis.url` 必须非空，禁用时不创建 Redis 客户端或发布记录。配置加载时会验证数据库、服务目录 source、远程 URL、启用模式的 Redis URL 和 SCIM 超时；配置错误会在进程启动阶段退出。
+默认读取 `src/configs/app.yaml`。`LUCKENV` 和 `SERVICEUK` 必须通过环境变量提供，缺失或为空白时禁止启动。`LUCKENV` 决定 Redis 前缀；`SERVICEUK` 决定管理接口鉴权时的服务标识。数据库 URL、OIDC、服务目录、SCIM 和其余 Redis 参数仍可以通过各自的 `NEXUSAUTHORIZATION_*` 环境变量覆盖。`redis.enabled` 省略时仍为 `true`；启用时 `redis.url` 必须非空，禁用时不创建 Redis 客户端或发布记录。配置加载时会验证数据库、服务目录 source、远程 URL、启用模式的 Redis URL 和 SCIM 超时；配置错误会在进程启动阶段退出。
 
 ### 2.3 启动前端
 
@@ -228,7 +232,7 @@ docker build -t nexusauthorization-dashboard:local .
 4. 角色是否启用、是否授权该 API、主体是否绑定该角色；
 5. domain 是否和绑定记录一致；
 6. 实际 path 是否符合固定/参数路径规则；
-7. 确认 `redis.enabled`；启用时检查业务 String 的 key、类型、JSON、身份和前缀，并确认最近一次发布没有 `PUBLISH_PENDING`；禁用时检查数据库 current-policy；
+7. 确认 `redis.enabled`；启用时检查业务 String 的 key、类型、JSON 和身份，确认前缀与 `LUCKENV` 一致、服务段与目标服务一致，并确认最近一次发布没有 `PUBLISH_PENDING`；禁用时检查数据库 current-policy；
 8. 用 `/api/v1/rbac-v1/simulate` 复现同一组输入。
 
 若页面无法登录，先用 `/api/healthz` 和 `/api/auth/config` 区分进程问题、反向代理问题与 OIDC 配置问题。若服务目录或 SCIM 失败，直接检查外部 URL、凭证和超时，不要修改权限表来绕过依赖故障。

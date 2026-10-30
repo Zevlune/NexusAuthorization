@@ -34,6 +34,8 @@ ALTER DATABASE "nexus-authorization" OWNER TO "nexus-authorization";
 
 ```sh
 NEXUSAUTHORIZATION_DATABASE_URL='postgres://nexus-authorization:CHANGE_ME@db.example.com:5432/nexus-authorization?sslmode=require'
+LUCKENV='prod'
+SERVICEUK='permission.center.api'
 NEXUSAUTHORIZATION_OIDC_ENABLED='true'
 NEXUSAUTHORIZATION_OIDC_AUTHORITY='https://auth.example.com'
 NEXUSAUTHORIZATION_OIDC_CLIENT_ID='permission.center'
@@ -47,12 +49,11 @@ NEXUSAUTHORIZATION_SCIM_NEXUSAUTH_BASE_URL='https://auth.example.com'
 NEXUSAUTHORIZATION_SCIM_API_KEY='CHANGE_ME'
 NEXUSAUTHORIZATION_REDIS_ENABLED='true'
 NEXUSAUTHORIZATION_REDIS_URL='redis://redis.example.com:6379/0'
-NEXUSAUTHORIZATION_REDIS_KEY_PREFIX='nexusauthorization:prod'
 # 业务服务 / Go SDK 调用 /api/v1/authorize 的 Bearer 凭证；留空则该接口始终返回 401
 NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL='CHANGE_ME'
 ```
 
-完整变量（含镜像 tag、宿主端口、数据目录、外部网络名）见仓库根目录 `.env.example`。`docker-compose.yml` 不含任何环境专属值，全部从该文件读取；缺少 `NEXUSAUTHORIZATION_DATABASE_URL` 时 `docker compose config` 会直接报错。
+完整变量（含镜像 tag、宿主端口、数据目录、外部网络名）见仓库根目录 `.env.example`。`docker-compose.yml` 不含任何环境专属值，全部从该文件读取；缺少 `LUCKENV`、`SERVICEUK` 或 `NEXUSAUTHORIZATION_DATABASE_URL` 时 `docker compose config` 会直接报错。
 
 以数据库 owner 身份执行完整初始化：
 
@@ -97,7 +98,9 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 
 | 变量 | 必填场景 | 说明 |
 | --- | --- | --- |
+| `LUCKENV` | 始终 | Luck.Framework 运行环境标识，没有默认值；固定 Redis 前缀为 `nexusauthorization:<LUCKENV>` |
 | `NEXUSAUTHORIZATION_DATABASE_URL` | 始终 | PostgreSQL 连接串，密码中的特殊字符必须 URL 编码 |
+| `SERVICEUK` | 始终 | Luck.Framework 服务唯一标识，没有默认值；管理接口鉴权使用它定位服务策略，应与权限中心中登记的服务资源标识一致 |
 | `NEXUSAUTHORIZATION_OIDC_ENABLED` | 需要登录时 | 开启管理端 OIDC |
 | `NEXUSAUTHORIZATION_OIDC_*` | 开启 OIDC | Provider、客户端、回调、scope、audience 和 secret |
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_SOURCE` | 始终 | `local` 或 `nexusauth` |
@@ -107,7 +110,6 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 | `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` | 业务服务调用鉴权接口时 | `/api/v1/authorize` 的 Bearer 凭证；留空时接口始终 401。使用足够长的随机值，只下发给可信业务服务 |
 | `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
 | `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用或 String 缺失、类型/JSON 损坏时拒绝，不回退数据库 |
-| `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` | 使用 Redis | 可配置前缀；多环境应使用不同值。开发和生产默认值分别为 `nexusauthorization:dev`、`nexusauthorization:prod`，中心与消费者必须一致 |
 | `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 已废弃 | 仅为兼容旧配置保留，不再使用；服务 API 授权记录不设 TTL |
 | `NEXUSAUTHORIZATION_REDIS_TIMEOUT` | 使用 Redis | Redis 操作超时，默认 200ms |
 | `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL` | 使用 Redis | 后台全量对账周期，默认 30s：补发布失败、恢复清空的 Redis 并跟进远程服务目录变化 |
@@ -116,7 +118,19 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 
 配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。`redis.enabled` 在 YAML 省略时仍为 `true`。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
 
+中心 Redis 前缀固定为 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，管理接口使用 `SERVICEUK` 作为服务段；其他服务的策略使用各自的服务标识。中心不再读取 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`，现有 SDK 消费者需将其前缀配置为与中心推导出的值一致。
+
 ## 5. 初始化完成后的核对
+
+### 管理 API 权限初始化
+
+启用 OIDC 时，管理 API 在身份认证后使用 Redis 中的服务 API 策略判断用户是否可访问当前方法和路径。服务标识只从必填环境变量 `SERVICEUK` 获取，不从配置文件或 OIDC audience 推导。Redis 必须启用。未登录返回 401，权限不足返回 403，策略存储发生错误返回 503。登录、回调、退出、健康检查以及服务调用的 `/api/v1/authorize` 不走管理 API 的权限判断。
+
+首次启用前，需要在现有权限配置中准备管理 API 的服务资源及对应的 HTTP 方法和完整路径（例如 `GET /api/v1/applications`），将服务关联到一个应用，为管理员角色授予所需接口，并绑定 OIDC 用户的 `sub`，默认域为空。使用接口目录导入也可建立端点。发布成功后，确认 Redis 中该用户和管理服务的策略已经存在，再启用 OIDC；否则登录成功后管理接口会返回 403。管理服务权限按用户与服务合并，不按应用隔离。
+
+管理路由的 POST、PUT、PATCH、DELETE 请求在认证后记录 `ManagementAudit` 日志，包含操作者 `sub`、方法、目标路径、查询参数中的应用/服务标识、HTTP 状态和操作结果，并继承请求 ID；权限拒绝和处理失败也记录。OIDC 关闭时记录为未认证操作。日志不记录请求体、令牌、任意查询参数或配置前后值。记录写入现有标准输出和已配置的日志文件；集中采集、保留期限、防篡改和审计查询需按部署要求另外配置，当前不提供审计表或查询页面。
+
+空环境可在受限的本机或隔离网络中临时关闭 OIDC 完成上述初始化；认证关闭期间管理 API 无身份保护，完成后立即启用 OIDC 并限制网络访问。权限丢失时需通过受控运维方式恢复策略，避免直接暴露未认证的管理端。Redis 发布部分失败时旧策略可能暂时保留，需检查保存结果及对账日志。
 
 首次初始化完成后，先确认 API 能连接数据库并完成健康检查，再打开 Dashboard 做最小业务链路验证：
 
@@ -154,11 +168,18 @@ docker compose -f docker-compose.yml ps
 
 ## 7. Hash 到 String 协议切换
 
-新协议读取 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]` 的完整 JSON String，不读取旧 Hash field、`state`、Lua 或 `rbac:api:app` 辅助 key。开发和生产默认前缀分别为 `nexusauthorization:dev`、`nexusauthorization:prod`，部署可配置，但中心和消费者必须保持一致。
+新协议读取 `nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]` 的完整 JSON String，不读取旧 Hash field、`state`、Lua 或 `rbac:api:app` 辅助 key。`LUCKENV` 决定中心的前缀，管理接口使用自身 `SERVICEUK` 作为服务标识，其他消费者使用各自服务标识；消费者的 Redis 前缀须与中心一致。
+
+从旧的可配置前缀迁移时：
+
+1. 进入维护窗口，记录旧 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 的实际值并停止旧写者和 reader 的鉴权流量。
+2. 从所有 `.env` 和部署清单删除 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`，为各部署设置正确的 `LUCKENV`，并确认 `SERVICEUK` 与权限中心登记一致。
+3. 统一部署新版 API 和消费者，启动 API 后等待全量发布完成；抽查记录位于 `nexusauthorization:<LUCKENV>` 前缀及对应 `SERVICEUK` 服务段。
+4. 用允许、拒绝、缺失和损坏数据完成 reader 验收后再放行业务流量。新版本不回退旧前缀；旧 key 在所有旧 reader 停止后按精确目标定向清理，不使用 `FLUSHDB` 或整库删除。
 
 上线按以下顺序执行：
 
-1. 进入维护窗口，统一中心与消费者前缀，并停止旧 Hash reader/writer 的鉴权流量。旧 reader 不会看到新版撤权。
+1. 进入维护窗口，确认消费者使用中心 `LUCKENV` 对应的前缀和自身服务标识，并停止旧 Hash reader/writer 的鉴权流量。旧 reader 不会看到新版撤权。
 2. 启动新版中心，让其全量合并并写入 String。发布没有应用级 readiness；应确认没有 `PUBLISH_PENDING`，并抽查目标业务 key 的类型和 JSON。
 3. 启动新版 Demo 或其他新 reader，用精确 service、subject、domain 验证允许、拒绝、缺失、类型/JSON 损坏和身份不匹配，再放行业务流量。
 4. 旧 Hash reader、旧 writer 与新 String 中心不能混跑。部分写入失败可能保留旧权限到下一轮全量对账；需要停止流量并等待补发。
@@ -208,8 +229,8 @@ docker run --rm --network nexusauth alpine:3.22 \
 | 登录回调失败 | OIDC redirect URI 是否逐字符匹配、HTTPS/cookie、authority 是否可达、client secret |
 | 服务资源列表失败 | `source`、远程 URL、API key、远程 TLS 和超时 |
 | 分配用户失败 | SCIM URL、只读凭证、上游分页响应和 `NEXUSAUTHORIZATION_SCIM_TIMEOUT` |
-| 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、发布是否返回 `PUBLISH_PENDING`、业务 String 与 key 前缀；等待下一轮全量对账，部分失败可能保留旧权限到补发完成 |
-| 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、业务 key、String 类型、JSON、身份和前缀；等待启动发布或后台对账重建，不要用整库清空替代迁移 |
+| 权限保存成功但鉴权旧结果 | Redis 启用时检查事务是否提交、发布是否返回 `PUBLISH_PENDING`、业务 String、`LUCKENV` 前缀和 `SERVICEUK` 服务段；等待下一轮全量对账，部分失败可能保留旧权限到补发完成 |
+| 运行时鉴权全部拒绝 | 确认 `NEXUSAUTHORIZATION_REDIS_ENABLED`；启用时检查 `NEXUSAUTHORIZATION_REDIS_URL`、`LUCKENV`、`SERVICEUK`、业务 key、String 类型、JSON 和身份；等待启动发布或后台对账重建，不要用整库清空替代迁移 |
 | 取消服务关联冲突 | 先从所有角色移除该服务的 API 授权，再取消关联 |
 | 运行时接口返回 401 | 是否配置了 `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL`，业务服务发送的 Bearer 是否与之一致；管理端 OIDC cookie 不能代替服务凭证 |
 | API 容器启动即退出并提示 `/app/data` 不可写 | 宿主机数据目录权限；让容器内 `nexus-authorization` 用户可写，或改用命名卷 |

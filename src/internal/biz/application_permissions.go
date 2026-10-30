@@ -28,9 +28,18 @@ type applicationPermissionsRepository interface {
 	DeleteApplicationMenu(context.Context, string, uuid.UUID) error
 }
 
+type applicationServiceLinkRepository interface {
+	RequireLinkedApplicationService(context.Context, string, string) error
+}
+
+// RequireApplicationService keeps write paths limited to linked, enabled
+// services while organization checks such as list and delete use the linked
+// relation alone.
 func (s *RBACV1Service) RequireApplicationService(ctx context.Context, app, service string) error {
-	if strings.TrimSpace(app) == "" || strings.TrimSpace(service) == "" {
-		return fmt.Errorf("%w: app_key and service_resource required", ErrInvalidArgument)
+	app = strings.TrimSpace(app)
+	service = strings.TrimSpace(service)
+	if err := s.RequireLinkedApplicationService(ctx, app, service); err != nil {
+		return err
 	}
 	repo, ok := s.repository.(ApplicationRepository)
 	if !ok {
@@ -41,18 +50,48 @@ func (s *RBACV1Service) RequireApplicationService(ctx context.Context, app, serv
 		return err
 	}
 	for _, v := range items {
-		if v.Key == service && v.IsActive {
+		if v != nil && strings.TrimSpace(v.Key) == service && v.IsActive {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: service resource must exist and be enabled", ErrConflict)
+}
+
+// RequireLinkedApplicationService checks only the persisted application/service
+// relation. It deliberately does not consult the service catalog, so stale
+// catalog state cannot hide endpoints that still need manual cleanup.
+func (s *RBACV1Service) RequireLinkedApplicationService(ctx context.Context, app, service string) error {
+	app = strings.TrimSpace(app)
+	service = strings.TrimSpace(service)
+	if app == "" || service == "" {
+		return fmt.Errorf("%w: app_key and service_resource required", ErrInvalidArgument)
+	}
+	if repo, ok := s.repository.(applicationServiceLinkRepository); ok {
+		return repo.RequireLinkedApplicationService(ctx, app, service)
+	}
+	repo, ok := s.repository.(ApplicationRepository)
+	if !ok {
+		return ErrNotFound
+	}
+	items, err := repo.ListApplicationServices(ctx, app)
+	if err != nil {
+		return err
+	}
+	for _, v := range items {
+		if v != nil && strings.TrimSpace(v.Key) == service {
 			return nil
 		}
 	}
 	return fmt.Errorf("%w: service is not linked to application", ErrInvalidArgument)
 }
 func (s *RBACV1Service) ApplicationEndpoints(ctx context.Context, app, service string, page, size int) (RBACPage[RBACEndpoint], error) {
-	if strings.TrimSpace(app) == "" {
+	app = strings.TrimSpace(app)
+	service = strings.TrimSpace(service)
+	if app == "" {
 		return RBACPage[RBACEndpoint]{}, ErrInvalidArgument
 	}
 	if service != "" {
-		if err := s.RequireApplicationService(ctx, app, service); err != nil {
+		if err := s.RequireLinkedApplicationService(ctx, app, service); err != nil {
 			return RBACPage[RBACEndpoint]{}, err
 		}
 	}
@@ -96,7 +135,17 @@ func (s *RBACV1Service) SubjectMenus(ctx context.Context, app, subject, domain s
 	if strings.TrimSpace(app) == "" || strings.TrimSpace(subject) == "" {
 		return nil, ErrInvalidArgument
 	}
-	policy, err := s.currentPolicy(ctx, app)
+	// Menus are application resources and do not depend on the service catalog.
+	// Keep the fallback for repositories implementing only the original contract.
+	var policy CurrentPolicy
+	var err error
+	if repository, ok := s.repository.(interface {
+		GetMenuPolicy(context.Context, string) (CurrentPolicy, error)
+	}); ok {
+		policy, err = repository.GetMenuPolicy(ctx, app)
+	} else {
+		policy, err = s.currentPolicy(ctx, app)
+	}
 	if err != nil {
 		return nil, err
 	}

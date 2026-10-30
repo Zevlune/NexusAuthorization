@@ -10,7 +10,7 @@
 
 String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB、超时或 Redis 错误都拒绝；旧应用级 JSON 不作为 fallback。显式设置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，不创建 Redis 客户端，服务 API 和权限模拟使用数据库 current-policy。
 
-菜单与全策略适配器始终走独立的 current-policy 路径，不依赖服务 API Redis 记录。
+主体菜单查询直接在一个数据库快照中读取应用、菜单、角色菜单授权和主体绑定，不访问远程服务目录或服务 API Redis 记录。全策略适配器仍走独立的 current-policy 路径。
 
 ## 保存与发布
 
@@ -33,10 +33,13 @@ String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB、�
 
 旧 Hash/field/state/Lua 与 `rbac:api:app:*` 元数据不是新协议的读取依赖，也无需继续写入。切换时应在维护窗口内执行：
 
-1. 统一中心和消费者使用的 `nexusauthorization:dev` / `nexusauthorization:prod` 前缀。
-2. 停止旧 Hash reader/writer 的鉴权流量。
-3. 启动新版中心，让全量重建以 String 写入业务 key。
-4. 启动新版 Demo 或其他新 reader，验收允许、拒绝、缺失、类型/JSON 损坏和身份不匹配。
-5. 确认旧 reader 全部停止后，再按旧 key 形状定向清理。
+1. 根据中心必填的 `LUCKENV` 计算前缀 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`。
+2. 将 Demo 或其他消费者的 `KeyPrefix` 配置为该完整前缀，并使用各自登记的服务资源标识。
+3. 停止旧 Hash reader/writer 的鉴权流量。
+4. 启动新版中心，让全量重建以 String 写入推导前缀下的业务 key。
+5. 启动新版 Demo 或其他新 reader，验收允许、拒绝、缺失、类型/JSON 损坏和身份不匹配。
+6. 确认旧 reader 全部停止后，再按旧 key 形状定向清理。
 
 新旧 Hash/String reader 或 writer 不能混跑。旧 reader 看不到新版撤权，旧应用级 JSON 值也不能被新 reader 作为兼容值接受。本次文档同步未连接现网 Redis、未清理旧 key、未部署服务；详细命令边界见 [Redis 接入说明](redis-integration.md#协议切换)。
+
+`LUCKENV` 变化会改变前缀和所有业务 key。已有实例切换前缀时，中心必须重新全量发布，所有消费者必须同步更新 `KeyPrefix` 并重启；旧前缀记录不会自动映射，未同步的一侧会因 key 缺失而 fail closed。中心不再接受 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 作为前缀覆盖。

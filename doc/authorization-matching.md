@@ -2,7 +2,7 @@
 
 运行时接口仍是 `POST /api/v1/authorize`，传入 `appKey`、`serviceResource`、`subject`、`method`、`path`，`domain` 可选，省略或传空白按默认空域处理（旧值 `global` 同样归一为空默认域），请求字段及服务凭证见 [接口参考](reference-api-rbac-v1.md#8-运行时鉴权)。应用组织配置，服务 API 运行时合并所有启用应用的有效授权。本文的 N 指存量策略数据规模，基准按实际绑定数据量生成，不用请求次数代表容量。
 
-> 适用范围：`src/internal/biz/rbac_policy.go` 的应用级编译引擎现在是菜单与全策略适配器的实现，并继续为测试和历史基准服务。运行时 `/api/v1/authorize` 与 `/api/v1/rbac-v1/simulate` 由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时走 Redis 服务 API 入口：按 `service + subject + normalized domain` 直接读取完整 String JSON，严格校验身份、大小和内容；不读取 `state`、Lua 或应用辅助 key。JSON 已合并所有启用应用的 Catalog 与用户 API 并集，不按应用隔离。显式禁用时使用数据库 current-policy，且不创建 Redis 客户端或发布记录。菜单始终使用独立 current-policy。本文描述的路由 Trie 与角色位图结构在服务 API 入口中复用；第 5 节的基准测的是应用级引擎，用大绑定量说明线性扫描的替代成本，不代表服务 API String 策略的规模。
+> 适用范围：`src/internal/biz/rbac_policy.go` 的应用级编译引擎现在是全策略适配器的实现，并继续为测试和历史基准服务。运行时 `/api/v1/authorize` 与 `/api/v1/rbac-v1/simulate` 由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时走 Redis 服务 API 入口：按 `service + subject + normalized domain` 直接读取完整 String JSON，严格校验身份、大小和内容；不读取 `state`、Lua 或应用辅助 key。JSON 已合并所有启用应用的 Catalog 与用户 API 并集，不按应用隔离。显式禁用时使用数据库 current-policy，且不创建 Redis 客户端或发布记录。主体菜单通过独立 SQL 读取菜单授权，不访问服务目录或 API 端点，也不使用本文的编译缓存。本文描述的路由 Trie 与角色位图结构在服务 API 入口中复用；第 5 节的基准测的是应用级引擎，用大绑定量说明线性扫描的替代成本，不代表服务 API String 策略的规模。
 
 ## 1. 旧算法的实际开销
 
@@ -18,7 +18,7 @@ O(E × L + B + K × R + G)
 
 ## 2. 编译索引
 
-菜单与全策略路径下，每个应用的当前权限第一次被访问时编译成只读 Go 索引：
+全策略路径下，每个应用的当前权限第一次被访问时编译成只读 Go 索引：
 
 ```text
 compiledRBACPolicy
@@ -90,13 +90,13 @@ API 角色：{5, 70}
 | 返回角色编码 | O(K)，用于复制返回切片 |
 | 首次构建 | 约 O(E×L + R + B + G_total)，与请求匹配分离 |
 
-上表只覆盖匹配函数内部的开销。菜单 current-policy 路径在匹配之前有一层固定成本：读取应用启用状态与当前规范化记录并计算内容摘要，读取配置目录的全部启用服务、按键排序并计算摘要作为缓存身份；这一层的规模由全局服务资源数 S 决定，与本应用绑定的用户、角色和接口数量无关，约为 O(S log S)，远程目录模式还包含一次目录网络读取。Redis 模式的服务 API 路径固定成本是一次 String `GET`，加上严格身份、大小与 JSON 校验，不读取应用元数据或服务目录摘要；显式禁用时改走数据库 current-policy，成本按数据库读取路径计算。请求总耗时至少是“这一层读取 +（可复用编译索引时的）匹配”，不能由下面的纯匹配基准推断。
+上表只覆盖匹配函数内部的开销。数据库 current-policy 路径在匹配之前有一层固定成本：读取应用启用状态与当前规范化记录并计算内容摘要，读取配置目录的全部启用服务、按键排序并计算摘要作为缓存身份；这一层的规模由全局服务资源数 S 决定，与本应用绑定的用户、角色和接口数量无关，约为 O(S log S)，远程目录模式还包含一次目录网络读取。Redis 模式的服务 API 路径固定成本是一次 String `GET`，加上严格身份、大小与 JSON 校验，不读取应用元数据或服务目录摘要；显式禁用时改走数据库 current-policy，成本按数据库读取路径计算。请求总耗时至少是“这一层读取 +（可复用编译索引时的）匹配”，不能由下面的纯匹配基准推断。
 
 参数模板大量交叉重叠时，Trie 仍可能访问许多分支；不能把所有情况都承诺为 O(L)。普通路由访问的节点主要随路径长度变化，静态路径不必遍历全部 API。
 
 ## 4. 缓存加载与一致性
 
-菜单和全策略适配器走 current-policy 路径：每次请求读取应用启用状态、当前规范化业务表和当前服务目录，计算内容摘要作为缓存身份，然后查询进程内编译索引。
+全策略适配器走 current-policy 路径：每次请求读取应用启用状态、当前规范化业务表和当前服务目录，计算内容摘要作为缓存身份，然后查询进程内编译索引。
 
 ```text
 取当前缓存身份（启用应用 + 内容摘要 + 服务目录摘要）
@@ -106,15 +106,15 @@ API 角色：{5, 70}
                     → 完整构建后加入缓存
 ```
 
-内容摘要是当前记录规范 JSON 的 SHA-256，只用作进程内缓存身份，不持久化、不进入 Redis key，也不是业务版本。菜单与全策略索引按应用保留，默认上限 64 个，同一应用的新加载替换旧索引，因此每个应用同时只保留一个当前索引；内存命中时不再访问数据库或反序列化完整记录；应用停用、内容变化和数据库读取失败都不能被旧索引绕过。
+内容摘要是当前记录规范 JSON 的 SHA-256，只用作进程内缓存身份，不持久化、不进入 Redis key，也不是业务版本。全策略索引按应用保留，默认上限 64 个，同一应用的新加载替换旧索引，因此每个应用同时只保留一个当前索引；编译索引命中只省略重新编译，每次请求仍会读取数据库并反序列化当前记录；应用停用、内容变化和数据库读取失败都不能被旧索引绕过。
 
 Redis 模式的服务 API 路径（`/api/v1/authorize` 与 `/api/v1/rbac-v1/simulate`）不读取应用元数据、服务目录摘要或辅助 key：每次请求直接读取该服务、用户与 domain 对应的 String，严格校验身份、大小和 JSON 后匹配完整 Catalog 与合并后的 `apis`。内容相同时可以复用进程内编译索引。String 缺失、类型或内容损坏、身份不匹配和 Redis 错误都拒绝，不读取数据库，也不接受旧应用级 JSON fallback。强制启用时启动就要求 `redis.url` 非空；Redis 禁用时不会进入这条路径，服务 API 使用数据库 current-policy。
 
 同一应用同一内容摘要的并发首次加载通过 `singleflight` 合并加载和编译。单个等待者取消不会取消其他请求共享的加载；共享加载使用独立的 30 秒超时上下文，允许加载和构建。调用方超时可提前结束等待；该截止时间在编译结束后检查，CPU 编译本身不支持中途抢占取消。构建失败不缓存，后续请求可重试。缓存淘汰不影响持有旧只读指针的在途请求。
 
-本地缓存按条目数限制，不是严格的内存字节预算；菜单与全策略索引容量设为 64，服务 API 索引容量设为 1024，大应用或大量应用部署时，需要结合索引大小和实例内存评估这两个上限。冷启动、缓存淘汰或每次重建后的第一次请求仍要付出加载和编译成本，冷加载仍约为 O(N)。主体菜单与全策略适配器使用同一份当前记录，只是计算路径不同。
+本地缓存按条目数限制，不是严格的内存字节预算；全策略索引容量设为 64，服务 API 索引容量设为 1024，大应用或大量应用部署时，需要结合索引大小和实例内存评估这两个上限。冷启动、缓存淘汰或每次重建后的第一次请求仍要付出加载和编译成本，冷加载仍约为 O(N)。主体菜单另行读取菜单、角色菜单授权及主体绑定，不访问远程服务目录。
 
-Redis 模式的服务 API 写入成本在保存路径：控制面先取 PostgreSQL advisory lock，在同一 repeatable-read 快照中合并全部 `用户 × 域 × 服务` 来源；Redis 层验证完整输出后，按专用前缀严格 `SCAN`、删除本轮不存在的用户记录，再逐用户 `SET` 完整 JSON。每条用户写入原子，环境或应用批次不整体原子；部分失败可能保留旧权限直到下一轮全量对账。鉴权请求侧没有数据库读取。显式禁用时保存不发布 Redis，鉴权请求读取数据库 current-policy。菜单路径的每次鉴权仍有数据库读取，完整 HTTP 接口延迟不能等同于下面的纯 CPU 匹配耗时；远程服务目录配置还会增加一次目录网络读取。
+Redis 模式的服务 API 写入成本在保存路径：控制面先取 PostgreSQL advisory lock，在同一 repeatable-read 快照中合并全部 `用户 × 域 × 服务` 来源；Redis 层验证完整输出后，按专用前缀严格 `SCAN`、删除本轮不存在的用户记录，再逐用户 `SET` 完整 JSON。每条用户写入原子，环境或应用批次不整体原子；部分失败可能保留旧权限直到下一轮全量对账。鉴权请求侧没有数据库读取。显式禁用时保存不发布 Redis，API 鉴权请求读取数据库 current-policy，远程模式还包含目录网络读取。主体菜单每次查询直接读取数据库，但不访问远程服务目录；完整 HTTP 接口延迟不能等同于下面的纯 CPU 匹配耗时。
 
 Redis 模式下服务 API 入口的单条流程：
 
@@ -131,7 +131,7 @@ GET key
 
 基准代码：`src/internal/biz/rbac_policy_benchmark_test.go`。旧算法以测试专用副本保留在 `rbac_policy_reference_test.go`，不参与生产调用。
 
-本节的编译、内存与匹配基准都测应用级引擎（菜单与全策略适配器），不代表服务 API String 策略的规模；服务 API 入口编译已合并完整 Catalog 与用户 API 并集的 String 值，见开头的适用范围说明。
+本节的编译、内存与匹配基准都测应用级引擎（全策略适配器），不代表服务 API String 策略的规模；服务 API 入口编译已合并完整 Catalog 与用户 API 并集的 String 值，见开头的适用范围说明。
 
 ```sh
 cd src
@@ -189,7 +189,7 @@ go test ./internal/biz -run '^$' -bench 'BenchmarkRBACBindingVolume/.*/(static_a
 - `src/internal/biz/rbac_v1.go`：输入校验与业务调用。
 - `src/internal/biz/subject_api_authorization.go`：服务 API 聚合入口、LRU/singleflight 与聚合编译。
 - `src/internal/biz/subject_api.go`：服务 API 身份与策略结构。
-- `src/internal/data/db/repo/current_policy_repo.go`：菜单 current-policy 的内容摘要与当前权限读取。
+- `src/internal/data/db/repo/current_policy_repo.go`：全策略 current-policy 的内容摘要与当前权限读取。
 - `src/internal/data/db/repo/subject_api_repo.go`：保存后触发全量合并与发布。
 - `src/internal/data/rediscache/subject_api.go`：服务 API String、SCAN、严格 key 识别与全量替换。
 

@@ -173,7 +173,7 @@ Content-Type: application/json
 
 ## 6. 应用范围 RBAC 配置
 
-以下 `/api/v1/rbac-v1/*` 接口都要求 `app_key` 查询参数，作用于该应用。API 目录的写操作另要求 `service_resource`，且该服务必须已关联当前应用并处于启用状态。
+以下 `/api/v1/rbac-v1/*` 接口都要求 `app_key` 查询参数，作用于该应用。API 目录的写操作另要求 `service_resource`，且该服务必须已关联当前应用。新增、编辑和 Swagger 导入还要求服务当前存在且启用；列表和删除允许处理已停用或从远程目录删除的服务。
 
 ### 6.1 API Endpoint
 
@@ -203,6 +203,8 @@ Content-Type: application/json
 保存要求 `method` 为标准 HTTP 方法（GET、POST、PUT、PATCH、DELETE、HEAD、OPTIONS、TRACE），`path_template` 以 `/` 开头且不超过 500 字符，`endpoint_key` 不超过 160 字符。同一服务与方法下，只差参数名或首尾斜杠的模板（如 `/orders/{id}` 与 `/orders/{orderId}/`）匹配相同的请求，运行时会被判为歧义而全部拒绝，因此保存时返回 `409`；更新同一条 Endpoint 时可以改参数名。更新时传入非空 `endpoint_key` 会修改接口标识，传空保留原值。自动生成的 `endpoint_key` 为「方法 + 截断后的路径 + 短哈希」，保证唯一且不超长。
 
 Swagger 导入按 `method` 与上述路径形状跳过已存在接口（文档内重复的形状也只导入一次），逐条写入，不是整批原子事务；整批导入结束后只发布一次 Redis 记录。导入只访问管理员提供的地址，地址受 `swagger_import` 配置约束：始终禁止链路本地地址与云平台元数据地址，生产配置默认禁止回环地址，可用 `allowed_hosts` 进一步限定主机或网段；被拒绝时返回 `400`。
+
+远程服务停用或消失时保留原端点，不自动删除。API 列表包含这些失效服务的端点，管理端标注失效并允许手动删除；新增、编辑和导入仍禁用。列表和删除前的应用关联检查只读取本地关系，不依赖远程目录。若删除已经提交但后续 Redis 发布失败，仍返回 `503 PUBLISH_PENDING`，由后台对账补发撤权。
 
 ### 6.2 角色
 
@@ -306,7 +308,7 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 - Redis 启用时，鉴权（含权限模拟）直接读取 String，不读取数据库或其他 RBAC key；缺失、类型/JSON 损坏、身份不匹配或 Redis 错误都拒绝。禁用时使用数据库 current-policy。
 - 提交前已开始读取的在途请求可以完成其已读到的判断；发布与后续对账都在启动和每次定时周期中全量执行，不使用 `requested` / `published` 增量状态。
 
-菜单 current-policy 路径读取当前规范化业务表并计算内容摘要，在进程内编译，不受 Redis 开关控制。开关在重启后生效；从禁用切回启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，等待启动全量重建后再放行服务 API 流量。事务、对账和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
+主体菜单查询在一个数据库快照中读取应用、菜单、角色菜单授权和主体绑定，不读取服务目录或 API 端点，不受 Redis 开关控制。全策略适配器仍读取 current-policy、计算内容摘要并在进程内编译。开关在重启后生效；从禁用切回启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，等待启动全量重建后再放行服务 API 流量。事务、对账和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
 
 ## 8. 运行时鉴权
 
@@ -386,9 +388,9 @@ Redis 模式下业务 String 缺失、类型或 JSON 损坏、身份不匹配或
 GET /api/v1/rbac-v1/subject-menus?app_key=business.portal&subject=user-001
 ```
 
-返回 `{items: ApplicationMenu[]}`，数据来自与运行时鉴权相同的当前权限记录：命中 `subject + domain` 的启用角色所授予的菜单/按钮，并补齐显示所需的启用祖先节点。父节点停用、缺失或存在循环时对应分支不返回。`app_key`、`subject` 缺失返回 `400`；`domain` 可省略，省略或空白按默认空域处理，旧值 `global` 同样归一。
+返回 `{items: ApplicationMenu[]}`，数据直接来自当前应用的菜单、角色菜单授权和主体绑定，不依赖 NexusAuth 服务目录或 Redis：命中 `subject + domain` 的启用角色所授予的菜单/按钮，并补齐显示所需的启用祖先节点。父节点停用、缺失或存在循环时对应分支不返回。`app_key`、`subject` 缺失返回 `400`；应用不存在或停用返回 `404`；`domain` 可省略，省略或空白按默认空域处理，旧值 `global` 同样归一。
 
-前端可基于返回的按钮权限控制操作入口，后端 API 仍须独立鉴权。
+该接口当前属于管理接口。启用 OIDC 时，调用方必须通过管理身份认证与管理服务 API 授权；`/api/v1/authorize` 的服务凭证不能调用它。业务方菜单查询的独立认证方式和主体限制仍待确定，Go SDK 暂无业务菜单查询方法。具备管理权限的调用方可基于返回的按钮权限控制操作入口，后端 API 仍须独立鉴权。
 
 ## 10. SCIM 用户
 
