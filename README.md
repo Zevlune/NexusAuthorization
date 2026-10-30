@@ -22,13 +22,13 @@
 
 NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-users.md)。
 
-服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，中心把一个用户、一个服务和归一化 domain 的完整策略写为 Redis String，key 为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`。JSON 只含 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含应用标识；权限合并所有启用应用对该服务的授权，具名 domain 相互隔离。Redis 模式的 Demo 直接严格解析该 String，不读 `state`/Lua，也不依赖 `rbac:api:app` 辅助 key；Http 模式的 Demo 改为调用中心 `/api/v1/authorize`。开发和生产默认前缀为 `nexusauthorization:dev`、`nexusauthorization:prod`，可按部署配置并要求中心与消费者一致。
+服务 API 鉴权由 `redis.enabled` 选择来源，默认 `true`，省略 YAML 时也为 `true`。启用时，中心把一个用户、一个服务和归一化 domain 的完整策略写为 Redis String，完整 key 为 `nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalized domain)>]`。中心 Redis 前缀由必填的 `LUCKENV` 推导；`SERVICEUK` 标识中心自身的管理服务。中心不再读取 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`。JSON 只含 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含应用标识；权限合并所有启用应用对该服务的授权，具名 domain 相互隔离。Redis 模式的 Demo 直接严格解析该 String，不读 `state`/Lua，也不依赖 `rbac:api:app` 辅助 key；Http 模式的 Demo 改为调用中心 `/api/v1/authorize`。SDK、Demo 等消费者须显式配置与中心推导结果完全相同的前缀，并使用各自登记的服务标识。
 
-.NET SDK/Demo 仅支持默认域：配置不包含 Domain，HTTP 请求不发送 domain，Redis 读取 key 固定为 `PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>`，不含 domain 后缀；策略 JSON 中已有的默认域元数据仍用于兼容校验，具名 domain 会以 `policy_identity_mismatch` 拒绝。
+.NET SDK/Demo 仅支持默认域：配置不包含 Domain，HTTP 请求不发送 domain，Redis 读取 key 为 `nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(SERVICEUK))>:<QueryEscape(trim(subject))>`，不含 domain 后缀；策略 JSON 中已有的默认域元数据仍用于兼容校验，具名 domain 会以 `policy_identity_mismatch` 拒绝。
 
-控制面先取得 PostgreSQL session advisory lock，再在同一 repeatable-read 快照中合并全部来源；Redis 层预验证完整输出后，按专用前缀 `SCAN` 严格识别业务 key、删除本轮不存在的旧用户记录，最后逐用户 `SET` 完整 JSON 并覆盖同名旧结构。每条用户写入原子，环境或应用批次不整体原子；部分失败可能让旧权限保留到下一轮对账，接口返回 `PUBLISH_PENDING`。启动和每次定时对账都全量重建；不新增数据库表或 migration，也不需要 Redis 锁、索引或计数器。该模型不承诺撤权零窗口或强 fail-closed 闸门。`redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 改用数据库 current-policy，不创建 Redis 客户端，也不发布记录；菜单与全策略适配器始终走独立的 current-policy 路径。数据库只保存业务配置，不保存发布版本或历史。旧 Hash/state key 本轮不连接现网、不清理、不部署；切换和定向清理要求见 [Redis 接入说明](doc/redis-integration.md)，保存生效与失败语义见 [权限生效设计](doc/permission-lifecycle.md)。
+控制面先取得 PostgreSQL session advisory lock，再在同一 repeatable-read 快照中合并全部来源；Redis 层预验证完整输出后，按 `LUCKENV` 推导出的专用前缀 `SCAN` 严格识别业务 key、删除本轮不存在的旧用户记录，最后逐用户 `SET` 完整 JSON 并覆盖同名旧结构。每条用户写入原子，环境或应用批次不整体原子；部分失败可能让旧权限保留到下一轮对账，接口返回 `PUBLISH_PENDING`。启动和每次定时对账都全量重建；不新增数据库表或 migration，也不需要 Redis 锁、索引或计数器。该模型不承诺撤权零窗口或强 fail-closed 闸门。已有 key 前缀变化时，中心须按新前缀重新全量发布，并同步更新所有消费者后再切换读取；旧地址不会自动映射到新前缀。`redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，服务 API 改用数据库 current-policy，不创建 Redis 客户端，也不发布记录；菜单与全策略适配器始终走独立的 current-policy 路径。数据库只保存业务配置，不保存发布版本或历史。旧 Hash/state key 本轮不连接现网、不清理、不部署；切换和定向清理要求见 [Redis 接入说明](doc/redis-integration.md)，保存生效与失败语义见 [权限生效设计](doc/permission-lifecycle.md)。
 
-API 鉴权使用静态路径哈希、参数路径 Trie 和角色位图。服务 API 入口按「用户 × 服务」聚合授权并复用进程内编译索引；菜单与全策略适配器走独立的 current-policy 编译索引。数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
+API 鉴权使用静态路径哈希、参数路径 Trie 和角色位图。服务 API 入口按「用户 × 服务」聚合授权并复用进程内编译索引；全策略适配器使用 current-policy 编译索引。主体菜单查询独立读取数据库中的菜单授权，不访问远程服务目录。数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
 
 ## 首次上线
 

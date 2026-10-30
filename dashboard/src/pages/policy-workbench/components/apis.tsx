@@ -77,6 +77,26 @@ const Field = ({ label, required, error, children }: { label: string; required?:
 
 export default function APIs({ state }: { state: State }) {
   const activeServices = useMemo(() => state.services.filter((service) => service.isActive), [state.services]);
+  const filterServices = useMemo(() => {
+    const services = new Map<string, { key: string; label: string; isActive: boolean }>();
+    state.services.forEach((service) => {
+      services.set(service.key, {
+        key: service.key,
+        label: serviceLabel(service),
+        isActive: service.isActive,
+      });
+    });
+    state.endpoints.forEach((endpoint) => {
+      if (!services.has(endpoint.service_resource)) {
+        services.set(endpoint.service_resource, {
+          key: endpoint.service_resource,
+          label: endpoint.service_resource,
+          isActive: false,
+        });
+      }
+    });
+    return [...services.values()].sort((left, right) => left.label.localeCompare(right.label, 'zh-CN') || left.key.localeCompare(right.key));
+  }, [state.endpoints, state.services]);
   const [search, setSearch] = useState('');
   const [draftSearch, setDraftSearch] = useState('');
   const [draftService, setDraftService] = useState<string | null>(null);
@@ -100,7 +120,7 @@ export default function APIs({ state }: { state: State }) {
   const queryService = useMemo(() => new URLSearchParams(location.search).get('service')?.trim() || '', [location.search]);
   const effectiveServiceFilter = serviceFilterSearch === location.search
     ? serviceFilter
-    : (activeServices.some((service) => service.key === queryService) ? queryService : '');
+    : (filterServices.some((service) => service.key === queryService) ? queryService : '');
   const filteredEndpoints = useMemo(() => {
     const keyword = search.trim().toLowerCase();
     return state.endpoints.filter((endpoint) => {
@@ -114,6 +134,7 @@ export default function APIs({ state }: { state: State }) {
   const pageCount = Math.max(1, Math.ceil(filteredEndpoints.length / PAGE_SIZE));
   const displayPage = Math.min(page, pageCount);
   const visibleEndpoints = filteredEndpoints.slice((displayPage - 1) * PAGE_SIZE, displayPage * PAGE_SIZE) as EndpointTableRow[];
+  const endpointServiceActive = (service: string) => activeServices.some((candidate) => candidate.key === service);
 
   const endpointColumns: TableProps<EndpointTableRow>['columns'] = [
     {
@@ -122,15 +143,19 @@ export default function APIs({ state }: { state: State }) {
       minWidth: 260,
       cell: ({ row }) => <div className="resource-apis-endpoint-cell"><strong>{row.summary || row.endpoint_key || '-'}</strong><code>{row.path_template || '-'}</code></div>,
     },
-    { colKey: 'service_resource', title: '服务', cell: ({ row }) => <Tag variant="light-outline">{row.service_resource}</Tag> },
+    {
+      colKey: 'service_resource',
+      title: '服务',
+      cell: ({ row }) => <Space size="small"><Tag variant="light-outline">{row.service_resource}</Tag>{!endpointServiceActive(row.service_resource) && <Tag theme="warning" variant="light-outline">失效</Tag>}</Space>,
+    },
     { colKey: 'method', title: '方法', cell: ({ row }) => <Tag theme={methodTheme(row.method)} variant="light-outline">{row.method}</Tag> },
     { colKey: 'module', title: '模块', cell: ({ row }) => row.module || '-' },
     { colKey: 'enabled', title: '状态', cell: ({ row }) => <Tag theme={row.enabled ? 'success' : 'default'} variant="light-outline">{row.enabled ? '启用' : '停用'}</Tag> },
     {
       colKey: 'operation',
       title: '操作',
-      width: 170,
-      cell: ({ row }) => <Space size="small"><Button variant="text" icon={<EditIcon />} onClick={() => openEdit(row)}>编辑</Button><Button variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => confirmDelete(row)}>删除</Button></Space>,
+      width: 190,
+      cell: ({ row }) => <Space size="small"><Button variant="text" icon={<EditIcon />} disabled={!endpointServiceActive(row.service_resource)} onClick={() => openEdit(row)}>编辑</Button><Button variant="text" theme="danger" icon={<DeleteIcon />} onClick={() => confirmDelete(row)}>删除</Button></Space>,
     },
   ];
 
@@ -152,6 +177,7 @@ export default function APIs({ state }: { state: State }) {
   };
 
   const openEdit = (endpoint: Endpoint) => {
+    if (!endpointServiceActive(endpoint.service_resource)) return;
     setErrors({});
     setEditError('');
     setEdit({
@@ -185,6 +211,10 @@ export default function APIs({ state }: { state: State }) {
 
   const submitEdit = async () => {
     if (saving || !edit) return;
+    if (!endpointServiceActive(edit.service_resource)) {
+      setEditError('服务已失效，当前接口仅可删除');
+      return;
+    }
     const nextErrors = validateDraft(edit);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length) return;
@@ -304,7 +334,7 @@ export default function APIs({ state }: { state: State }) {
         >
           {state.loading ? (
             <Card className="resource-apis-card"><Empty text="正在加载 API 资源..." /></Card>
-          ) : activeServices.length === 0 ? (
+          ) : state.services.length === 0 && state.endpoints.length === 0 ? (
             <Card className="resource-apis-card">
               <Empty text="当前应用尚未关联可用服务" />
               <div className="resource-apis-empty-action"><Button theme="primary" onClick={() => { window.location.href = '/service-resources'; }}>前往关联服务</Button></div>
@@ -314,7 +344,7 @@ export default function APIs({ state }: { state: State }) {
               <div className="page-filter-bar">
                 <Form className="workbench-filter-form" layout="inline" colon={false} labelWidth={100} onSubmit={() => { setSearch(draftSearch); setFilterService(draftService ?? effectiveServiceFilter); setMethodFilter(draftMethod); setPage(1); }}>
                   <Form.FormItem label="关键词"><><Input className="workbench-keyword" value={draftSearch} placeholder="摘要、路径、模块或服务" prefixIcon={<SearchIcon />} clearable onChange={setDraftSearch} /></></Form.FormItem>
-                  <Form.FormItem label="服务"><><Select className="workbench-select" value={draftService ?? effectiveServiceFilter} placeholder="全部服务" clearable options={activeServices.map((service) => ({ label: `${serviceLabel(service)} · ${service.key}`, value: service.key }))} onChange={value => setDraftService(String(value || ''))} /></></Form.FormItem>
+                  <Form.FormItem label="服务"><><Select className="workbench-select" value={draftService ?? effectiveServiceFilter} placeholder="全部服务" clearable options={filterServices.map((service) => ({ label: `${service.label} · ${service.key}${service.isActive ? '' : '（失效）'}`, value: service.key }))} onChange={value => setDraftService(String(value || ''))} /></></Form.FormItem>
                   <Form.FormItem label="方法"><><Select className="workbench-select" value={draftMethod} placeholder="全部方法" clearable options={METHODS.map((method) => ({ label: method, value: method }))} onChange={value => setDraftMethod(String(value || ''))} /></></Form.FormItem>
                   <Form.FormItem><><Space size={16}><Button theme="primary" type="submit" icon={<SearchIcon />}>查询</Button><Button theme="primary" icon={<RefreshIcon />} onClick={clearFilters}>重置</Button></Space></></Form.FormItem>
                 </Form>

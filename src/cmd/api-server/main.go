@@ -46,6 +46,12 @@ func run() int {
 	}
 	defer application.Close()
 	go application.RunSubjectAPIReconciler(ctx, logger)
+	middleware := []func(http.Handler) http.Handler{application.Auth.Middleware, httpserver.ManagementAuditMiddleware}
+	if cfg.OIDC.Enabled {
+		middleware = append(middleware, httpserver.ManagementAuthorizationMiddleware(
+			application.RBACV1, "management", cfg.Runtime.ServiceUK,
+		))
+	}
 	server := &http.Server{
 		Addr: cfg.HTTP.Addr,
 		// Bound slow clients. WriteTimeout leaves room for Swagger imports and
@@ -67,7 +73,7 @@ func run() int {
 				WithRBACV1Service(application.RBACV1).
 				WithUserDirectory(application.Users).
 				WithAuthorizationServiceCredential(cfg.Authorization.ServiceCredential),
-			application.Auth.Middleware,
+			middleware...,
 		)),
 	}
 	logger.Info("Permission center HTTP server listening.", slog.String("Address", cfg.HTTP.Addr))

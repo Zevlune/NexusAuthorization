@@ -89,6 +89,12 @@ Redis 与 HTTP 的配置文件绑定也在 Action 中完成：
 配置位置。SDK 没有 `Provider` 配置枚举，也不会根据配置值自动切换 Redis 和
 HTTP；选择哪个 `UseRedis` 或 `UseHttp` 由接入应用的启动代码决定。
 
+Redis 示例中的 `KeyPrefix` 假定中心 `LUCKENV=prod`。中心当前按
+`nexusauthorization:<QueryEscape(trim(LUCKENV))>` 推导前缀，SDK 不会读取
+`LUCKENV` 或 `SERVICEUK`；接入应用必须把 `KeyPrefix` 设置为完全相同的推导值，
+并让 `ServiceResource` 与接入服务在中心登记的标识一致。中心不再接受
+`NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 作为前缀覆盖。
+
 ## ASP.NET Core 快速接入
 
 保留应用已有的登录、令牌校验、认证注册和授权管道。SDK 不替代
@@ -392,9 +398,14 @@ HTTP 配置直接使用调用方设置的值。SDK 不注册
 Redis 模式的业务键格式为：
 
 ```text
-{KeyPrefix}:{QueryEscape(trim(ServiceResource))}:{QueryEscape(trim(subject))}
+nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(subject))>
 ```
 
+- 中心 Redis 前缀由必填的 `LUCKENV` 推导；SDK 的 `KeyPrefix` 必须精确等于
+  `nexusauthorization:<QueryEscape(trim(LUCKENV))>`。消费者不会根据
+  `LUCKENV` 自动推导，也不会读取中心的 `SERVICEUK`。
+- SDK 的 `ServiceResource` 使用接入服务在中心登记的服务标识；服务段和
+  subject 分别先 `trim`，再执行 `QueryEscape`。
 - SDK 对每个受保护请求直接执行一次 Redis `GET`，对应
   `StringGetAsync`。它不缓存策略或授权结果，也不读取 Lua、readiness、锁、
   发布号或其他辅助 key。
@@ -426,9 +437,14 @@ ID。SDK 先查找方法名与请求方法相同（不区分大小写）且路�
 该 endpoint ID 出现在 `apis` 中时才允许。服务未启用、endpoint 未启用、路径找不到
 或没有授权都返回拒绝。
 
-Redis 的 `KeyPrefix` 需要与写入策略的 NexusAuthorization 中心一致。
+Redis 的 `KeyPrefix` 需要与写入策略的 NexusAuthorization 中心完全一致。
 SDK 直接使用 `RedisAuthorizationOptions` 中的值，不对 Redis 地址、端口、数据库编号、
-超时或 `KeyPrefix` 添加配置校验。
+超时或 `KeyPrefix` 添加配置校验，因此即使值错误也会启动，并在读取时因 key 缺失而
+fail closed。
+
+已有 key 前缀发生变化时，例如中心调整 `LUCKENV` 或从旧的自选前缀迁移，完整
+业务 key 已改变。中心必须按新前缀重新全量发布，所有接入应用必须同步更新
+`KeyPrefix` 并重启；旧前缀记录不会被自动兼容读取。
 
 ## Fail closed
 

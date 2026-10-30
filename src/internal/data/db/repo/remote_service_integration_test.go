@@ -62,6 +62,7 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = cache.Close() })
 	suffix := uuid.NewString()
 	appKey, key := "remote-console-"+suffix, "remote-orders-"+suffix
+	foreignKey := "unlinked-orders-" + suffix
 	catalog := &changingServiceCatalog{resource: &biz.ServiceResource{ID: "external-resource-id", Key: key, DisplayName: "Remote orders", IsActive: true, Source: "nexusauth"}}
 	service, err := biz.NewServiceResourceCatalog(NewServiceResourceRepository(pool), catalog, "nexusauth")
 	if err != nil {
@@ -71,6 +72,7 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	t.Cleanup(func() {
 		pool.Exec(ctx, `DELETE FROM applications WHERE app_key=$1`, appKey)
 		pool.Exec(ctx, `DELETE FROM api_endpoints WHERE service_resource_key=$1`, key)
+		pool.Exec(ctx, `DELETE FROM api_endpoints WHERE service_resource_key=$1`, foreignKey)
 		pool.Exec(ctx, `DELETE FROM service_resources WHERE resource_key=$1`, key)
 	})
 	if _, err := r.SaveApplication(ctx, biz.Application{Key: appKey, DisplayName: "Remote Console", Enabled: true}); err != nil {
@@ -79,9 +81,24 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if err := r.ReplaceApplicationServices(ctx, appKey, []string{key}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE applications SET enabled=FALSE WHERE app_key=$1`, appKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RequireLinkedApplicationService(ctx, appKey, key); !errors.Is(err, biz.ErrInvalidArgument) {
+		t.Fatalf("disabled application accepted by link check: %v", err)
+	}
+	if _, _, err := r.ListApplicationEndpoints(ctx, appKey, "", 1, 100); !errors.Is(err, biz.ErrNotFound) {
+		t.Fatalf("disabled application listed endpoints: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE applications SET enabled=TRUE WHERE app_key=$1`, appKey); err != nil {
+		t.Fatal(err)
+	}
 	endpoint, err := r.SaveEndpoint(ctx, key, biz.RBACEndpoint{Method: "GET", PathTemplate: "/items", Enabled: true})
 	if err != nil || endpoint.ServiceResource != key {
 		t.Fatalf("remote endpoint: %+v %v", endpoint, err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO api_endpoints(service_resource_key,endpoint_key,method,path_template) VALUES($1,$2,'GET','/unlinked')`, foreignKey, "unlinked:"+suffix); err != nil {
+		t.Fatal(err)
 	}
 	role, err := r.SaveRole(ctx, appKey, biz.RBACRole{Code: "reader", Name: "Reader", Enabled: true, EndpointIDs: []uuid.UUID{endpoint.ID}})
 	if err != nil {
@@ -104,6 +121,12 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if err != nil || total != 1 || len(endpoints) != 1 || endpoints[0].ServiceResource != key {
 		t.Fatalf("remote catalog: %+v %d %v", endpoints, total, err)
 	}
+	if err := svc.RequireLinkedApplicationService(ctx, appKey, key); err != nil {
+		t.Fatalf("linked remote service rejected: %v", err)
+	}
+	if err := svc.RequireLinkedApplicationService(ctx, appKey, foreignKey); !errors.Is(err, biz.ErrInvalidArgument) {
+		t.Fatalf("unlinked endpoint scope accepted: %v", err)
+	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM service_resources WHERE resource_key=$1`, key).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("remote metadata persisted: %d %v", count, err)
@@ -125,8 +148,19 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if _, err := r.ListApplicationServices(ctx, appKey); !errors.Is(err, catalog.err) {
 		t.Fatalf("remote error hidden: %v", err)
 	}
-	if _, _, err := r.ListApplicationEndpoints(ctx, appKey, "", 1, 100); !errors.Is(err, catalog.err) {
-		t.Fatalf("endpoint fallback: %v", err)
+	endpoints, total, err = r.ListApplicationEndpoints(ctx, appKey, "", 1, 100)
+	if err != nil || total != 1 || len(endpoints) != 1 || endpoints[0].ID != endpoint.ID {
+		t.Fatalf("endpoint list depended on remote catalog: %+v %d %v", endpoints, total, err)
+	}
+	listed, err := r.ListEndpoints(ctx, key)
+	if err != nil || len(listed) != 1 || listed[0].ID != endpoint.ID {
+		t.Fatalf("service endpoint list depended on remote catalog: %+v %v", listed, err)
+	}
+	if err := svc.RequireLinkedApplicationService(ctx, appKey, key); err != nil {
+		t.Fatalf("linked service blocked by remote outage: %v", err)
+	}
+	if err := svc.RequireApplicationService(ctx, appKey, key); !errors.Is(err, catalog.err) {
+		t.Fatalf("write path ignored remote outage: %v", err)
 	}
 	if _, err := r.GetPolicyMetadata(ctx, appKey); !errors.Is(err, catalog.err) {
 		t.Fatalf("runtime fallback: %v", err)
@@ -134,8 +168,18 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	catalog.err = nil
 	catalog.resource.IsActive = false
 	endpoints, total, err = r.ListApplicationEndpoints(ctx, appKey, "", 1, 100)
-	if err != nil || total != 0 || len(endpoints) != 0 {
-		t.Fatalf("disabled remote leaked: %+v %d %v", endpoints, total, err)
+	if err != nil || total != 1 || len(endpoints) != 1 || endpoints[0].ID != endpoint.ID {
+		t.Fatalf("disabled remote endpoint hidden: %+v %d %v", endpoints, total, err)
+	}
+	listed, err = r.ListEndpoints(ctx, key)
+	if err != nil || len(listed) != 1 || listed[0].ID != endpoint.ID {
+		t.Fatalf("disabled service endpoint list: %+v %v", listed, err)
+	}
+	if err := svc.RequireLinkedApplicationService(ctx, appKey, key); err != nil {
+		t.Fatalf("disabled linked service rejected: %v", err)
+	}
+	if err := svc.RequireApplicationService(ctx, appKey, key); !errors.Is(err, biz.ErrConflict) {
+		t.Fatalf("write path accepted disabled service: %v", err)
 	}
 	if _, err := r.SaveEndpoint(ctx, key, biz.RBACEndpoint{Method: "POST", PathTemplate: "/items", Enabled: true}); !errors.Is(err, biz.ErrConflict) {
 		t.Fatalf("disabled remote accepted: %v", err)
@@ -154,12 +198,32 @@ func TestRemoteApplicationPermissionIntegration(t *testing.T) {
 	if err != nil || len(resources) != 1 || resources[0].IsActive || resources[0].DisplayName != key {
 		t.Fatalf("missing remote fallback: %+v %v", resources, err)
 	}
+	endpoints, total, err = r.ListApplicationEndpoints(ctx, appKey, "", 1, 100)
+	if err != nil || total != 1 || len(endpoints) != 1 || endpoints[0].ID != endpoint.ID {
+		t.Fatalf("missing remote endpoint hidden: %+v %d %v", endpoints, total, err)
+	}
 	if err := r.ReplaceApplicationServices(ctx, appKey, []string{key}); err != nil {
 		t.Fatalf("cannot retain existing unavailable link: %v", err)
 	}
 	if err := r.ReplaceApplicationServices(ctx, appKey, []string{}); !errors.Is(err, biz.ErrConflict) {
 		t.Fatalf("unlinked granted service: %v", err)
 	}
+	catalog.err = errors.New("remote unavailable during endpoint cleanup")
+	if err := svc.RequireLinkedApplicationService(ctx, appKey, key); err != nil {
+		t.Fatalf("linked service blocked during cleanup: %v", err)
+	}
+	if err := svc.DeleteEndpoint(ctx, key, endpoint.ID); !errors.Is(err, biz.ErrPublishPending) {
+		t.Fatalf("endpoint cleanup publish state: %v", err)
+	}
+	endpoints, total, err = r.ListApplicationEndpoints(ctx, appKey, "", 1, 100)
+	if err != nil || total != 0 || len(endpoints) != 0 {
+		t.Fatalf("deleted endpoint remained listed: %+v %d %v", endpoints, total, err)
+	}
+	listed, err = r.ListEndpoints(ctx, key)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("deleted service endpoint remained listed: %+v %v", listed, err)
+	}
+	catalog.err = nil
 	if err := r.DeleteRole(ctx, appKey, role.ID); err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ import (
 type RedisConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	URL       string `yaml:"url"`
-	KeyPrefix string `yaml:"key_prefix"`
+	KeyPrefix string `yaml:"-"`
 	// CacheTTL is accepted for compatibility but no longer used: service API
 	// records never expire and are kept current by publication.
 	CacheTTL string `yaml:"cache_ttl"`
@@ -94,7 +94,6 @@ func applyRedisEnv(cfg *RedisConfig) error {
 		dst *string
 	}{
 		{"NEXUSAUTHORIZATION_REDIS_URL", &cfg.URL},
-		{"NEXUSAUTHORIZATION_REDIS_KEY_PREFIX", &cfg.KeyPrefix},
 		{"NEXUSAUTHORIZATION_REDIS_CACHE_TTL", &cfg.CacheTTL},
 		{"NEXUSAUTHORIZATION_REDIS_TIMEOUT", &cfg.Timeout},
 		{"NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL", &cfg.ReconcileInterval},

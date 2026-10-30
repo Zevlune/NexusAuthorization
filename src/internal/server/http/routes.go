@@ -39,8 +39,11 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.HandleFunc("POST "+apiPrefix+"/auth/logout", handler.AuthLogout)
 
 	protect := func(next http.Handler) http.Handler {
-		if len(authMiddleware) > 0 && authMiddleware[0] != nil {
-			return authMiddleware[0](next)
+		// 先认证，再执行其他保护中间件。
+		for i := len(authMiddleware) - 1; i >= 0; i-- {
+			if authMiddleware[i] != nil {
+				next = authMiddleware[i](next)
+			}
 		}
 		return next
 	}

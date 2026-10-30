@@ -122,6 +122,8 @@ jobs:
         run: |
           psql "$TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f migrations/001_init.sql
           docker run -d --name api --network host \
+            -e LUCKENV=ci \
+            -e SERVICEUK=permission.center.api \
             -e NEXUSAUTHORIZATION_DATABASE_URL="$TEST_DATABASE_URL" \
             -e NEXUSAUTHORIZATION_REDIS_ENABLED=false \
             -e NEXUSAUTHORIZATION_OIDC_ENABLED=false \
