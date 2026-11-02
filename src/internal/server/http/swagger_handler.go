@@ -51,7 +51,7 @@ func openAPIDocument() map[string]any {
 			},
 			"security": []map[string][]string{{"cookieAuth": {}}},
 		}
-		if operation.path == apiPrefix+"/v1/authorize" {
+		if operation.path == apiPrefix+"/v1/authorize" || operation.path == apiPrefix+"/v1/subject-menus" {
 			definition["security"] = []map[string][]string{{"serviceCredential": {}}}
 		}
 
@@ -67,10 +67,15 @@ func openAPIDocument() map[string]any {
 		if strings.HasPrefix(operation.path, apiPrefix+"/v1/rbac-v1/endpoints") {
 			parameters = append(parameters, map[string]any{"name": "service_resource", "in": "query", "required": operation.method != http.MethodGet, "schema": map[string]any{"type": "string"}})
 		}
-		if operation.path == apiPrefix+"/v1/rbac-v1/subject-menus" {
-			for _, name := range []string{"subject"} {
-				parameters = append(parameters, map[string]any{"name": name, "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
+		if operation.path == apiPrefix+"/v1/rbac-v1/subject-menus" || operation.path == apiPrefix+"/v1/subject-menus" {
+			if operation.path == apiPrefix+"/v1/subject-menus" {
+				parameters = append(parameters, map[string]any{"name": "app_key", "in": "query", "required": true, "schema": map[string]any{"type": "string"}})
 			}
+			subjectParameter := map[string]any{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}}
+			if operation.path == apiPrefix+"/v1/subject-menus" {
+				subjectParameter["description"] = "Verified subject supplied by the trusted business backend"
+			}
+			parameters = append(parameters, subjectParameter)
 			parameters = append(parameters, map[string]any{"name": "domain", "in": "query", "required": false, "schema": map[string]any{"type": "string"}, "description": "Defaults to the empty default domain when omitted"})
 		}
 		if operation.path == apiPrefix+"/v1/users" {
@@ -116,7 +121,7 @@ func openAPIDocument() map[string]any {
 		"components": map[string]any{
 			"securitySchemes": map[string]any{
 				"cookieAuth":        map[string]any{"type": "apiKey", "in": "cookie", "name": "nexusauthorization_session"},
-				"serviceCredential": map[string]any{"type": "http", "scheme": "bearer", "description": "Configured service-to-service credential for PEP calls."},
+				"serviceCredential": map[string]any{"type": "http", "scheme": "bearer", "description": "Configured service-to-service credential for PEP calls and trusted menu queries. Never expose it to business browsers."},
 			},
 			"schemas": map[string]any{"APIResponse": map[string]any{"type": "object", "properties": map[string]any{"success": map[string]any{"type": "boolean"}, "errorCode": map[string]any{"nullable": true}, "errorMessage": map[string]any{"nullable": true}, "result": map[string]any{}}}},
 		},
@@ -134,6 +139,7 @@ var openAPIOperations = []openAPIOperation{
 	{http.MethodPost, apiPrefix + "/v1/rbac-v1/menus", "menus", "Save application menu", true},
 	{http.MethodDelete, apiPrefix + "/v1/rbac-v1/menus/{id}", "menus", "Delete application menu", false},
 	{http.MethodGet, apiPrefix + "/v1/rbac-v1/subject-menus", "menus", "Get currently granted menus for a subject", false},
+	{http.MethodGet, apiPrefix + "/v1/subject-menus", "menus", "Get granted menus for a subject from a trusted service", false},
 	{"GET", apiPrefix + "/healthz", "System", "Health check", false},
 	{"GET", apiPrefix + "/auth/config", "Authentication", "Get authentication configuration", false},
 	{"GET", apiPrefix + "/auth/login", "Authentication", "Start sign-in", false},

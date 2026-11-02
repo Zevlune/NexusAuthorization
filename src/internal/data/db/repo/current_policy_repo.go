@@ -29,6 +29,81 @@ const currentPolicyBodySQL = `jsonb_build_object(
 const applicationCurrentPolicyByKeySQL = `SELECT ` + currentPolicyBodySQL + ` FROM applications a WHERE a.app_key=$1 AND a.enabled`
 const applicationCurrentPolicyByIDSQL = `SELECT ` + currentPolicyBodySQL + ` FROM applications a WHERE a.id=$1 AND a.enabled`
 
+// apiRequestPolicySQL reads only the records that can affect one API request.
+// The application row, role bindings, bound roles, requested-service grants and
+// complete endpoint catalog are all read by this one statement. PostgreSQL's
+// statement snapshot keeps the aggregate internally consistent. The active
+// service keys are read from the catalog before this statement and passed as
+// $5 so an unavailable service contributes no routes, matching the full
+// current-policy query.
+const apiRequestPolicySQL = `
+WITH request AS (
+    SELECT a.id, a.app_key
+    FROM applications a
+    WHERE a.app_key=$1 AND a.enabled
+), request_bindings AS (
+    SELECT b.id, btrim(b.subject) AS subject,
+           CASE WHEN btrim(b.domain) IN ('', 'global') THEN '' ELSE btrim(b.domain) END AS domain,
+           b.role_id
+    FROM subject_role_bindings b
+    JOIN request a ON a.id=b.application_id
+    WHERE btrim(b.subject)=$2
+      AND (CASE WHEN btrim(b.domain) IN ('', 'global') THEN '' ELSE btrim(b.domain) END)=$3
+), bound_roles AS (
+    SELECT DISTINCT r.id, r.code, r.enabled
+    FROM roles r
+    JOIN request_bindings b ON b.role_id=r.id
+    WHERE r.application_id=(SELECT id FROM request)
+)
+SELECT jsonb_build_object(
+    'app_key',a.app_key,
+    'application_id',a.id,
+    'service_resources',COALESCE((
+        SELECT jsonb_agg(jsonb_build_object('key',x.service_resource_key) ORDER BY x.service_resource_key)
+        FROM application_service_resources x
+        WHERE x.application_id=a.id AND x.service_resource_key=$4 AND $4=ANY($5::text[])
+    ),'[]'::jsonb),
+    'endpoints',COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',e.id,
+            'service_resource',e.service_resource_key,
+            'method',e.method,
+            'path_template',e.path_template,
+            'enabled',e.enabled
+        ) ORDER BY e.id)
+        FROM api_endpoints e
+        JOIN application_service_resources x ON x.service_resource_key=e.service_resource_key
+        WHERE x.application_id=a.id AND e.service_resource_key=$4 AND $4=ANY($5::text[])
+    ),'[]'::jsonb),
+    'roles',COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'id',r.id,
+            'code',r.code,
+            'enabled',r.enabled,
+            'endpoint_ids',COALESCE((
+                SELECT jsonb_agg(g.endpoint_id ORDER BY g.endpoint_id)
+                FROM role_api_endpoint_bindings g
+                JOIN api_endpoints e ON e.id=g.endpoint_id
+                JOIN application_service_resources x ON x.service_resource_key=e.service_resource_key
+                WHERE g.role_id=r.id AND x.application_id=a.id
+                  AND e.service_resource_key=$4 AND $4=ANY($5::text[])
+            ),'[]'::jsonb)
+        ) ORDER BY r.id)
+        FROM bound_roles r
+    ),'[]'::jsonb),
+    'subject_roles',COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'subject',b.subject,
+            'domain',b.domain,
+            'role_id',b.role_id
+        ) ORDER BY b.subject,b.domain,b.role_id)
+        FROM request_bindings b
+    ),'[]'::jsonb)
+)
+FROM request a`
+
+var _ biz.APIRequestPolicyRepository = (*RBACV1Repository)(nil)
+
 // currentPolicyFingerprint derives the in-memory content token from one decoded
 // snapshot. Go's json.Marshal emits map keys in sorted order and a fixed escape
 // set, so the digest is stable across reads of equal content.
@@ -113,6 +188,47 @@ func (r *RBACV1Repository) GetCurrentPolicy(ctx context.Context, p biz.CurrentPo
 	if p.Token != "" && p.Token != token {
 		return p, biz.ErrConflict
 	}
+	p.Token = token
+	p.Data = data
+	return p, nil
+}
+
+// GetAPIRequestPolicy returns a current policy snapshot for one database-mode
+// API request. The service catalog is read before the SQL statement so an
+// inactive service behaves exactly like the full current-policy path. The
+// returned content digest is process-local cache identity only; no revision or
+// policy data is persisted.
+func (r *RBACV1Repository) GetAPIRequestPolicy(ctx context.Context, app, subject, domain, service string) (biz.CurrentPolicy, error) {
+	var p biz.CurrentPolicy
+	app = strings.TrimSpace(app)
+	subject = strings.TrimSpace(subject)
+	domain = biz.NormalizeRBACDomain(domain)
+	service = strings.TrimSpace(service)
+	if app == "" || subject == "" || service == "" {
+		return p, biz.ErrInvalidArgument
+	}
+	keys, err := r.activeServiceKeys(ctx)
+	if err != nil {
+		return p, err
+	}
+	var raw []byte
+	if err = r.pool.QueryRow(ctx, apiRequestPolicySQL, app, subject, domain, service, keys).Scan(&raw); err != nil {
+		return p, mapDBError(err)
+	}
+	var data map[string]any
+	if err = json.Unmarshal(raw, &data); err != nil {
+		return p, fmt.Errorf("decode API request policy: %w", err)
+	}
+	id, err := parsePolicyApplicationID(data["application_id"])
+	if err != nil {
+		return p, err
+	}
+	token, err := currentPolicyFingerprint(data)
+	if err != nil {
+		return p, err
+	}
+	p.ApplicationID = id
+	p.ServiceKeys = []string{service}
 	p.Token = token
 	p.Data = data
 	return p, nil

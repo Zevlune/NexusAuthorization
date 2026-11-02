@@ -34,8 +34,7 @@ var (
 	ErrInvalidNonce    = errors.New("invalid authentication nonce")
 )
 
-// User is the small identity projection stored in the encrypted local
-// session. Access and refresh tokens are deliberately never placed in it.
+// User is the public identity projection. Credentials never appear in API responses.
 type User struct {
 	Subject       string `json:"sub"`
 	Email         string `json:"email,omitempty"`
@@ -87,20 +86,24 @@ type Service struct {
 	publicAuthority      *url.URL
 	backchannelAuthority *url.URL
 	now                  func() time.Time
+	introspections       *tokenCache[accessTokenIntrospection]
+	refreshes            *tokenCache[sessionUser]
 }
 
 type accessTokenIntrospection struct {
-	Active   bool   `json:"active"`
-	Subject  string `json:"sub"`
-	ClientID string `json:"client_id"`
-	TokenUse string `json:"token_use"`
+	Active    bool   `json:"active"`
+	Subject   string `json:"sub"`
+	ClientID  string `json:"client_id"`
+	TokenUse  string `json:"token_use"`
+	ExpiresAt int64  `json:"exp"`
 }
 
 // New discovers the provider's authorization, token, issuer and JWKS
 // metadata. Discovery is done at startup so a bad authority fails fast rather
 // than producing an invalid login URL on the first request.
 func New(ctx context.Context, cfg config.OIDCConfig) (*Service, error) {
-	service := &Service{cfg: cfg, enabled: cfg.Enabled, now: time.Now}
+	service := &Service{cfg: cfg, enabled: cfg.Enabled, now: time.Now,
+		introspections: newTokenCache[accessTokenIntrospection](), refreshes: newTokenCache[sessionUser]()}
 	if !cfg.Enabled {
 		return service, nil
 	}
@@ -155,14 +158,23 @@ func New(ctx context.Context, cfg config.OIDCConfig) (*Service, error) {
 		if err != nil {
 			return User{}, err
 		}
-		introspection, err := introspectNexusAccessToken(
-			ctx,
-			rawToken,
-			httpClient,
-			metadata.IntrospectionEndpoint,
-			cfg.ClientID,
-			cfg.ClientSecret,
-		)
+		introspection, err := service.introspections.load(ctx, rawToken, service.now, func(loadCtx context.Context) (accessTokenIntrospection, time.Time, error) {
+			result, err := introspectNexusAccessToken(loadCtx, rawToken, httpClient, metadata.IntrospectionEndpoint, cfg.ClientID, cfg.ClientSecret)
+			if err != nil {
+				return result, time.Time{}, err
+			}
+			if !result.Active || result.Subject != user.Subject || result.ClientID != cfg.ClientID || result.TokenUse != "access_token" {
+				return result, time.Time{}, ErrInvalidToken
+			}
+			expires := service.now().Add(15 * time.Second)
+			if result.ExpiresAt > 0 && time.Unix(result.ExpiresAt, 0).Before(expires) {
+				expires = time.Unix(result.ExpiresAt, 0)
+			}
+			if !expires.After(service.now()) {
+				return result, time.Time{}, ErrInvalidToken
+			}
+			return result, expires, nil
+		})
 		if err != nil {
 			return User{}, fmt.Errorf("%w: introspection failed: %v", ErrInvalidToken, err)
 		}
@@ -256,10 +268,12 @@ func NewForTest(cfg config.OIDCConfig) (*Service, error) {
 		return nil, err
 	}
 	return &Service{
-		cfg:      cfg,
-		enabled:  cfg.Enabled,
-		sessions: sessions,
-		now:      time.Now,
+		cfg:            cfg,
+		enabled:        cfg.Enabled,
+		sessions:       sessions,
+		now:            time.Now,
+		introspections: newTokenCache[accessTokenIntrospection](),
+		refreshes:      newTokenCache[sessionUser](),
 	}, nil
 }
 
@@ -370,15 +384,18 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if err := idToken.Claims(&claims); err != nil {
 		return fmt.Errorf("decode oidc claims: %w", err)
 	}
-	// 本地会话保存用户身份和退出所需的 ID Token，不保存访问或刷新令牌。
+	// Credentials remain inside the encrypted HttpOnly cookie; no access token is retained.
 	data.User = &sessionUser{
-		Subject:       idToken.Subject,
-		Email:         claims.Email,
-		Name:          claims.Name,
-		Picture:       claims.Picture,
-		EmailVerified: claims.EmailVerified,
-		ExpiresAt:     idToken.Expiry.Unix(),
-		IDToken:       rawIDToken,
+		Subject:          idToken.Subject,
+		Email:            claims.Email,
+		Name:             claims.Name,
+		Picture:          claims.Picture,
+		EmailVerified:    claims.EmailVerified,
+		ExpiresAt:        idToken.Expiry.Unix(),
+		IDToken:          rawIDToken,
+		RefreshToken:     token.RefreshToken,
+		SessionExpiresAt: s.now().Add(maxCookieAge).Unix(),
+		AuthNonce:        nonce,
 	}
 	if data.User.Subject == "" {
 		return fmt.Errorf("%w: id_token subject is empty", ErrInvalidRequest)
@@ -400,7 +417,8 @@ func (s *Service) Me(r *http.Request) (User, bool) {
 	if err != nil || data.User == nil {
 		return User{}, false
 	}
-	if data.User.ExpiresAt == 0 || !s.now().Before(time.Unix(data.User.ExpiresAt, 0)) {
+	if data.User.ExpiresAt == 0 || !s.now().Before(time.Unix(data.User.ExpiresAt, 0)) ||
+		(data.User.SessionExpiresAt != 0 && s.now().Unix() >= data.User.SessionExpiresAt) {
 		return User{}, false
 	}
 	return User{
@@ -486,7 +504,7 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		// 没有 Bearer 时尝试浏览器 Cookie；会话失效则返回 401。
-		if user, ok := s.Me(r); ok {
+		if user, ok := s.SessionUser(w, r); ok {
 			setAuthenticatedUser(r, user)
 			next.ServeHTTP(w, r)
 			return

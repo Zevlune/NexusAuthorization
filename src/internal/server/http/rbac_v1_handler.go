@@ -16,12 +16,22 @@ func rbacPageParams(r *http.Request) (int, int) {
 	return page, pageSize
 }
 
+func (h *Handler) requireAuthorizationServiceCredential(w http.ResponseWriter, r *http.Request) bool {
+	fields := strings.Fields(r.Header.Get("Authorization"))
+	if h.authorizationServiceCredential != "" &&
+		len(fields) == 2 &&
+		strings.EqualFold(fields[0], "Bearer") &&
+		subtle.ConstantTimeCompare([]byte(fields[1]), []byte(h.authorizationServiceCredential)) == 1 {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Bearer realm="authorize"`)
+	writeRawJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "errorCode": "UNAUTHENTICATED", "errorMessage": "service credential required", "result": nil})
+	return false
+}
+
 // AuthorizeRBAC evaluates currently saved permissions for a trusted service caller.
 func (h *Handler) AuthorizeRBAC(w http.ResponseWriter, r *http.Request) {
-	fields := strings.Fields(r.Header.Get("Authorization"))
-	if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || h.authorizationServiceCredential == "" || subtle.ConstantTimeCompare([]byte(fields[1]), []byte(h.authorizationServiceCredential)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="authorize"`)
-		writeRawJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "errorCode": "UNAUTHENTICATED", "errorMessage": "service credential required", "result": nil})
+	if !h.requireAuthorizationServiceCredential(w, r) {
 		return
 	}
 	var request struct {

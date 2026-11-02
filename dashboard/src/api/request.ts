@@ -29,6 +29,19 @@ const isApiResult = (value: unknown): value is ApiResult => {
     && typeof (value as ApiResult).success === 'boolean';
 };
 
+const redirectToLogin = (response: AxiosResponse) => {
+  if (response.status !== 401 || response.config.url?.includes('/auth/')) {
+    return false;
+  }
+
+  // Return to the current page after signing in again; the login page validates the target.
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  window.location.href = window.location.pathname === '/login'
+    ? '/login'
+    : `/login?redirect=${encodeURIComponent(current)}`;
+  return true;
+};
+
 const createApiResultError = (response: AxiosResponse, apiResult: ApiResult) => {
   const message = apiResult.errorMessage || apiResult.errorCode || '请求失败';
   const errorResponse: AxiosResponse = {
@@ -50,6 +63,16 @@ const createApiResultError = (response: AxiosResponse, apiResult: ApiResult) => 
 
 request.interceptors.response.use(
   (response: AxiosResponse) => {
+    if (redirectToLogin(response)) {
+      return Promise.reject(new AxiosError(
+        'Unauthorized',
+        AxiosError.ERR_BAD_REQUEST,
+        response.config,
+        response.request,
+        response,
+      ));
+    }
+
     if (!isApiResult(response.data)) {
       return response.data;
     }
@@ -61,15 +84,14 @@ request.interceptors.response.use(
     return response.data.result;
   },
   (error: AxiosError) => {
+    if (error.response && redirectToLogin(error.response)) {
+      return Promise.reject(error);
+    }
+
     if (error.response && isApiResult(error.response.data) && !error.response.data.success) {
       return Promise.reject(createApiResultError(error.response, error.response.data));
     }
 
-    if (error.response?.status === 401 && !error.config?.url?.includes('/auth/')) {
-      // Return to the current page after signing in again; the login page validates the target.
-      const current = `${window.location.pathname}${window.location.search}`;
-      window.location.href = window.location.pathname === '/login' ? '/login' : `/login?redirect=${encodeURIComponent(current)}`;
-    }
     return Promise.reject(error);
   }
 );

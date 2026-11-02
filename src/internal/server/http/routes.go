@@ -50,6 +50,7 @@ func NewServer(handler *Handler, authMiddleware ...func(http.Handler) http.Handl
 	mux.Handle(apiPrefix+"/v1/", protect(http.NotFoundHandler()))
 	mux.Handle("GET "+apiPrefix+"/v1/users", protect(http.HandlerFunc(handler.ListUsers)))
 	mux.Handle("POST "+apiPrefix+"/v1/authorize", http.HandlerFunc(handler.AuthorizeRBAC))
+	mux.Handle("GET "+apiPrefix+"/v1/subject-menus", http.HandlerFunc(handler.SubjectApplicationMenusForService))
 	mux.Handle("GET "+apiPrefix+"/v1/applications", protect(http.HandlerFunc(handler.ListApplications)))
 	mux.Handle("POST "+apiPrefix+"/v1/applications", protect(http.HandlerFunc(handler.SaveApplication)))
 	mux.Handle("PUT "+apiPrefix+"/v1/applications/{key}", protect(http.HandlerFunc(handler.SaveApplication)))

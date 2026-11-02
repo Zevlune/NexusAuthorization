@@ -146,6 +146,14 @@ func (r *RBACV1Repository) ReplaceApplicationServices(ctx context.Context, key s
 	if err != nil {
 		return err
 	}
+	activeKeys, err := r.activeServiceKeys(ctx)
+	if err != nil {
+		return err
+	}
+	active := make(map[string]bool, len(activeKeys))
+	for _, serviceKey := range activeKeys {
+		active[serviceKey] = true
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return mapDBError(err)
@@ -155,14 +163,6 @@ func (r *RBACV1Repository) ReplaceApplicationServices(ctx context.Context, key s
 		return mapDBError(err)
 	}
 
-	activeKeys, err := r.activeServiceKeys(ctx)
-	if err != nil {
-		return err
-	}
-	active := make(map[string]bool, len(activeKeys))
-	for _, serviceKey := range activeKeys {
-		active[serviceKey] = true
-	}
 	// Existing unavailable links may be retained while other links are edited, but cannot be newly added.
 	for _, serviceKey := range keys {
 		if active[serviceKey] {
