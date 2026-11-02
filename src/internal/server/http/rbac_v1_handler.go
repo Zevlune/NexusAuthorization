@@ -58,9 +58,8 @@ func (h *Handler) WithRBACV1Service(service *biz.RBACV1Service) *Handler {
 	return h
 }
 
-// ListRBACV1Endpoints lists the endpoints assigned to an application service.
-// app_key and service_resource are required and the page is bounded by
-// rbacPageParams.
+// ListRBACV1Endpoints lists endpoints for services linked to an application.
+// app_key is required and service_resource optionally narrows the result.
 func (h *Handler) ListRBACV1Endpoints(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, r, biz.ErrNotFound)
@@ -116,8 +115,9 @@ func (h *Handler) SaveRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, item)
 }
 
-// DeleteRBACV1Endpoint deletes an endpoint from an application service after
-// validating the application/service scope and the path id.
+// DeleteRBACV1Endpoint deletes an endpoint after validating the persisted
+// application/service link and path id. A stale catalog entry must not prevent
+// manual cleanup.
 func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, r, biz.ErrNotFound)
@@ -130,7 +130,7 @@ func (h *Handler) DeleteRBACV1Endpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service := strings.TrimSpace(r.URL.Query().Get("service_resource"))
-	if err := h.rbacV1.RequireApplicationService(r.Context(), scope, service); err != nil {
+	if err := h.rbacV1.RequireLinkedApplicationService(r.Context(), scope, service); err != nil {
 		writeError(w, r, err)
 		return
 	}

@@ -10,7 +10,7 @@
 
 String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB、超时或 Redis 错误都拒绝；旧应用级 JSON 不作为 fallback。显式设置 `redis.enabled: false` 或 `NEXUSAUTHORIZATION_REDIS_ENABLED=false` 时，不创建 Redis 客户端，服务 API 和权限模拟使用数据库 current-policy。
 
-菜单与全策略适配器始终走独立的 current-policy 路径，不依赖服务 API Redis 记录。
+主体菜单查询直接在一个数据库快照中读取应用、菜单、角色菜单授权和主体绑定，不访问远程服务目录或服务 API Redis 记录。全策略适配器仍走独立的 current-policy 路径。
 
 ## 保存与发布
 

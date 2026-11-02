@@ -46,7 +46,7 @@ func run() int {
 	}
 	defer application.Close()
 	go application.RunSubjectAPIReconciler(ctx, logger)
-	middleware := []func(http.Handler) http.Handler{application.Auth.Middleware}
+	middleware := []func(http.Handler) http.Handler{application.Auth.Middleware, httpserver.ManagementAuditMiddleware}
 	if cfg.OIDC.Enabled {
 		middleware = append(middleware, httpserver.ManagementAuthorizationMiddleware(
 			application.RBACV1, "management", cfg.Runtime.ServiceUK,

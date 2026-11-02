@@ -38,10 +38,18 @@ func NewRBACV1Repository(pool *pgxpool.Pool, catalogs ...biz.ServiceResourceCata
 	return &RBACV1Repository{pool: pool, catalog: catalog}
 }
 
-func (r *RBACV1Repository) resourceKey(ctx context.Context, key string) (string, error) {
+func serviceResourceKey(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return "", fmt.Errorf("%w: service resource key is required", biz.ErrInvalidArgument)
+	}
+	return key, nil
+}
+
+func (r *RBACV1Repository) resourceKey(ctx context.Context, key string) (string, error) {
+	key, err := serviceResourceKey(key)
+	if err != nil {
+		return "", err
 	}
 	resource, err := r.catalog.Get(ctx, key)
 	if err != nil {
@@ -68,7 +76,7 @@ func (r *RBACV1Repository) activeServiceKeys(ctx context.Context) ([]string, err
 }
 
 func (r *RBACV1Repository) ListEndpoints(ctx context.Context, key string) ([]biz.RBACEndpoint, error) {
-	scope, err := r.resourceKey(ctx, key)
+	scope, err := serviceResourceKey(key)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +212,7 @@ func (r *RBACV1Repository) saveEndpoint(ctx context.Context, scope string, value
 	return value, nil
 }
 func (r *RBACV1Repository) DeleteEndpoint(ctx context.Context, key string, id uuid.UUID) error {
-	scope, err := r.resourceKey(ctx, key)
+	scope, err := serviceResourceKey(key)
 	if err != nil {
 		return err
 	}
@@ -474,21 +482,47 @@ func (r *RBACV1Repository) applicationID(ctx context.Context, key string) (uuid.
 	return id, mapDBError(err)
 }
 
+func (r *RBACV1Repository) RequireLinkedApplicationService(ctx context.Context, app, service string) error {
+	var appErr error
+	if strings.TrimSpace(app) == "" {
+		appErr = fmt.Errorf("%w: app_key is required", biz.ErrInvalidArgument)
+	}
+	service, serviceErr := serviceResourceKey(service)
+	if appErr != nil {
+		return appErr
+	}
+	if serviceErr != nil {
+		return serviceErr
+	}
+	var linked bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1
+		FROM applications a
+		JOIN application_service_resources l ON l.application_id=a.id
+		WHERE a.app_key=$1 AND a.enabled AND l.service_resource_key=$2
+	)`, strings.TrimSpace(app), service).Scan(&linked)
+	if err != nil {
+		return mapDBError(err)
+	}
+	if !linked {
+		return fmt.Errorf("%w: service is not linked to application", biz.ErrInvalidArgument)
+	}
+	return nil
+}
+
 func (r *RBACV1Repository) ListApplicationEndpoints(ctx context.Context, app, service string, page, size int) ([]biz.RBACEndpoint, int, error) {
+	app = strings.TrimSpace(app)
+	service = strings.TrimSpace(service)
 	aid, err := r.applicationID(ctx, app)
 	if err != nil {
 		return nil, 0, err
 	}
-	activeKeys, err := r.activeServiceKeys(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
 	var total int
-	where := ` FROM api_endpoints e JOIN application_service_resources a ON a.service_resource_key=e.service_resource_key WHERE a.application_id=$1 AND e.service_resource_key=ANY($3::text[]) AND ($2='' OR e.service_resource_key=$2)`
-	if err = r.pool.QueryRow(ctx, `SELECT count(*)`+where, aid, service, activeKeys).Scan(&total); err != nil {
+	where := ` FROM api_endpoints e JOIN application_service_resources a ON a.service_resource_key=e.service_resource_key WHERE a.application_id=$1 AND ($2='' OR e.service_resource_key=$2)`
+	if err = r.pool.QueryRow(ctx, `SELECT count(*)`+where, aid, service).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := r.pool.Query(ctx, `SELECT e.id,e.service_resource_key,e.endpoint_key,e.method,e.path_template,e.module,e.summary,e.source,e.enabled,e.last_discovered_at,e.created_at,e.updated_at`+where+` ORDER BY e.service_resource_key,e.module,e.path_template,e.method LIMIT $4 OFFSET $5`, aid, service, activeKeys, size, (page-1)*size)
+	rows, err := r.pool.Query(ctx, `SELECT e.id,e.service_resource_key,e.endpoint_key,e.method,e.path_template,e.module,e.summary,e.source,e.enabled,e.last_discovered_at,e.created_at,e.updated_at`+where+` ORDER BY e.service_resource_key,e.module,e.path_template,e.method LIMIT $3 OFFSET $4`, aid, service, size, (page-1)*size)
 	if err != nil {
 		return nil, 0, err
 	}
