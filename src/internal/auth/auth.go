@@ -280,12 +280,12 @@ func (s *Service) PublicConfig() PublicConfig {
 	}
 }
 
-// Login creates a one-time state/nonce/PKCE transaction and persists it in
-// the encrypted session cookie before returning the provider URL.
+// Login 发起 OIDC 授权码登录，将本次登录所需的状态保存在加密 Cookie 中。
 func (s *Service) Login(w http.ResponseWriter, r *http.Request) (string, error) {
 	if s == nil || !s.enabled || s.oauthConfig == nil {
 		return "", ErrDisabled
 	}
+	// state 用于关联回调和登录请求；nonce 用于关联 ID Token 和登录请求。
 	state, err := randomToken(32)
 	if err != nil {
 		return "", err
@@ -294,6 +294,7 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	// PKCE verifier 留在本地会话中，授权请求只发送它的 S256 摘要。
 	verifier, err := randomToken(32)
 	if err != nil {
 		return "", err
@@ -314,8 +315,7 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) (string, error) 
 	), nil
 }
 
-// Callback exchanges the authorization code, verifies the ID token using the
-// discovery-backed verifier, and checks the nonce stored before redirect.
+// Callback 校验登录回调，用授权码换取 ID Token，再建立本地会话。
 func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if s == nil || !s.enabled || s.oauthConfig == nil || s.verifier == nil {
 		return ErrDisabled
@@ -327,6 +327,7 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if code == "" || state == "" {
 		return fmt.Errorf("%w: code and state are required", ErrInvalidRequest)
 	}
+	// 回调必须携带与发起登录时一致且未过期的 state。
 	data, err := s.sessions.load(r)
 	if err != nil || data.State == "" || data.Nonce == "" || data.PKCEVerifier == "" {
 		return ErrInvalidState
@@ -337,8 +338,7 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if data.FlowCreatedAt == 0 || s.now().Sub(time.Unix(data.FlowCreatedAt, 0)) > flowMaxAge {
 		return ErrInvalidState
 	}
-	// Consume the flow before making the upstream request, preventing a code
-	// callback from being replayed if the browser retries the same URL.
+	// 先清除浏览器会话中的登录事务，再向身份平台换取令牌。
 	verifier, nonce := data.PKCEVerifier, data.Nonce
 	data.State, data.Nonce, data.PKCEVerifier, data.FlowCreatedAt = "", "", "", 0
 	if err := s.sessions.save(w, data); err != nil {
@@ -353,6 +353,7 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if !ok || rawIDToken == "" {
 		return fmt.Errorf("%w: provider did not return an id_token", ErrInvalidRequest)
 	}
+	// 验证 ID Token 后再比对 nonce，确保它属于本次登录。
 	idToken, err := s.verifier.Verify(upstreamContext, rawIDToken)
 	if err != nil {
 		return fmt.Errorf("verify oidc id_token: %w", err)
@@ -369,6 +370,7 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	if err := idToken.Claims(&claims); err != nil {
 		return fmt.Errorf("decode oidc claims: %w", err)
 	}
+	// 本地会话保存用户身份和退出所需的 ID Token，不保存访问或刷新令牌。
 	data.User = &sessionUser{
 		Subject:       idToken.Subject,
 		Email:         claims.Email,
@@ -384,6 +386,7 @@ func (s *Service) Callback(w http.ResponseWriter, r *http.Request) error {
 	return s.sessions.save(w, data)
 }
 
+// Me 优先读取当前请求上下文中的身份，否则读取尚未过期的浏览器会话。
 func (s *Service) Me(r *http.Request) (User, bool) {
 	if r != nil {
 		if user, ok := UserFromContext(r.Context()); ok {
@@ -422,6 +425,7 @@ func (s *Service) AuthenticateBearer(ctx context.Context, rawToken string) (User
 	return s.verifyAccessToken(ctx, rawToken)
 }
 
+// Logout 清除当前浏览器的本地会话，并在上游支持时返回单点退出地址。
 func (s *Service) Logout(w http.ResponseWriter, r *http.Request) (string, error) {
 	if s == nil {
 		return "", ErrDisabled
@@ -452,14 +456,16 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) (string, error)
 	return logoutURL.String(), nil
 }
 
-// Middleware protects API handlers while leaving the identity endpoints free
-// to establish and clear a session.
+// Middleware 保护管理接口：优先验证 Bearer 令牌，否则验证浏览器会话。
+// 登录、回调等身份端点由路由单独开放，不经过此中间件。
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 认证关闭时直接放行，适用于显式关闭 OIDC 的环境。
 		if s == nil || !s.enabled {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// 请求携带 Bearer 时只走令牌认证；令牌无效不会回退到 Cookie。
 		if rawToken, bearer, err := parseBearerToken(r.Header.Get("Authorization")); bearer {
 			if err != nil {
 				writeBearerUnauthorized(w)
@@ -474,10 +480,12 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 				writeBearerUnauthorized(w)
 				return
 			}
+			// 把已验证的身份放入请求上下文，供后续处理器使用。
 			setAuthenticatedUser(r, user)
 			next.ServeHTTP(w, r)
 			return
 		}
+		// 没有 Bearer 时尝试浏览器 Cookie；会话失效则返回 401。
 		if user, ok := s.Me(r); ok {
 			setAuthenticatedUser(r, user)
 			next.ServeHTTP(w, r)

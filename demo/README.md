@@ -55,6 +55,8 @@ Redis 模式下，`SubjectApiPolicyMatcher` 根据请求方法和完整请求路
 
 `AuthorizationCenter:Provider` 默认 `Redis`，比较时忽略大小写及首尾空白，只接受 `Redis`、`Http`；其他值会让 Demo 在启动时直接报错。配置在启动时读取，修改后需重启 Demo。
 
+示例中的 `Redis:KeyPrefix` 是 Demo 作为消费者的显式配置；假定中心使用 `LUCKENV=prod`，因此值为 `nexusauthorization:prod`。Demo 不读取 `LUCKENV` 或 `SERVICEUK`：部署时必须把 `Redis:KeyPrefix` 设置为中心实际推导的 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，并让 `AuthorizationCenter:ServiceResource` 与 Demo 在中心登记的服务标识一致。中心不再接受 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 作为前缀配置。
+
 例如在配置好 `Http:BaseUrl` 和调用凭证后，通过环境变量切换并启动：
 
 ```sh
@@ -102,13 +104,14 @@ Swagger 的 Authorize 输入框可直接填入不带 `Bearer ` 前缀的 access 
 
 ## Redis 读取契约
 
-记配置中的 `KeyPrefix` 为 `prefix`。业务 key 中不包含应用段：
+Demo 配置中的 `KeyPrefix` 必须与中心由 `LUCKENV` 推导的前缀完全相同。业务 key 中不包含应用段：
 
 ```text
-prefix:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(sub))>
+nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(sub))>
 ```
 
 - 类型为 Redis STRING，值为一个用户和一个服务的完整策略 JSON。
+- 中心为各服务发布策略；Demo 的 `ServiceResource` 必须与其自身登记的服务标识一致。Demo 本身只读取配置好的 `KeyPrefix`，不会读取 `LUCKENV` 或 `SERVICEUK`。
 - JSON 字段为 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`，不含 `application_key` 或 `application_id`。
 - JSON 由中心合并所有启用应用对该服务的授权；app 不覆盖其他 app，也不参与业务 key。
 - `ServiceResource` 和 `sub` 都先 `trim`，再按 Go `url.QueryEscape` 编码。Go `QueryEscape` 使用 `+` 表示空格。
@@ -117,7 +120,7 @@ prefix:<QueryEscape(trim(ServiceResource))>:<QueryEscape(trim(sub))>
 - `SubjectApiPolicy` 不对外暴露 `Domain` 属性；内部仍映射该 JSON 字段，只用于默认域兼容校验。
 - 每个 String value 上限 16 MiB，key 不设 TTL。
 
-当前 Demo 配置下，`sub = 51b21204-54ab-4da6-ad83-d14f72ced46f`、服务 `nexusauthorization.demo.api`、默认域的业务 key 为：
+假定中心 `LUCKENV=prod` 且当前 Demo 配置下，`sub = 51b21204-54ab-4da6-ad83-d14f72ced46f`、服务 `nexusauthorization.demo.api`、默认域的业务 key 为：
 
 ```text
 nexusauthorization:prod:nexusauthorization.demo.api:51b21204-54ab-4da6-ad83-d14f72ced46f
@@ -222,12 +225,13 @@ Demo 不依赖数据库直连。Redis Provider 需要使用顶层 `Redis`；Http
 ## 推荐启动与切换顺序
 
 1. 在 NexusAuth 确认 Demo 客户端、回调地址、scope 和 audience 已登记，并让令牌认证方式与 Demo 配置一致。
-2. 选择 `AuthorizationCenter:Provider`。Redis 模式需将中心 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX` 与 Demo `Redis:KeyPrefix` / `Redis__KeyPrefix` 配成同一个值；Http 模式需设置 `Http:BaseUrl` 和匹配的 `Http:ServiceCredential`。
+2. 选择 `AuthorizationCenter:Provider`。Redis 模式先根据中心 `LUCKENV` 计算 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，将 Demo `Redis:KeyPrefix` / `Redis__KeyPrefix` 配成完全相同的值，并确认 `AuthorizationCenter:ServiceResource` 与 Demo 登记的服务标识一致；Http 模式需设置 `Http:BaseUrl` 和匹配的 `Http:ServiceCredential`。
 3. Redis 模式按 String 协议准备中心发布；Http 模式确认授权中心 `/api/v1/authorize` 可访问且服务凭证有效。Http 请求使用 `AuthorizationCenter:AppKey` 且不发送 domain，Redis 策略按服务和主体隔离。
 4. 从旧 Hash 协议升级的环境，先按 [Redis 接入说明](../doc/redis-integration.md) 完成迁移。
-5. 启动 Demo：`dotnet run --project demo/dotnet`，默认监听 `http://localhost:5055`。启动前设置 `Auth:ClientSecret`，并按所选 Provider 设置 Redis 或 Http 配置；未知 Provider 值会阻止启动。
-6. 打开 `http://localhost:5055/swagger`；使用 Cookie 时，在新标签页直接访问 `http://localhost:5055/api/auth/login`。不使用 Cookie 时，在 Swagger Authorize 或 `.http` 文件中填入原始 access token。
-7. 验收允许、拒绝和 Provider 故障时的拒绝行为。Redis 模式还应验证 String 缺失、类型/JSON 损坏和身份不匹配。
+5. Redis 前缀因 `LUCKENV` 调整或旧前缀配置迁移而变化时，先让中心按新前缀完成全量发布，再更新所有消费者并重启；Demo 的 `KeyPrefix` 未同步会读取缺失 key 并 fail closed。
+6. 启动 Demo：`dotnet run --project demo/dotnet`，默认监听 `http://localhost:5055`。启动前设置 `Auth:ClientSecret`，并按所选 Provider 设置 Redis 或 Http 配置；未知 Provider 值会阻止启动。
+7. 打开 `http://localhost:5055/swagger`；使用 Cookie 时，在新标签页直接访问 `http://localhost:5055/api/auth/login`。不使用 Cookie 时，在 Swagger Authorize 或 `.http` 文件中填入原始 access token。
+8. 验收允许、拒绝和 Provider 故障时的拒绝行为。Redis 模式还应验证 String 缺失、类型/JSON 损坏和身份不匹配。
 
 ## 集成测试
 

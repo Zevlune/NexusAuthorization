@@ -4,14 +4,20 @@
 
 ## Key 与值
 
-记配置的 `key_prefix` 为 `PREFIX`。开发和生产的默认值分别为 `nexusauthorization:dev` 与 `nexusauthorization:prod`；部署可以显式配置前缀，但同一环境的中心与消费者必须一致。
+中心的 Redis 前缀不是独立配置项，而是启动时由必填的 `LUCKENV` 推导：
 
 ```text
-PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalizedDomain)>]
+nexusauthorization:<QueryEscape(trim(LUCKENV))>
+```
+
+`LUCKENV` 先 `trim`，再按 Go `url.QueryEscape` 编码。中心为各个服务发布记录；管理接口使用自身 `SERVICEUK` 读取对应服务策略。中心不再接受 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`；SDK、Demo 等消费者仍使用各自的 `KeyPrefix` 配置显式指定读取前缀，该值必须与中心推导结果完全相同。
+
+```text
+nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(normalizedDomain)>]
 ```
 
 - 类型为 Redis **STRING**，值为一个用户、一个服务和归一化 domain 的完整策略 JSON。
-- `service` 和 `subject` 先 `trim`，再按 Go `url.QueryEscape` 编码。
+- `service` 和 `subject` 先 `trim`，再按 Go `url.QueryEscape` 编码；消费者使用自身服务资源标识。
 - domain 先 `trim`；空串和兼容值 `global` 归一为空域且不追加后缀。具名 domain 经 `QueryEscape` 后追加，各具名 domain 使用不同 key，不能互相取得权限。
 - JSON 字段为 `subject`、`domain`、`service_resource`、`service_active`、`catalog`、`apis` 和 `roles`。
 - JSON 不含 `application_key` 或 `application_id`。权限由所有关联该服务、已启用应用的授权合并得出；多个应用对同一用户、服务和 domain 的 API 与角色取并集，不会由某个应用覆盖其他应用。
@@ -27,7 +33,7 @@ PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(n
 - `subject`、归一化后的 `domain` 和 `service_resource` 必须与请求身份完全一致。
 - `service_active=false`、接口不存在、接口停用或未被 `apis` 授予时拒绝。
 - String 缺失、类型错误、JSON 损坏、身份不匹配、超过 16 MiB、超时或其他 Redis 错误都拒绝请求。
-- 不读取 `PREFIX:rbac:api:app:*`、`state`、members、锁、请求号或发布号，也没有 Lua、旧应用级 JSON fallback 或数据库回源。
+- 不读取 `rbac:api:app:*` 等旧辅助 key、`state`、members、锁、请求号或发布号，也没有 Lua、旧应用级 JSON fallback 或数据库回源。
 
 `appKey` 仍是运行时请求的必填业务上下文，但 Redis 策略中没有应用身份，也不按应用切分权限记录。
 
@@ -38,7 +44,7 @@ PREFIX:<QueryEscape(trim(service))>:<QueryEscape(trim(subject))>[:<QueryEscape(n
 1. 获取 PostgreSQL session advisory lock，串行化多个中心的发布。
 2. 保持该锁，取得同一个 `REPEATABLE READ` 数据库快照，计算并合并所有应发布的用户、服务和 domain 记录。
 3. Redis 层对完整输出再做一次预验证，包括业务 key 形状、JSON 和单值大小；全部通过后才开始修改 Redis。
-4. 按专用业务 key 前缀 `SCAN`，严格识别本协议的 key 形状，删除本轮快照中已不存在的旧用户记录。
+4. 按 `LUCKENV` 推导出的专用业务 key 前缀 `SCAN`，严格识别本协议的 key 形状，删除本轮快照中已不存在的旧用户记录。
 5. 对每条记录 `SET` 完整 JSON。`SET` 会覆盖同名旧值或旧 Hash，成为 String；不设 TTL。
 6. 发布结束后释放 advisory lock。
 
@@ -48,14 +54,17 @@ advisory lock 在取得数据库快照之前获得，并覆盖整个 Redis 发�
 
 ## 协议切换
 
-本次文档同步没有连接现网 Redis、没有清理旧 Hash/state key，也不部署服务。未来切换必须使用维护窗口，并保持中心与消费者配置一致：
+本次文档同步没有连接现网 Redis、没有清理旧 Hash/state key，也不部署服务。未来切换必须使用维护窗口，并按同一 `LUCKENV` 推导出的完整前缀保持中心与消费者一致：
 
-1. 停止旧 Hash reader/writer 的鉴权流量。
-2. 启动新版中心，让其全量重建以 String 写入业务 key。
-3. 启动新版 Demo 或其他新 reader，完成允许、拒绝、缺失、损坏和身份不匹配验收。
-4. 确认旧 reader 已全部停止后，再按旧 key 形状做定向清理。
+1. 为中心和消费者记录目标前缀 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，并确认消费者使用自身在中心登记的服务资源。
+2. 停止旧 Hash reader/writer 的鉴权流量。
+3. 启动新版中心，让其按目标前缀全量重建以 String 写入业务 key。
+4. 将 Demo 或其他新消费者的 `KeyPrefix` 更新为目标前缀并启动，完成允许、拒绝、缺失、损坏和身份不匹配验收。
+5. 确认旧 reader 已全部停止后，再按旧 key 形状做定向清理。
 
 旧 `rbac:api:app:*` 辅助 key 不需要被新 reader 或 writer 依赖。旧 Hash reader、旧 writer 与新 String 中心不能混跑；旧读端不会看到新版撤权。旧应用级 JSON 值不能作为新协议的兼容 fallback。
+
+已有实例调整 `LUCKENV`、或从旧的自选前缀迁移到推导前缀时，完整 key 已经改变。中心必须按新前缀重新发布全部业务记录，所有消费者也必须同步更新 `KeyPrefix`；只改一侧会读到缺失 key 并 fail closed，旧前缀下的记录不会自动迁移或兼容读取。
 
 ## 配置
 
@@ -63,12 +72,11 @@ advisory lock 在取得数据库快照之前获得，并覆盖整个 Redis 发�
 redis:
   enabled: true
   url: "redis://localhost:6379/0"
-  key_prefix: "nexusauthorization:dev"
   timeout: "200ms"
   reconcile_interval: "30s"
 ```
 
-对应环境变量为 `NEXUSAUTHORIZATION_REDIS_ENABLED`、`NEXUSAUTHORIZATION_REDIS_URL`、`NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`、`NEXUSAUTHORIZATION_REDIS_TIMEOUT` 和 `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL`。启用时必须配置非空 `redis.url`；修改配置后需重启 API。禁用时不创建 Redis 客户端，服务 API 使用数据库 current-policy。
+中心启动时必须通过环境变量提供非空 `LUCKENV` 和 `SERVICEUK`。其余对应环境变量为 `NEXUSAUTHORIZATION_REDIS_ENABLED`、`NEXUSAUTHORIZATION_REDIS_URL`、`NEXUSAUTHORIZATION_REDIS_TIMEOUT` 和 `NEXUSAUTHORIZATION_REDIS_RECONCILE_INTERVAL`。中心不提供 Redis 前缀环境变量；消费者根据相同 `LUCKENV` 计算并配置 `KeyPrefix`。启用时必须配置非空 `redis.url`；修改环境或消费者前缀后需重启相应进程。禁用时不创建 Redis 客户端，服务 API 使用数据库 current-policy。
 
 ## 本轮验证
 

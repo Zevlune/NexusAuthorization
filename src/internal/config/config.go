@@ -9,10 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luck/nexus-authorization/internal/runenv"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
+	Runtime         runenv.Environment    `yaml:"-"`
 	HTTP            HTTPConfig            `yaml:"http"`
 	Logging         LoggingConfig         `yaml:"logging"`
 	Database        DatabaseConfig        `yaml:"database"`
@@ -184,6 +186,11 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	cfg.Runtime, err = runenv.Load()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Redis.KeyPrefix = "nexusauthorization:" + url.QueryEscape(cfg.Runtime.Name)
 	if value := os.Getenv("NEXUSAUTHORIZATION_DATABASE_URL"); value != "" {
 		cfg.Database.URL = value
 	}
@@ -236,6 +243,11 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.OIDC.Validate(); err != nil {
 		return nil, err
+	}
+	if cfg.OIDC.Enabled {
+		if !cfg.Redis.Enabled {
+			return nil, fmt.Errorf("redis.enabled must be true for management authorization")
+		}
 	}
 	return &cfg, nil
 }

@@ -95,7 +95,7 @@ flowchart LR
     H --> I[业务服务运行时鉴权]
 ```
 
-管理 API 位于 `/api/v1` 下，除 `/api/v1/authorize` 外默认受 OIDC 会话或 Bearer 管理令牌保护。RBAC v1 管理接口都要求 `app_key`；接口端点的创建、更新、导入和删除还需要 `service_resource`，且服务必须已经关联当前应用。
+管理 API 位于 `/api/v1` 下，除 `/api/v1/authorize` 外，在启用 OIDC 时先验证会话或 Bearer 管理令牌，再检查 Redis 中用户对管理服务接口的授权。RBAC v1 管理接口都要求 `app_key`；接口端点的创建、更新、导入和删除还需要 `service_resource`，且服务必须已经关联当前应用。
 
 保存角色时，仓储层在同一个事务中校验角色、API、菜单和应用边界，并更新授权集合。主体角色替换接口按 `subject + domain` 原子替换完整角色集合，调用方需要提交希望保留的全部角色。
 

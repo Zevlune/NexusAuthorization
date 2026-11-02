@@ -8,6 +8,43 @@ import (
 	"time"
 )
 
+func TestServiceUKIsRequiredAndEnvironmentOnly(t *testing.T) {
+	clearRedisEnv(t)
+	path := filepath.Join(t.TempDir(), "app.yaml")
+	contents := []byte(`
+http: {addr: ":8080"}
+database: {url: "postgres://localhost/test"}
+service_resource: {source: local}
+redis: {enabled: false}
+authorization: {management_service_resource: "yaml-value"}
+`)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"", " \t "} {
+		t.Setenv("SERVICEUK", value)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "SERVICEUK") {
+			t.Fatalf("SERVICEUK=%q: expected missing service error, got %v", value, err)
+		}
+	}
+	t.Setenv("SERVICEUK", "  service.example  ")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.ServiceUK != "service.example" {
+		t.Fatalf("service = %q", cfg.Runtime.ServiceUK)
+	}
+	t.Setenv("LUCKENV", "  UAT:west  ")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Name != "UAT:west" || cfg.Redis.Prefix() != "nexusauthorization:UAT%3Awest" {
+		t.Fatalf("runtime = %+v, redis prefix = %q", cfg.Runtime, cfg.Redis.Prefix())
+	}
+}
+
 func TestLoadOIDCBackchannelAuthorityFromEnvironment(t *testing.T) {
 	clearConfigEnv(t)
 	configPath := filepath.Join(t.TempDir(), "app.yaml")
@@ -46,6 +83,21 @@ oidc:
 	}
 	if cfg.OIDC.BackchannelAuthority != "http://env-nexus-auth:5100" {
 		t.Fatalf("backchannel authority = %q", cfg.OIDC.BackchannelAuthority)
+	}
+	if cfg.Runtime.ServiceUK != "test.service" {
+		t.Fatalf("management service = %q", cfg.Runtime.ServiceUK)
+	}
+	t.Setenv("SERVICEUK", "  custom.management \t")
+	cfg, err = Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.ServiceUK != "custom.management" {
+		t.Fatalf("management service override = %q", cfg.Runtime.ServiceUK)
+	}
+	t.Setenv("NEXUSAUTHORIZATION_REDIS_ENABLED", "false")
+	if _, err = Load(configPath); err == nil || !strings.Contains(err.Error(), "management authorization") {
+		t.Fatalf("OIDC without Redis must fail: %v", err)
 	}
 }
 
@@ -356,4 +408,6 @@ func clearConfigEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("SERVICEUK", "test.service")
+	t.Setenv("LUCKENV", "test")
 }

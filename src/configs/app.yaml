@@ -14,7 +14,6 @@ database:
 redis:
   enabled: true
   url: ""
-  key_prefix: "nexusauthorization:dev"
   cache_ttl: "24h"
   timeout: "200ms"
   # Background repair of Redis records (not ready, behind a save, catalog changes).
