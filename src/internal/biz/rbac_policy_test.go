@@ -9,8 +9,8 @@ import (
 
 func TestCompiledPolicyMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
-	templates := []string{"/", "/items", "/items/{id}", "/items/export", "/{kind}/export", "/{kind}/{id}", "/items/{id}/detail", "/{kind}/fixed/detail", "/items/fixed/{part}", "/items//detail", "/items/{}", "//items/export/", "/items/{id}/"}
-	paths := []string{"/", "/items", "/items/1", "/items/export", "/other/export", "/items/1/detail", "/items/fixed/detail", "/items/fixed/missing", "/items//detail", "/items/{}", "/items/1/", "//items/export//", "/unregistered"}
+	templates := []string{"/", "/items", "/items/{id}", "/items/export", "/{kind}/export", "/{kind}/{id}", "/items/{id}/detail", "/{kind}/fixed/detail", "/items/fixed/{part}", "/items//detail", "/items/{}", "//items/export/", "/items/{id}/", "/Items/export", "/ITEMS/{id}"}
+	paths := []string{"/Items/export", "/ITEMS/1", "/items/EXPORT", "/ITEMS/EXPORT", "/", "/items", "/items/1", "/items/export", "/other/export", "/items/1/detail", "/items/fixed/detail", "/items/fixed/missing", "/items//detail", "/items/{}", "/items/1/", "//items/export//", "/unregistered"}
 	methods := []string{"GET", "POST", "get", "k", "K", "s", "ſ"}
 	for trial := 0; trial < 150; trial++ {
 		endpoints := []any{}

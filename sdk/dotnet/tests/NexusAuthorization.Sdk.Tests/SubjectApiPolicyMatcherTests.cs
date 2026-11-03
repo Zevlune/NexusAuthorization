@@ -221,6 +221,53 @@ public sealed class SubjectApiPolicyMatcherTests
         AssertDenied("denied", decision);
     }
 
+    [Theory]
+    [InlineData("/api/products/EXPORT")]
+    [InlineData("/API/PRODUCTS/EXPORT")]
+    public void Case_variant_cannot_reach_ungranted_literal_through_parameter_route(string path)
+    {
+        // ASP.NET Core 会把 /EXPORT 路由到 export，不能按区分大小写的匹配命中已授权的 {id}。
+        var parameterized = Endpoint(Guid.NewGuid(), "GET", "/api/products/{id}");
+        var export = Endpoint(Guid.NewGuid(), "GET", "/api/products/export");
+        var policy = CreatePolicy(catalog: [parameterized, export], grants: [parameterized]);
+
+        AssertDenied("ambiguous_endpoint", SubjectApiPolicyMatcher.Evaluate(policy, "GET", path));
+        AssertAllowed(SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/api/products/1"));
+        AssertDenied("endpoint_not_granted", SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/api/products/export"));
+    }
+
+    [Fact]
+    public void Wrong_case_request_is_denied_even_without_competing_route()
+    {
+        var orders = Endpoint(Guid.NewGuid(), "GET", "/api/orders");
+        var policy = CreatePolicy(catalog: [orders], grants: [orders]);
+
+        AssertDenied("ambiguous_endpoint", SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/API/ORDERS"));
+        AssertAllowed(SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/api/orders"));
+    }
+
+    [Theory]
+    [InlineData("/items/{id}/")]
+    [InlineData("//items/{id}")]
+    public void Trailing_or_leading_slash_does_not_raise_template_priority(string parameterTemplate)
+    {
+        var parameterized = Endpoint(Guid.NewGuid(), "GET", parameterTemplate);
+        var export = Endpoint(Guid.NewGuid(), "GET", "/items/export");
+        var policy = CreatePolicy(catalog: [parameterized, export], grants: [export]);
+
+        AssertAllowed(SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/items/export"));
+    }
+
+    [Fact]
+    public void Empty_braces_segment_is_a_literal()
+    {
+        var literal = Endpoint(Guid.NewGuid(), "GET", "/items/{}");
+        var parameterized = Endpoint(Guid.NewGuid(), "GET", "/items/{id}");
+        var policy = CreatePolicy(catalog: [literal, parameterized], grants: [literal]);
+
+        AssertAllowed(SubjectApiPolicyMatcher.Evaluate(policy, "GET", "/items/{}"));
+    }
+
     private static SubjectApiPolicy CreatePolicy(
         string? subject = "user-1",
         string? service = "orders.api",

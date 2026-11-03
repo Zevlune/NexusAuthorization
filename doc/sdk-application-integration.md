@@ -60,7 +60,7 @@ middleware := client.Require(
 http.Handle("/api/books", middleware)
 ```
 
-`Require(appKey, serviceResource, resolve, next)` 的 `appKey` 和 `serviceResource` 是固定的服务端配置值。`resolve` 必须从接入服务可信的认证上下文返回身份，不能直接读取用户提交的 `subject` 参数。
+`Require(appKey, serviceResource, resolve, next)` 的 `appKey` 和 `serviceResource` 是固定的服务端配置值。`resolve` 必须从接入服务可信的认证上下文返回身份，不能直接读取用户提交的 `subject` 参数。鉴权路径按 `ServeMux` 的切段方式取自转义后的请求路径：`%2F` 保持在同一段内（如 `/orders/1%2Fitems` 按 `/orders/{id}` 鉴权），其余字符正常解码。
 
 `rbac.Identity.Domain` 可选。省略、空串和旧值 `global` 都表示默认空域；只有具名域隔离才填写显式值。
 

@@ -375,7 +375,7 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 | `endpoint_not_found` | 没有匹配的 Endpoint |
 | `endpoint_disabled` | 匹配到但已停用 |
 | `endpoint_not_granted` | Endpoint 存在但未被授予 |
-| `ambiguous_endpoint` | 多个同优先级路径模板匹配，拒绝 |
+| `ambiguous_endpoint` | 多个同优先级路径模板匹配，或区分大小写与不区分大小写的匹配结果不同，拒绝 |
 | `service_inactive` | 服务在目录中已停用或不存在 |
 
 未命中授权时决策为 `allowed=false`、`effect=deny`，`reason` 取上表中除 `allowed` 外的值。
