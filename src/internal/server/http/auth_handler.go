@@ -73,7 +73,7 @@ func (h *Handler) AuthMe(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	user, ok := h.auth.Me(r)
+	user, ok := h.auth.SessionUser(w, r)
 	if !ok {
 		writeAuthError(w, r, auth.ErrUnauthenticated)
 		return

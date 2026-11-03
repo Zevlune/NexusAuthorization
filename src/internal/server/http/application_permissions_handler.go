@@ -1,10 +1,11 @@
 package httpserver
 
 import (
-	"github.com/google/uuid"
-	"github.com/luck/nexus-authorization/internal/biz"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
+	"github.com/luck/nexus-authorization/internal/biz"
 )
 
 func (h *Handler) ListApplicationMenus(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +69,19 @@ func (h *Handler) DeleteApplicationMenu(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, nil)
 }
 func (h *Handler) SubjectApplicationMenus(w http.ResponseWriter, r *http.Request) {
+	h.writeSubjectApplicationMenus(w, r)
+}
+
+// SubjectApplicationMenusForService serves trusted business backends. The
+// configured service credential is the only accepted authentication method.
+func (h *Handler) SubjectApplicationMenusForService(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAuthorizationServiceCredential(w, r) {
+		return
+	}
+	h.writeSubjectApplicationMenus(w, r)
+}
+
+func (h *Handler) writeSubjectApplicationMenus(w http.ResponseWriter, r *http.Request) {
 	if h.rbacV1 == nil {
 		writeError(w, r, biz.ErrNotFound)
 		return

@@ -53,7 +53,9 @@ NEXUSAUTHORIZATION_REDIS_URL='redis://redis.example.com:6379/0'
 NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL='CHANGE_ME'
 ```
 
-完整变量（含镜像 tag、宿主端口、数据目录、外部网络名）见仓库根目录 `.env.example`。`docker-compose.yml` 不含任何环境专属值，全部从该文件读取；缺少 `LUCKENV`、`SERVICEUK` 或 `NEXUSAUTHORIZATION_DATABASE_URL` 时 `docker compose config` 会直接报错。
+完整变量（含镜像 tag、宿主端口、数据目录、外部网络名）见仓库根目录 `.env.example`。`docker-compose.yml` 不含个人部署值；缺少镜像变量 `NEXUSAUTHORIZATION_API_IMAGE`、`NEXUSAUTHORIZATION_DASHBOARD_IMAGE` 或 `LUCKENV`、`SERVICEUK`、`NEXUSAUTHORIZATION_DATABASE_URL` 时 `docker compose config` 会直接报错。
+
+若旧配置曾将真实口令提交到公开仓库，删除当前文件不能撤回历史泄露。维护者仍需轮换数据库口令、终止使用旧凭证的连接、核查数据库访问日志，并换用最小权限应用账号。环境文件放在受保护路径（例如权限 `0600`），不能提交 Git。历史改写需另行协调，本次代码修复没有改写历史或完成实际凭证轮换。
 
 以数据库 owner 身份执行完整初始化：
 
@@ -71,6 +73,16 @@ sh src/scripts/init-db.sh
 
 
 ## 3. Docker Compose 首次部署
+
+先在环境文件中显式指定两个已测试镜像的 tag 或 digest。`.env.example` 提供的是本机构建 tag，可在仓库根目录构建：
+
+```sh
+docker build -t nexusauthorization-api:local .
+(cd dashboard && yarn install --frozen-lockfile && yarn build)
+docker build -t nexusauthorization-dashboard:local dashboard
+```
+
+使用本机 tag 时跳过下方的 `pull`；从仓库部署时替换两个镜像变量并先推送相应镜像，再执行 `pull`。开发栈 `docker-compose-dev.yml` 默认从源码构建 `:dev` 镜像，Dashboard 也需先执行上面的前端构建，然后运行 `docker compose --env-file .env.dev -f docker-compose-dev.yml up -d --build`。
 
 Compose 默认使用外部 `nexusauth` 网络（`NEXUSAUTHORIZATION_DOCKER_NETWORK` 可改名），API 容器端口 `8080`、Dashboard 容器端口 `80`，默认映射到宿主机 `9101` 和 `5274`（`NEXUSAUTHORIZATION_API_PORT`、`DASHBOARD_PORT`）。会话密钥默认保存在命名卷 `nexusauthorization-data`，设置 `NEXUSAUTHORIZATION_DATA_DIR` 可改为宿主机目录。先确认网络存在：
 
@@ -99,6 +111,7 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 | 变量 | 必填场景 | 说明 |
 | --- | --- | --- |
 | `LUCKENV` | 始终 | Luck.Framework 运行环境标识，没有默认值；固定 Redis 前缀为 `nexusauthorization:<LUCKENV>` |
+| `NEXUSAUTHORIZATION_API_IMAGE` / `NEXUSAUTHORIZATION_DASHBOARD_IMAGE` | 生产 Compose | 必须显式设置已测试的镜像 tag 或 digest；本地示例 tag 需先构建 |
 | `NEXUSAUTHORIZATION_DATABASE_URL` | 始终 | PostgreSQL 连接串，密码中的特殊字符必须 URL 编码 |
 | `SERVICEUK` | 始终 | Luck.Framework 服务唯一标识，没有默认值；管理接口鉴权使用它定位服务策略，应与权限中心中登记的服务资源标识一致 |
 | `NEXUSAUTHORIZATION_OIDC_ENABLED` | 需要登录时 | 开启管理端 OIDC |
@@ -107,7 +120,7 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_NEXUSAUTH_BASE_URL` | nexusauth 模式 | 远程服务目录地址 |
 | `NEXUSAUTHORIZATION_SERVICE_RESOURCE_API_KEY` | nexusauth 模式 | 服务目录读取凭证 |
 | `NEXUSAUTHORIZATION_SCIM_*` | 需要分配用户 | NexusAuth SCIM 地址、只读凭证和超时 |
-| `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` | 业务服务调用鉴权接口时 | `/api/v1/authorize` 的 Bearer 凭证；留空时接口始终 401。使用足够长的随机值，只下发给可信业务服务 |
+| `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` | 业务鉴权和菜单查询 | `/api/v1/authorize` 与 `/api/v1/subject-menus` 的 Bearer 凭证；留空时接口始终 401。使用足够长的随机值，只下发给可信业务后端 |
 | `NEXUSAUTHORIZATION_REDIS_ENABLED` | 服务 API 鉴权模式 | 默认 `true`；显式 `false` 改用数据库 current-policy API 鉴权 |
 | `NEXUSAUTHORIZATION_REDIS_URL` | Redis 启用时 | 必须非空；Redis 不可用或 String 缺失、类型/JSON 损坏时拒绝，不回退数据库 |
 | `NEXUSAUTHORIZATION_REDIS_CACHE_TTL` | 已废弃 | 仅为兼容旧配置保留，不再使用；服务 API 授权记录不设 TTL |
@@ -117,6 +130,10 @@ API 容器以 root 启动入口脚本，脚本把 `/app/data` 的属主改为 `n
 | `NEXUSAUTHORIZATION_SWAGGER_IMPORT_ALLOWED_HOSTS` | 可选 | 逗号分隔的主机名或 CIDR；设置后 Swagger 导入只能访问这些地址。链路本地与云元数据地址始终禁止 |
 
 配置加载顺序是镜像中的 YAML 默认值，再由环境变量覆盖。`redis.enabled` 在 YAML 省略时仍为 `true`。不要把 secret 写入 Dashboard 构建参数或前端静态文件。
+
+管理端续期需要身份平台允许 `offline_access` 并签发 refresh token。refresh token 与资料一同保存在 AES-GCM 加密的 HttpOnly 会话 Cookie，接近令牌到期时自动续期，但首次登录后绝对有效期最多 8 小时，不滑动延长；未签发 refresh token 时仍在原令牌到期后重新登录。Cookie 超过大小限制、刷新失败或刷新后身份不一致均拒绝并清理会话。多实例需共享会话密钥，并由身份平台提供刷新轮换宽限期或配置会话粘滞路由；并发刷新合并和旧 Cookie 的 15 秒宽限仅在单进程内生效。
+
+Bearer 请求每次仍验证签名、issuer、audience 与有效期，内省成功结果最多缓存 15 秒（上游 exp 更早时提前失效）；撤销可能在该窗口内延迟生效，失败及 inactive 结果不缓存。NexusAuth 服务目录成功快照缓存 5 秒，停用状态最多延迟该窗口；缓存过期后上游不可用则失败，不提供过期目录。
 
 中心 Redis 前缀固定为 `nexusauthorization:<QueryEscape(trim(LUCKENV))>`，管理接口使用 `SERVICEUK` 作为服务段；其他服务的策略使用各自的服务标识。中心不再读取 `NEXUSAUTHORIZATION_REDIS_KEY_PREFIX`，现有 SDK 消费者需将其前缀配置为与中心推导出的值一致。
 

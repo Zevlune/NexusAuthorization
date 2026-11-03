@@ -30,6 +30,8 @@ NexusAuth 用户列表接入：[SCIM 只读用户查询](doc/nexusauth-scim-user
 
 API 鉴权使用静态路径哈希、参数路径 Trie 和角色位图。服务 API 入口按「用户 × 服务」聚合授权并复用进程内编译索引；全策略适配器使用 current-policy 编译索引。主体菜单查询独立读取数据库中的菜单授权，不访问远程服务目录。数据结构、复杂度及实测结果见 [鉴权匹配与性能](doc/authorization-matching.md)。
 
+数据库模式的服务 API 鉴权每次仅读取当前主体、域和目标服务相关的数据及该服务的完整端点目录，不再聚合整个应用的用户绑定和菜单。远程服务目录成功快照在进程内缓存 5 秒；失败不使用过期快照。管理端浏览器会话可通过 refresh token 续期，绝对上限 8 小时；Bearer 内省成功结果最多缓存 15 秒。业务后端可用服务凭证查询 `/api/v1/subject-menus`，Go SDK 提供 `SubjectMenus` 方法。
+
 ## 首次上线
 
 首次上线使用空库。PostgreSQL 管理员连接维护库 `postgres` 执行一次建库脚本；使用独立应用用户时，再由管理员把数据库所有者改为该用户。`000_create_database.sql` 不能放进事务。
@@ -43,6 +45,8 @@ psql 'postgres://postgres:ADMIN_PASSWORD@db.example.com:5432/postgres?sslmode=re
 ```
 
 将 `.env.example` 复制为 `.env`，将其中的 `NEXUSAUTHORIZATION_DATABASE_URL` 指向已存在的空库，并由库拥有者执行完整初始化：
+
+同时把两个镜像变量改为已测试的仓库 tag/digest；示例中的 `:local` tag 需先自行构建，步骤见 [运维操作手册](doc/operations-manual.md)。生产 Compose 不再默认拉取个人镜像。
 
 ```sh
 cp .env.example .env

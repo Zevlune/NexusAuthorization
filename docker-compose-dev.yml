@@ -29,8 +29,10 @@ services:
     restart: unless-stopped
 
   nexus-authorization:
-    image: 18790997531/nexusauthorization-api:1.0.2
-    platform: linux/amd64
+    image: ${NEXUSAUTHORIZATION_API_IMAGE:-nexusauthorization-api:dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
     environment:
       LUCKENV: ${LUCKENV:?set LUCKENV to the runtime environment}
       SERVICEUK: ${SERVICEUK:?set SERVICEUK to the service resource key}
@@ -78,8 +80,9 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: 18790997531/nexusauthorization-dashboard:1.0.2
-    platform: linux/amd64
+    image: ${NEXUSAUTHORIZATION_DASHBOARD_IMAGE:-nexusauthorization-dashboard:dev}
+    build:
+      context: ./dashboard
     ports:
       - '${DASHBOARD_BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-5274}:80'
     depends_on:

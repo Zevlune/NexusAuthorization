@@ -41,9 +41,9 @@ Bearer 令牌非法时额外返回 `WWW-Authenticate: Bearer error="invalid_toke
 
 ### 2.2 服务到服务鉴权
 
-默认生产和开发 Compose 已移除独立服务凭证配置，因此当前 `POST /api/v1/authorize` 返回 `401`。统一 Open API Token 管理与校验尚未接入；下面说明的是仍保留的旧服务凭证兼容机制。
+生产和开发 Compose 通过 `NEXUSAUTHORIZATION_AUTHORIZATION_SERVICE_CREDENTIAL` 配置服务凭证；留空时业务鉴权和业务菜单接口均返回 `401`。统一 Open API Token 管理与校验尚未接入。
 
-`POST /api/v1/authorize` 不使用管理端会话，要求请求头携带配置的服务凭证：
+`POST /api/v1/authorize` 和 `GET /api/v1/subject-menus` 使用独立服务认证，要求请求头携带配置的服务凭证：
 
 ```http
 POST /api/v1/authorize
@@ -51,7 +51,7 @@ Authorization: Bearer <configured service credential>
 Content-Type: application/json
 ```
 
-服务端用常量时间比较该凭证与配置项 `authorization.service_credential`；缺失、格式错误或凭证不符返回 `401`，正文为纯文本 `authentication required`，不进入业务处理。业务服务不能把浏览器会话当作服务凭证，也不能从用户输入读取角色。
+服务端用常量时间比较该凭证与配置项 `authorization.service_credential`；缺失、格式错误或凭证不符返回 `401`，正文为纯文本 `authentication required`，不进入业务处理。凭证只发给可信业务后端，不能放入浏览器。该凭证不按应用或用户隔离，业务后端必须从固定配置取得 `app_key`、从已认证上下文取得 `subject/domain`，不能直接透传用户输入的身份或角色。
 
 ## 3. 响应格式与错误
 
@@ -167,7 +167,7 @@ Content-Type: application/json
 | PUT | `/api/v1/service-resources/{key}` | 更新本地服务资源的展示信息与启停 |
 | DELETE | `/api/v1/service-resources/{key}` | 删除本地服务资源 |
 
-`source` 为 `local` 时读写本地目录；为 `nexusauth` 时 `List`/`Get` 直接读取远端目录，不写入本地 `service_resources`，也不回退到本地元数据。NexusAuth 资源拒绝写操作。
+`source` 为 `local` 时读写本地目录；为 `nexusauth` 时 `List`/`Get` 共享成功目录快照，固定缓存 5 秒，同一轮并发读取合并为一次远端调用。成功空目录也缓存；失败不缓存，过期后上游失败不返回旧快照，不写入或回退到本地 `service_resources`。远端停用最多受该 5 秒窗口影响。NexusAuth 资源拒绝写操作。保存应用服务关联时在开启事务和取得应用行锁之前校验目录。
 
 注意：删除接口在仓储层方法名为 `SoftDelete`，实际执行的是物理 `DELETE`。数据库触发器禁止删除仍被应用关联或 API 端点引用的服务资源，也禁止停用仍被应用关联的本地资源；错误映射为 `409`。
 
@@ -308,6 +308,8 @@ API 授权与菜单/按钮授权是两组独立绑定，按钮不携带 API 关�
 - Redis 启用时，鉴权（含权限模拟）直接读取 String，不读取数据库或其他 RBAC key；缺失、类型/JSON 损坏、身份不匹配或 Redis 错误都拒绝。禁用时使用数据库 current-policy。
 - 提交前已开始读取的在途请求可以完成其已读到的判断；发布与后续对账都在启动和每次定时周期中全量执行，不使用 `requested` / `published` 增量状态。
 
+数据库模式下，服务 API 鉴权每次在单条 SQL 的同一快照中读取当前应用、主体、域的绑定、相应角色、目标服务授权及该服务的完整端点目录；不读取其他用户、服务或菜单。保留未授权和停用的端点，以维持静态路由优先于参数路由的拒绝语义。数据库变更在提交后的新快照中生效，不依赖策略 TTL 或持久化版本。成功的远程目录读取受上面的 5 秒缓存窗口影响。
+
 主体菜单查询在一个数据库快照中读取应用、菜单、角色菜单授权和主体绑定，不读取服务目录或 API 端点，不受 Redis 开关控制。全策略适配器仍读取 current-policy、计算内容摘要并在进程内编译。开关在重启后生效；从禁用切回启用时，先设置 `NEXUSAUTHORIZATION_REDIS_ENABLED=true` 并重启 API，等待启动全量重建后再放行服务 API 流量。事务、对账和数据库升级见 [权限生效设计](permission-lifecycle.md) 与 [Redis 接入说明](redis-integration.md)。
 
 ## 8. 运行时鉴权
@@ -384,13 +386,22 @@ Redis 模式下业务 String 缺失、类型或 JSON 损坏、身份不匹配或
 
 ## 9. 主体菜单
 
+业务后端使用服务凭证调用：
+
+```http
+GET /api/v1/subject-menus?app_key=business.portal&subject=user-001&domain=
+Authorization: Bearer <configured service credential>
+```
+
+原管理端入口继续要求管理身份认证及管理服务 API 授权：
+
 ```http
 GET /api/v1/rbac-v1/subject-menus?app_key=business.portal&subject=user-001
 ```
 
 返回 `{items: ApplicationMenu[]}`，数据直接来自当前应用的菜单、角色菜单授权和主体绑定，不依赖 NexusAuth 服务目录或 Redis：命中 `subject + domain` 的启用角色所授予的菜单/按钮，并补齐显示所需的启用祖先节点。父节点停用、缺失或存在循环时对应分支不返回。`app_key`、`subject` 缺失返回 `400`；应用不存在或停用返回 `404`；`domain` 可省略，省略或空白按默认空域处理，旧值 `global` 同样归一。
 
-该接口当前属于管理接口。启用 OIDC 时，调用方必须通过管理身份认证与管理服务 API 授权；`/api/v1/authorize` 的服务凭证不能调用它。业务方菜单查询的独立认证方式和主体限制仍待确定，Go SDK 暂无业务菜单查询方法。具备管理权限的调用方可基于返回的按钮权限控制操作入口，后端 API 仍须独立鉴权。
+两个入口都使用统一成功包裹，`result.items` 是扁平菜单列表。Go SDK 的 `client.SubjectMenus(ctx, appKey, subject, domain)` 调用业务入口并按 `parent_id` 组装嵌套 `Children`，用法见 [SDK 接入](sdk-application-integration.md)。服务凭证允许可信后端查询指定主体，调用方需先认证最终用户并固定应用范围；菜单和按钮只控制界面，后端 API 仍须独立鉴权。
 
 ## 10. SCIM 用户
 

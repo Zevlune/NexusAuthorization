@@ -8,13 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
 	// NexusAuth 当前将 API 资源名称限制为 128 个字符；本地和远程目录共用该校验上限。
 	maxServiceResourceLength      = 128
 	serviceResourceDefaultTimeout = 5 * time.Second
+	serviceResourceCacheTTL       = 5 * time.Second
+	serviceResourceCacheKey       = "service-resources"
 
 	// ServiceResourceSourceLocal 表示由权限中心维护的服务资源。
 	ServiceResourceSourceLocal = "local"
@@ -325,6 +330,14 @@ type NexusAuthServiceResourceCatalog struct {
 	baseURL    string
 	credential string
 	client     *http.Client
+	timeout    time.Duration
+	cacheTTL   time.Duration
+	now        func() time.Time
+
+	cacheMu        sync.RWMutex
+	cache          []*ServiceResource
+	cacheExpiresAt time.Time
+	loads          singleflight.Group
 }
 
 // NewNexusAuthServiceResourceCatalog 创建读取 NexusAuth 服务资源目录的客户端。
@@ -335,6 +348,10 @@ func NewNexusAuthServiceResourceCatalog(baseURL, credential string, timeout time
 // NewNexusAuthServiceResourceCatalogWithClient 创建可注入 HTTP 客户端的 NexusAuth 服务资源目录客户端。
 // baseURL 必须是绝对的 HTTP 或 HTTPS 地址，credential 不能为空；非正 timeout 使用默认值。
 func NewNexusAuthServiceResourceCatalogWithClient(baseURL, credential string, timeout time.Duration, client *http.Client) (*NexusAuthServiceResourceCatalog, error) {
+	return newNexusAuthServiceResourceCatalogWithClient(baseURL, credential, timeout, client, serviceResourceCacheTTL, time.Now)
+}
+
+func newNexusAuthServiceResourceCatalogWithClient(baseURL, credential string, timeout time.Duration, client *http.Client, cacheTTL time.Duration, now func() time.Time) (*NexusAuthServiceResourceCatalog, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -350,7 +367,20 @@ func NewNexusAuthServiceResourceCatalogWithClient(baseURL, credential string, ti
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
-	return &NexusAuthServiceResourceCatalog{baseURL: baseURL, credential: credential, client: client}, nil
+	if cacheTTL <= 0 {
+		cacheTTL = serviceResourceCacheTTL
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &NexusAuthServiceResourceCatalog{
+		baseURL:    baseURL,
+		credential: credential,
+		client:     client,
+		timeout:    timeout,
+		cacheTTL:   cacheTTL,
+		now:        now,
+	}, nil
 }
 
 // List 从 NexusAuth 服务资源目录读取全部服务资源。
@@ -358,6 +388,61 @@ func (c *NexusAuthServiceResourceCatalog) List(ctx context.Context) ([]*ServiceR
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("service resource client is not configured")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.listCached(ctx)
+}
+
+func (c *NexusAuthServiceResourceCatalog) listCached(ctx context.Context) ([]*ServiceResource, error) {
+	if resources, ok := c.cachedServiceResources(); ok {
+		return resources, nil
+	}
+	result := c.loads.DoChan(serviceResourceCacheKey, func() (any, error) {
+		if resources, ok := c.cachedServiceResources(); ok {
+			return resources, nil
+		}
+		// A canceled waiter must not cancel the shared request. The detached
+		// request keeps a strict timeout, while every caller observes its own
+		// context through the select below.
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.timeout)
+		defer cancel()
+		resources, err := c.fetchDirectory(loadCtx)
+		if err != nil {
+			return nil, err
+		}
+		snapshot := cloneServiceResourceSnapshot(resources)
+		c.cacheMu.Lock()
+		c.cache = snapshot
+		c.cacheExpiresAt = c.now().Add(c.cacheTTL)
+		c.cacheMu.Unlock()
+		return snapshot, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case loaded := <-result:
+		if loaded.Err != nil {
+			return nil, loaded.Err
+		}
+		resources := loaded.Val.([]*ServiceResource)
+		return cloneServiceResourceSnapshot(resources), nil
+	}
+}
+
+func (c *NexusAuthServiceResourceCatalog) cachedServiceResources() ([]*ServiceResource, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.cacheMu.RLock()
+	defer c.cacheMu.RUnlock()
+	if c.cache == nil || !c.now().Before(c.cacheExpiresAt) {
+		return nil, false
+	}
+	return cloneServiceResourceSnapshot(c.cache), true
+}
+
+func (c *NexusAuthServiceResourceCatalog) fetchDirectory(ctx context.Context) ([]*ServiceResource, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/openapi/v1/service-resources", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create NexusAuth service-resource request: %w", err)
@@ -377,6 +462,20 @@ func (c *NexusAuthServiceResourceCatalog) List(ctx context.Context) ([]*ServiceR
 		return nil, fmt.Errorf("NexusAuth service-resource directory returned HTTP %d", resp.StatusCode)
 	}
 	return decodeNexusAuthServiceResources(body)
+}
+
+// ServiceResource currently contains only value fields, so a record copy is
+// enough to keep returned snapshots isolated from the cache.
+func cloneServiceResourceSnapshot(resources []*ServiceResource) []*ServiceResource {
+	snapshot := make([]*ServiceResource, len(resources))
+	for i, resource := range resources {
+		if resource == nil {
+			continue
+		}
+		value := *resource
+		snapshot[i] = &value
+	}
+	return snapshot
 }
 
 // Get 从 NexusAuth 服务资源目录按业务键查找服务资源。

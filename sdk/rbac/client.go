@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -33,6 +35,26 @@ type Decision struct {
 	MatchedRoles []string `json:"matched_roles"`
 }
 
+// SubjectMenu is one granted menu or button. Children contains the nested
+// descendants built by SubjectMenus in the service's sibling order.
+type SubjectMenu struct {
+	ID            string        `json:"id"`
+	ApplicationID string        `json:"application_id"`
+	ParentID      *string       `json:"parent_id"`
+	Code          string        `json:"code"`
+	Name          string        `json:"name"`
+	MenuType      string        `json:"menu_type"`
+	Route         string        `json:"route"`
+	Component     string        `json:"component"`
+	Icon          string        `json:"icon"`
+	SortOrder     int           `json:"sort_order"`
+	Enabled       bool          `json:"enabled"`
+	Children      []SubjectMenu `json:"children,omitempty"`
+}
+
+// Menu is an alias for SubjectMenu.
+type Menu = SubjectMenu
+
 // Client calls the authorization service. URL is the complete /api/v1/authorize
 // endpoint, Credential is the service bearer token, and HTTP may be nil to use
 // a three-second default client.
@@ -45,6 +67,13 @@ type Client struct {
 // Check; a nil or empty URL will fail when a request is attempted.
 func NewClient(baseURL, credential string) *Client {
 	return &Client{URL: strings.TrimRight(baseURL, "/") + "/api/v1/authorize", Credential: credential, HTTP: &http.Client{Timeout: 3 * time.Second}}
+}
+
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: 3 * time.Second}
 }
 
 // Check asks the authorization service whether a request is allowed. It fails
@@ -67,11 +96,7 @@ func (c *Client) Check(ctx context.Context, request Request) (Decision, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Credential)
 	req.Header.Set("Content-Type", "application/json")
-	client := c.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 3 * time.Second}
-	}
-	res, err := client.Do(req)
+	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -87,6 +112,149 @@ func (c *Client) Check(ctx context.Context, request Request) (Decision, error) {
 		return Decision{}, fmt.Errorf("invalid decision response")
 	}
 	return decision, nil
+}
+
+// SubjectMenus returns the granted menu tree for one verified subject. The
+// service credential is required; domain is optional and uses the default
+// domain when empty.
+func (c *Client) SubjectMenus(ctx context.Context, appKey, subject, domain string) ([]SubjectMenu, error) {
+	if c == nil || strings.TrimSpace(c.Credential) == "" || strings.TrimSpace(appKey) == "" || strings.TrimSpace(subject) == "" {
+		return nil, fmt.Errorf("invalid subject menus request or missing credential")
+	}
+	endpoint, err := c.subjectMenusEndpoint(appKey, subject, domain)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Credential)
+	req.Header.Set("Accept", "application/json")
+	res, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subject menus service returned %d", res.StatusCode)
+	}
+	var response struct {
+		Success *bool `json:"success"`
+		Result  *struct {
+			Items *[]SubjectMenu `json:"items"`
+		} `json:"result"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(res.Body, 1<<20))
+	if err = decoder.Decode(&response); err != nil {
+		return nil, fmt.Errorf("decode subject menus response: %w", err)
+	}
+	if err = ensureJSONEOF(decoder); err != nil {
+		return nil, fmt.Errorf("decode subject menus response: %w", err)
+	}
+	if response.Success == nil || !*response.Success || response.Result == nil || response.Result.Items == nil {
+		return nil, fmt.Errorf("invalid subject menus response")
+	}
+	return buildSubjectMenuTree(*response.Result.Items)
+}
+
+func (c *Client) subjectMenusEndpoint(appKey, subject, domain string) (string, error) {
+	endpoint, err := url.Parse(c.URL)
+	if err != nil {
+		return "", fmt.Errorf("parse authorization URL: %w", err)
+	}
+	if endpoint.Scheme == "" || endpoint.Host == "" {
+		return "", fmt.Errorf("authorization URL must be absolute")
+	}
+	const authorizationPath = "/api/v1/authorize"
+	cleanPath := strings.TrimRight(endpoint.Path, "/")
+	if !strings.HasSuffix(cleanPath, authorizationPath) {
+		return "", fmt.Errorf("authorization URL must end with %s", authorizationPath)
+	}
+	endpoint.Path = strings.TrimSuffix(cleanPath, authorizationPath) + "/api/v1/subject-menus"
+	endpoint.RawPath = ""
+	endpoint.Fragment = ""
+	query := url.Values{}
+	query.Set("app_key", appKey)
+	query.Set("subject", subject)
+	query.Set("domain", domain)
+	endpoint.RawQuery = query.Encode()
+	return endpoint.String(), nil
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func buildSubjectMenuTree(items []SubjectMenu) ([]SubjectMenu, error) {
+	if len(items) == 0 {
+		return []SubjectMenu{}, nil
+	}
+	indexByID := make(map[string]int, len(items))
+	for i := range items {
+		items[i].Children = nil
+		if items[i].ID == "" {
+			return nil, fmt.Errorf("invalid subject menus response: menu id is empty")
+		}
+		if _, exists := indexByID[items[i].ID]; exists {
+			return nil, fmt.Errorf("invalid subject menus response: duplicate menu id %q", items[i].ID)
+		}
+		indexByID[items[i].ID] = i
+	}
+	children := make([][]int, len(items))
+	roots := make([]int, 0, len(items))
+	for i := range items {
+		if items[i].ParentID == nil || *items[i].ParentID == "" {
+			roots = append(roots, i)
+			continue
+		}
+		parent, ok := indexByID[*items[i].ParentID]
+		if !ok {
+			return nil, fmt.Errorf("invalid subject menus response: parent %q is missing", *items[i].ParentID)
+		}
+		children[parent] = append(children[parent], i)
+	}
+	visited := make([]bool, len(items))
+	visiting := make([]bool, len(items))
+	var build func(int) (SubjectMenu, error)
+	build = func(index int) (SubjectMenu, error) {
+		if visiting[index] {
+			return SubjectMenu{}, fmt.Errorf("invalid subject menus response: menu hierarchy contains a cycle")
+		}
+		visiting[index] = true
+		menu := items[index]
+		for _, child := range children[index] {
+			value, err := build(child)
+			if err != nil {
+				return SubjectMenu{}, err
+			}
+			menu.Children = append(menu.Children, value)
+		}
+		visiting[index] = false
+		visited[index] = true
+		return menu, nil
+	}
+	tree := make([]SubjectMenu, 0, len(roots))
+	for _, root := range roots {
+		value, err := build(root)
+		if err != nil {
+			return nil, err
+		}
+		tree = append(tree, value)
+	}
+	for i := range visited {
+		if !visited[i] {
+			return nil, fmt.Errorf("invalid subject menus response: menu hierarchy contains a cycle")
+		}
+	}
+	return tree, nil
 }
 
 // Identity is the authenticated subject and optional tenant domain supplied by

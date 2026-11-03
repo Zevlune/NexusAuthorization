@@ -38,7 +38,10 @@ type sessionUser struct {
 	ExpiresAt     int64  `json:"expires_at"`
 	// IDToken is never returned by the API. It is retained in the encrypted
 	// HttpOnly session only so NexusAuth can identify the browser session at logout.
-	IDToken string `json:"id_token,omitempty"`
+	IDToken          string `json:"id_token,omitempty"`
+	RefreshToken     string `json:"refresh_token,omitempty"`
+	SessionExpiresAt int64  `json:"session_expires_at,omitempty"`
+	AuthNonce        string `json:"auth_nonce,omitempty"`
 }
 
 type sessionData struct {
@@ -190,11 +193,21 @@ func (s *sessionStore) save(w http.ResponseWriter, data *sessionData) error {
 	if len(value) > maxCookieBytes {
 		return errors.New("authentication session exceeds cookie size limit")
 	}
+	maxAge := int(maxCookieAge / time.Second)
+	if data.User != nil && data.User.SessionExpiresAt != 0 {
+		remaining := int(time.Until(time.Unix(data.User.SessionExpiresAt, 0)) / time.Second)
+		if remaining <= 0 {
+			return ErrUnauthenticated
+		}
+		if remaining < maxAge {
+			maxAge = remaining
+		}
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     s.name,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(maxCookieAge / time.Second),
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   s.secure,
 		SameSite: http.SameSiteLaxMode,

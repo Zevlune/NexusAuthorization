@@ -342,6 +342,35 @@ func (s *RBACV1Service) Authorize(ctx context.Context, scope string, input map[s
 	if repository, ok := s.repository.(SubjectAPIRepository); ok && !s.databaseAuthorization {
 		return s.authorizeSubjectAPI(ctx, scope, input, repository)
 	}
+	if repository, ok := s.repository.(APIRequestPolicyRepository); ok && s.databaseAuthorization {
+		app := normalizeRBACScope(scope)
+		service = strings.TrimSpace(service)
+		subject = strings.TrimSpace(subject)
+		domain, _ := input["domain"].(string)
+		domain = NormalizeRBACDomain(domain)
+		policy, err := repository.GetAPIRequestPolicy(ctx, app, subject, domain, service)
+		if err != nil {
+			return RBACDecision{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return RBACDecision{}, err
+		}
+		var compiled *compiledRBACPolicy
+		if s.policies == nil || policy.ApplicationID == uuid.Nil || policy.Token == "" {
+			compiled = compileRBACPolicy(policy)
+		} else if cached := s.policies.get(currentPolicyKey(policy)); cached != nil {
+			compiled = cached
+		} else {
+			compiled, err = s.policies.resolve(ctx, policy, func(context.Context) (CurrentPolicy, error) {
+				return policy, nil
+			})
+			if err != nil {
+				return RBACDecision{}, err
+			}
+		}
+		identity := SubjectAPIIdentity{Subject: subject, Domain: domain, ServiceResource: service}
+		return compiled.Authorize(subjectAPIInput(input, identity)), nil
+	}
 	policy, err := s.activeCompiledPolicy(ctx, normalizeRBACScope(scope))
 	if err != nil {
 		return RBACDecision{}, err
