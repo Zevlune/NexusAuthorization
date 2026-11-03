@@ -275,16 +275,10 @@ func compileSubjectAPIPolicy(policy SubjectAPIPolicy) *compiledRBACPolicy {
 		routeScope := policyRouteScope{policy.ServiceResource, policyMethod(endpoint.Method)}
 		routes := compiled.routes[routeScope]
 		if routes == nil {
-			routes = &policyRoutes{exact: make(map[string]routeMatch)}
+			routes = newPolicyRoutes()
 			compiled.routes[routeScope] = routes
 		}
-		score := 0
-		for _, part := range strings.Split(endpoint.PathTemplate, "/") {
-			if !(strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}")) {
-				score++
-			}
-		}
-		routes.add(endpoint.PathTemplate, routeMatch{endpoint: ordinal, score: score, found: true}, compiled.endpoints)
+		routes.addTemplate(endpoint.PathTemplate, ordinal, compiled.endpoints)
 	}
 	compiled.principals[policySubject{policy.Subject, NormalizeRBACDomain(policy.Domain)}] = &policyPrincipal{
 		roles: aggregate,

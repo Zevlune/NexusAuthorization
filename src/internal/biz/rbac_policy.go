@@ -18,11 +18,15 @@ type compiledRBACPolicy struct {
 // fields keeps method names from colliding with service or path text.
 type policyRouteScope struct{ service, method string }
 
-// policyMethod canonicalizes HTTP methods for route lookup. HTTP methods are
-// normally ASCII, but the full SimpleFold class is folded on the unusual
-// Unicode path to preserve case-insensitive behavior.
-func policyMethod(method string) string {
-	for _, char := range method {
+// policyMethod canonicalizes HTTP methods for route lookup.
+func policyMethod(method string) string { return foldPolicyText(method) }
+
+// foldPolicyText maps every rune to the smallest member of its Unicode simple
+// case-folding orbit. ASCII text is upper-cased. The fold is at least as broad
+// as .NET OrdinalIgnoreCase, so two strings an ASP.NET host treats as the same
+// route literal always fold to the same text here.
+func foldPolicyText(text string) string {
+	for _, char := range text {
 		if char > unicode.MaxASCII {
 			return strings.Map(func(char rune) rune {
 				minimum := char
@@ -32,10 +36,10 @@ func policyMethod(method string) string {
 					}
 				}
 				return minimum
-			}, method)
+			}, text)
 		}
 	}
-	return strings.ToUpper(method)
+	return strings.ToUpper(text)
 }
 
 // policySubject is the normalized identity key for a principal. Domain is
@@ -114,6 +118,67 @@ func addRole(words map[uint32]uint64, ordinal uint32) {
 type policyRoutes struct {
 	exact   map[string]routeMatch
 	dynamic map[int]*policyRouteNode // parameter tries partitioned by path depth
+	// folded indexes the same templates with case-folded literals. Hosts differ:
+	// ASP.NET Core routes literals case-insensitively, Go's ServeMux does not.
+	// A decision is only made when both views select the same endpoint.
+	folded *policyRoutes
+}
+
+// newPolicyRoutes creates the case-sensitive route set and its folded twin.
+func newPolicyRoutes() *policyRoutes {
+	return &policyRoutes{
+		exact:  make(map[string]routeMatch),
+		folded: &policyRoutes{exact: make(map[string]routeMatch)},
+	}
+}
+
+// routeSpecificity counts the literal segments of a normalized template. It
+// uses the same normalization and placeholder rule as the route index, so a
+// trailing slash or an empty "{}" segment cannot change a route's priority.
+func routeSpecificity(template string) int {
+	score := 0
+	for _, part := range strings.Split(normalizedPolicyPath(template), "/") {
+		if !parameterSegment(part) {
+			score++
+		}
+	}
+	return score
+}
+
+// addTemplate indexes a template in both the case-sensitive and folded sets.
+func (routes *policyRoutes) addTemplate(template string, endpoint int, endpoints []policyEndpoint) {
+	match := routeMatch{endpoint: endpoint, score: routeSpecificity(template), found: true}
+	routes.add(template, match, endpoints)
+	if routes.folded != nil {
+		routes.folded.add(foldTemplateLiterals(template), match, endpoints)
+	}
+}
+
+// foldTemplateLiterals folds literal segments and keeps placeholders intact.
+func foldTemplateLiterals(template string) string {
+	parts := strings.Split(normalizedPolicyPath(template), "/")
+	for i, part := range parts {
+		if !parameterSegment(part) {
+			parts[i] = foldPolicyText(part)
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// lookup resolves a request path. A path whose case-sensitive and
+// case-insensitive matches disagree is reported as ambiguous, because the
+// host framework may dispatch it to either endpoint.
+func (routes *policyRoutes) lookup(path string, endpoints []policyEndpoint) routeMatch {
+	match := routes.find(path, endpoints)
+	if routes.folded == nil {
+		return match
+	}
+	folded := routes.folded.find(foldPolicyText(path), endpoints)
+	if match.found != folded.found || match.ambiguous != folded.ambiguous ||
+		(match.found && endpoints[match.endpoint].id != endpoints[folded.endpoint].id) {
+		return routeMatch{found: true, ambiguous: true}
+	}
+	return match
 }
 
 // policyRouteNode is one segment node of a parameter-path trie. maxScore is the
@@ -271,16 +336,10 @@ func compileRBACPolicy(policy CurrentPolicy) *compiledRBACPolicy {
 		scope := policyRouteScope{service, policyMethod(policyString(e["method"]))}
 		routes := p.routes[scope]
 		if routes == nil {
-			routes = &policyRoutes{exact: make(map[string]routeMatch)}
+			routes = newPolicyRoutes()
 			p.routes[scope] = routes
 		}
-		score := 0
-		for _, part := range strings.Split(template, "/") {
-			if !(strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}")) {
-				score++
-			}
-		}
-		routes.add(template, routeMatch{endpoint: ordinal, score: score, found: true}, p.endpoints)
+		routes.addTemplate(template, ordinal, p.endpoints)
 	}
 
 	type indexedRole struct {
@@ -372,7 +431,7 @@ func (p *compiledRBACPolicy) Authorize(input map[string]any) RBACDecision {
 		d.Reason = "endpoint_not_found"
 		return d
 	}
-	match := routes.find(path, p.endpoints)
+	match := routes.lookup(path, p.endpoints)
 	if match.ambiguous {
 		d.Reason = "ambiguous_endpoint"
 		return d
