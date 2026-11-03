@@ -80,6 +80,16 @@ func (c *PolicyCache) LoadSubjectAPIs(ctx context.Context, identity biz.SubjectA
 
 	requestCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
+	storedBytes, err := c.client.StrLen(requestCtx, SubjectAPIKey(c.prefix, identity)).Result()
+	if errors.Is(err, redis.Nil) {
+		return biz.SubjectAPIPolicy{}, biz.ErrSubjectAPIRecordNotFound
+	}
+	if err != nil {
+		return biz.SubjectAPIPolicy{}, err
+	}
+	if storedBytes > maxSubjectAPIBytes {
+		return biz.SubjectAPIPolicy{}, fmt.Errorf("oversized cached subject api payload")
+	}
 	raw, err := c.client.Get(requestCtx, SubjectAPIKey(c.prefix, identity)).Bytes()
 	if errors.Is(err, redis.Nil) {
 		return biz.SubjectAPIPolicy{}, biz.ErrSubjectAPIRecordNotFound
