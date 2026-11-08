@@ -33,33 +33,11 @@ public static class SubjectApiPolicyMatcher
         if (method is null || path is null)
             return Deny("denied");
 
-        SubjectApiEndpoint? best = null;
-        var bestScore = -1;
-        var ambiguous = false;
-
-        foreach (var endpoint in policy.Catalog ?? [])
-        {
-            var candidate = endpoint!;
-            if (!string.Equals(candidate.Method, method, StringComparison.OrdinalIgnoreCase) ||
-                !TemplateMatches(candidate.PathTemplate, path))
-            {
-                continue;
-            }
-
-            var score = LiteralSegmentCount(candidate.PathTemplate);
-            if (best is null || score > bestScore)
-            {
-                best = candidate;
-                bestScore = score;
-                ambiguous = false;
-            }
-            else if (score == bestScore && candidate.Id != best.Id)
-            {
-                ambiguous = true;
-            }
-        }
-
-        if (ambiguous)
+        // ASP.NET Core 按不区分大小写匹配路由字面量。区分与不区分大小写两种匹配
+        // 选中不同端点时直接拒绝，避免 /EXPORT 这类请求借宽模板访问未授权的具体路由。
+        var (best, ambiguous) = SelectEndpoint(policy.Catalog ?? [], method, path, StringComparison.Ordinal);
+        var (folded, foldedAmbiguous) = SelectEndpoint(policy.Catalog ?? [], method, path, StringComparison.OrdinalIgnoreCase);
+        if (ambiguous || foldedAmbiguous || best?.Id != folded?.Id)
             return Deny("ambiguous_endpoint");
         if (best is null)
             return Deny("endpoint_not_found");
@@ -91,7 +69,39 @@ public static class SubjectApiPolicyMatcher
         return true;
     }
 
-    private static bool TemplateMatches(string template, string path)
+    private static (SubjectApiEndpoint? Best, bool Ambiguous) SelectEndpoint(
+        IReadOnlyList<SubjectApiEndpoint?> catalog, string method, string path, StringComparison literalComparison)
+    {
+        SubjectApiEndpoint? best = null;
+        var bestScore = -1;
+        var ambiguous = false;
+
+        foreach (var endpoint in catalog)
+        {
+            var candidate = endpoint!;
+            if (!string.Equals(candidate.Method, method, StringComparison.OrdinalIgnoreCase) ||
+                !TemplateMatches(candidate.PathTemplate, path, literalComparison))
+            {
+                continue;
+            }
+
+            var score = LiteralSegmentCount(candidate.PathTemplate);
+            if (best is null || score > bestScore)
+            {
+                best = candidate;
+                bestScore = score;
+                ambiguous = false;
+            }
+            else if (score == bestScore && candidate.Id != best.Id)
+            {
+                ambiguous = true;
+            }
+        }
+
+        return (best, ambiguous);
+    }
+
+    private static bool TemplateMatches(string template, string path, StringComparison literalComparison)
     {
         var templateParts = NormalizePath(template).Split('/');
         var pathParts = NormalizePath(path).Split('/');
@@ -106,7 +116,7 @@ public static class SubjectApiPolicyMatcher
                 if (pathParts[index].Length == 0)
                     return false;
             }
-            else if (!string.Equals(templatePart, pathParts[index], StringComparison.Ordinal))
+            else if (!string.Equals(templatePart, pathParts[index], literalComparison))
             {
                 return false;
             }
@@ -115,12 +125,13 @@ public static class SubjectApiPolicyMatcher
         return true;
     }
 
+    // 与匹配使用同一套规范化和占位符规则，尾部斜杠或 "{}" 不会改变优先级。
     private static int LiteralSegmentCount(string template)
     {
         var score = 0;
-        foreach (var part in template.Split('/'))
+        foreach (var part in NormalizePath(template).Split('/'))
         {
-            if (!(part.StartsWith('{') && part.EndsWith('}')))
+            if (!IsParameter(part))
                 score++;
         }
 

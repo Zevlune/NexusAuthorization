@@ -431,7 +431,9 @@ nexusauthorization:<QueryEscape(trim(LUCKENV))>:<QueryEscape(trim(ServiceResourc
 策略中的 `catalog` 用于定位当前请求，`apis` 保存该 subject 已被授予的 endpoint
 ID。SDK 先查找方法名与请求方法相同（不区分大小写）且路径模板匹配的 endpoint；
 路径模板按 `/` 分段匹配，`{name}` 段可以匹配一个非空路径段。若多个模板同时匹配，
-优先使用字面量段更多的模板；相同优先级命中不同 endpoint 时按歧义拒绝。
+优先使用字面量段更多的模板；相同优先级命中不同 endpoint 时按歧义拒绝。字面量段分别按 `Ordinal` 与 `OrdinalIgnoreCase` 各匹配一次，结果不同（例如
+`/api/products/EXPORT` 在区分大小写时命中 `{id}`、不区分时命中 `export`）也按歧义拒绝，
+因为 ASP.NET Core 路由不区分大小写。
 
 找到 endpoint 后，仅当 `service_active=true`、endpoint 的 `enabled=true`，并且
 该 endpoint ID 出现在 `apis` 中时才允许。服务未启用、endpoint 未启用、路径找不到

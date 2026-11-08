@@ -283,11 +283,36 @@ func (c *Client) Require(appKey, serviceResource string, resolve IdentityResolve
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
-		decision, err := c.Check(ctx, Request{AppKey: appKey, ServiceResource: serviceResource, Subject: identity.Subject, Domain: identity.Domain, Method: r.Method, Path: r.URL.Path})
+		decision, err := c.Check(ctx, Request{AppKey: appKey, ServiceResource: serviceResource, Subject: identity.Subject, Domain: identity.Domain, Method: r.Method, Path: authorizationPath(r.URL)})
 		if err != nil || !decision.Allowed {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// segmentEscaper keeps characters that would change the segment structure
+// escaped after a segment is decoded.
+var segmentEscaper = strings.NewReplacer("%", "%25", "/", "%2F")
+
+// authorizationPath returns the request path with the same segments the Go
+// ServeMux routes on. r.URL.Path decodes %2F into a separator, so
+// /orders/1%2Fitems would be checked as /orders/1/items while the mux
+// dispatches /orders/{id}. Each escaped segment is decoded on its own and an
+// encoded slash or percent stays escaped. An undecodable path returns "" so
+// Check fails closed.
+func authorizationPath(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	parts := strings.Split(u.EscapedPath(), "/")
+	for i, part := range parts {
+		decoded, err := url.PathUnescape(part)
+		if err != nil {
+			return ""
+		}
+		parts[i] = segmentEscaper.Replace(decoded)
+	}
+	return strings.Join(parts, "/")
 }

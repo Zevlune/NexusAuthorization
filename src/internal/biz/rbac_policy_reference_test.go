@@ -20,30 +20,12 @@ func evaluateCurrentPolicyLinear(state CurrentPolicy, input map[string]any) RBAC
 	}
 	endpoints, _ := snap["endpoints"].([]any)
 
-	var endpointID string
-	bestSpecificity := -1
-	endpointEnabled := false
-	ambiguous := false
-	for _, raw := range endpoints {
-		e, _ := raw.(map[string]any)
-		template, _ := e["path_template"].(string)
-		if e["service_resource"] != service || !strings.EqualFold(fmt.Sprint(e["method"]), method) || !matchesEndpointPath(template, path) {
-			continue
-		}
-		specificity := 0
-		for _, segment := range strings.Split(template, "/") {
-			if !(strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}")) {
-				specificity++
-			}
-		}
-		if specificity > bestSpecificity {
-			bestSpecificity = specificity
-			endpointID = fmt.Sprint(e["id"])
-			endpointEnabled, _ = e["enabled"].(bool)
-			ambiguous = false
-		} else if specificity == bestSpecificity && endpointID != fmt.Sprint(e["id"]) {
-			ambiguous = true
-		}
+	endpointID, endpointEnabled, ambiguous := linearEndpointMatch(endpoints, service, method, path, false)
+	foldedID, _, foldedAmbiguous := linearEndpointMatch(endpoints, service, method, path, true)
+	if foldedID != endpointID || foldedAmbiguous != ambiguous {
+		// Hosts may route literals with or without case sensitivity; a request
+		// whose two interpretations differ is denied as ambiguous.
+		ambiguous = true
 	}
 	if ambiguous {
 		d.Reason = "ambiguous_endpoint"
@@ -90,4 +72,39 @@ func evaluateCurrentPolicyLinear(state CurrentPolicy, input map[string]any) RBAC
 	d.Allowed = true
 	d.Reason = "allowed"
 	return d
+}
+
+// linearEndpointMatch is the slow reference route selection. fold compares
+// literal segments after Unicode simple case folding.
+func linearEndpointMatch(endpoints []any, service, method, path string, fold bool) (string, bool, bool) {
+	var endpointID string
+	bestSpecificity := -1
+	endpointEnabled := false
+	ambiguous := false
+	for _, raw := range endpoints {
+		e, _ := raw.(map[string]any)
+		template, _ := e["path_template"].(string)
+		candidatePath := path
+		if fold {
+			template, candidatePath = foldTemplateLiterals(template), foldPolicyText(path)
+		}
+		if e["service_resource"] != service || !strings.EqualFold(fmt.Sprint(e["method"]), method) || !matchesEndpointPath(template, candidatePath) {
+			continue
+		}
+		specificity := 0
+		for _, segment := range strings.Split(strings.Trim(strings.TrimSpace(template), "/"), "/") {
+			if !(len(segment) > 2 && strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}")) {
+				specificity++
+			}
+		}
+		if specificity > bestSpecificity {
+			bestSpecificity = specificity
+			endpointID = fmt.Sprint(e["id"])
+			endpointEnabled, _ = e["enabled"].(bool)
+			ambiguous = false
+		} else if specificity == bestSpecificity && endpointID != fmt.Sprint(e["id"]) {
+			ambiguous = true
+		}
+	}
+	return endpointID, endpointEnabled, ambiguous
 }
